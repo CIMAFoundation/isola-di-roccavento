@@ -111,6 +111,32 @@ impl Graphics {
         ..Graphics::ALTA
     };
 
+    /// Native machines short of memory (`memory`): «bassa» on a scene built
+    /// lighter, near the browser's: terrain at every 2nd sample (road mask
+    /// 4 m), a tenth of the plants, no near grass. Measured 2026-10-29 at
+    /// 1280x800, T+90: resident 2.5 GB «alta», 1.7 GB «bassa», 0.96 GB this.
+    pub const RISPARMIO: Graphics = Graphics {
+        vegetation: 0.1, terrain_stride: 2, cover_m: 0.0,
+        ..Graphics::BASSA
+    };
+
+    /// What is built at launch from `RISPARMIO`, the rest kept.
+    pub fn lighter(self) -> Graphics {
+        let r = Graphics::RISPARMIO;
+        Graphics {
+            vegetation: self.vegetation.min(r.vegetation),
+            terrain_stride: self.terrain_stride.max(r.terrain_stride),
+            cover_m: self.cover_m.min(r.cover_m),
+            ..self
+        }
+    }
+
+    /// The same level with what was built at launch kept (it cannot change
+    /// until the next launch, and a new town rebuilds the scene from it).
+    pub fn built_as(self, now: &Graphics) -> Graphics {
+        Graphics { vegetation: now.vegetation, terrain_stride: now.terrain_stride, cover_m: now.cover_m, ..self }
+    }
+
     /// Browser budget, also on desktop: no post-processing or shadow passes.
     pub const WEB: Graphics = Graphics {
         shadows: false, shadow_map: 256, cascades: 1,
@@ -169,6 +195,13 @@ impl Graphics {
     /// level was chosen by hand (`KIOSK_QUALITY`, `KIOSK_GFX`, a level saved from
     /// the operator bar, `?q=` in the browser), a snapshot is being taken, or
     /// `KIOSK_ADAPT=0`.
+    /// A level was chosen by hand (the environment or F2), not left to `adaptive`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn chosen() -> bool {
+        ["KIOSK_QUALITY", "KIOSK_GFX", "KIOSK_VEG_DENSITY"].iter().any(|k| std::env::var_os(k).is_some())
+            || !matches!(saved().as_deref(), None | Some("auto"))
+    }
+
     pub fn auto_wanted() -> bool {
         if cfg!(target_arch = "wasm32") {
             return !web_forced();
@@ -342,6 +375,7 @@ fn saved() -> Option<String> {
 /// Remember the level for the next launch. A failure is reported, never fatal.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save(level: &str) -> Result<(), String> {
+    crate::memory::forget();
     let p = saved_path();
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("grafica: {e}"))?;
@@ -379,5 +413,15 @@ mod tests {
         assert_eq!(g.terrain_stride, 1);
         g.apply("+terrain_shadows");
         assert!(g.terrain_shadows);
+    }
+
+    #[test]
+    fn the_lighter_scene_changes_only_what_is_built_at_launch() {
+        assert_eq!(Graphics::RISPARMIO.level(), Some("bassa"));
+        let l = Graphics::ALTA.lighter();
+        assert_eq!(l.level(), Some("alta"));
+        assert_eq!((l.terrain_stride, l.vegetation, l.cover_m), (2, 0.1, 0.0));
+        assert_eq!(Graphics::MEDIA.built_as(&l).level(), Some("media"));
+        assert_eq!(Graphics::MEDIA.built_as(&l).terrain_stride, 2);
     }
 }

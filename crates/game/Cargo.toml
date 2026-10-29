@@ -30,6 +30,8 @@ bevy_egui = { version = "0.43.1", default-features = false, features = ["open_ur
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bevy = { version = "0.20", default-features = true, features = ["track_location"] }
 libc = "0.2"
+# total RAM at launch (`memory`); already in the tree through bevy_diagnostic
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 sys-locale = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

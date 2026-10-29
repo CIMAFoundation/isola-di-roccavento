@@ -1495,7 +1495,7 @@ fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Gra
                     .on_hover_text(rocca::tr!("Il livello segue la velocità di questo computer: scende se i frame sono lenti, risale se c'è margine"))
                     .clicked() && auto.is_none()
                 {
-                    let a = crate::adaptive::Adaptive::new(Graphics { vegetation: gfx.vegetation, ..Graphics::ALTA });
+                    let a = crate::adaptive::Adaptive::new(Graphics::ALTA.built_as(&gfx));
                     *gfx = a.initial();
                     commands.insert_resource(a);
                     #[cfg(not(target_arch = "wasm32"))]
@@ -1507,7 +1507,7 @@ fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Gra
                 for (name, label, preset) in [("alta", "Alta", Graphics::ALTA), ("media", "Media", Graphics::MEDIA), ("bassa", "Bassa", Graphics::BASSA)] {
                     if ui.selectable_label(now_level == Some(name), label).clicked() && now_level != Some(name) {
                         // a level brings its own antialiasing: the choice made apart is dropped
-                        *gfx = Graphics { vegetation: gfx.vegetation, ..preset };
+                        *gfx = preset.built_as(&gfx);
                         #[cfg(not(target_arch = "wasm32"))]
                         crate::quality::forget_aa();
                         if let Err(e) = crate::quality::save(name) {

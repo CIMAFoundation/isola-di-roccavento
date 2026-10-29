@@ -20,12 +20,16 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use scenario::{Pos, Scenario};
 
-/// Only the visual mask is coarser on phones: the simulation and road network
-/// retain their full data. 8 m takes a quarter of the web desktop mask's memory.
+/// Only the visual mask is coarser on phones and on native machines short of
+/// memory (a coarser terrain, `quality::Graphics::RISPARMIO`): the simulation
+/// and road network retain their full data. Each doubling takes a quarter of
+/// the texels (native 2 m: 85 MB with the mipmaps).
 fn resolution(gfx: &crate::quality::Graphics) -> f32 {
-    if !cfg!(target_arch = "wasm32") { 2.0 }
-    else if gfx.terrain_stride >= 4 { 8.0 }
-    else { 4.0 }
+    match (cfg!(target_arch = "wasm32"), gfx.terrain_stride) {
+        (false, 1) => 2.0,
+        (_, s) if s >= 4 => 8.0,
+        _ => 4.0,
+    }
 }
 /// Half the encoded range, metres. Must match `RANGE_M` in the shader.
 const RANGE_M: f32 = 12.0;

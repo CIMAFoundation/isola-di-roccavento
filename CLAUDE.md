@@ -73,6 +73,7 @@ Variabili utili del gioco (prefisso storico `KIOSK_`):
 - `KIOSK_WINDOWED=1 KIOSK_SIZE=1600x1000 KIOSK_SCALE=1`: finestra e dimensioni.
 - `KIOSK_QUALITY=alta|media|bassa`, `KIOSK_GFX`: livello grafico.
 - `KIOSK_FPS=1`: misura degli FPS.
+- `KIOSK_MEMORY=risparmio|normale`: forza o spegne la scena leggera per macchine con poca memoria (`memory.rs`; da sola scatta con RAM ≤ 8 GiB o dopo un avvio non terminato).
 - `KIOSK_SCORES=<file>`: classifica in un altro file, per le prove (non toccare `~/.rocca_ventosa/`).
 - `ROCCA_SCENARIO=<id>`: un altro territorio.
 - `ROCCA_LANG=<codice>`: la lingua (`de`, `en`, …, `tlh` è il klingon); sul web `?lang=`. Ogni testo nuovo va in `tr!("…")` e `python3 tools/i18n/keys.py --check` deve passare (`docs/01-GIOCO.md` §7).

@@ -3005,6 +3005,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "sysinfo",
  "uuid",
  "wasm-bindgen",
  "web-sys",
