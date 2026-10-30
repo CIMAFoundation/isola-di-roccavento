@@ -6,19 +6,14 @@ use bevy_egui::egui::{self, pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Str
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
-    Fire,
     House,
     Family,
     Engine,
-    Crew,
-    Shield,
-    Bell,
     Exit,
     Cross,
     Up,
     Pause,
     Play,
-    Fast,
     Alert,
     Check,
     Clock,
@@ -41,10 +36,6 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, col: Color32) {
     let w = (s * 0.11).max(2.0);
     let st = Stroke::new(w, col);
     match icon {
-        Icon::Fire => {
-            poly(p, r, &[(0.5, 0.02), (0.78, 0.38), (0.86, 0.66), (0.68, 0.95), (0.32, 0.95), (0.14, 0.66), (0.22, 0.38)], col);
-            poly(p, r, &[(0.5, 0.42), (0.66, 0.66), (0.6, 0.9), (0.4, 0.9), (0.34, 0.66)], Color32::from_rgb(255, 225, 120));
-        }
         Icon::House => {
             poly(p, r, &[(0.5, 0.08), (0.95, 0.48), (0.05, 0.48)], col);
             p.rect_filled(Rect::from_min_max(at(r, 0.17, 0.46), at(r, 0.83, 0.92)), 1.0, col);
@@ -63,17 +54,6 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, col: Color32) {
                 p.circle_filled(at(r, x, 0.8), s * 0.11, col);
                 p.circle_filled(at(r, x, 0.8), s * 0.05, Color32::from_gray(20));
             }
-        }
-        Icon::Crew => {
-            p.circle_filled(at(r, 0.5, 0.22), s * 0.15, col);
-            p.rect_filled(Rect::from_min_max(at(r, 0.3, 0.4), at(r, 0.7, 0.95)), s * 0.1, col);
-        }
-        Icon::Shield => {
-            poly(p, r, &[(0.15, 0.1), (0.85, 0.1), (0.85, 0.5), (0.5, 0.95), (0.15, 0.5)], col);
-        }
-        Icon::Bell => {
-            poly(p, r, &[(0.5, 0.08), (0.72, 0.2), (0.78, 0.68), (0.9, 0.78), (0.1, 0.78), (0.22, 0.68), (0.28, 0.2)], col);
-            p.circle_filled(at(r, 0.5, 0.88), s * 0.09, col);
         }
         Icon::Exit => {
             p.rect_stroke(Rect::from_min_max(at(r, 0.08, 0.1), at(r, 0.5, 0.9)), 1.0, st, egui::StrokeKind::Middle);
@@ -96,10 +76,6 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, col: Color32) {
         }
         Icon::Play => {
             poly(p, r, &[(0.25, 0.15), (0.85, 0.5), (0.25, 0.85)], col);
-        }
-        Icon::Fast => {
-            poly(p, r, &[(0.08, 0.2), (0.5, 0.5), (0.08, 0.8)], col);
-            poly(p, r, &[(0.5, 0.2), (0.92, 0.5), (0.5, 0.8)], col);
         }
         Icon::Alert => {
             poly(p, r, &[(0.5, 0.05), (0.97, 0.92), (0.03, 0.92)], col);
@@ -129,34 +105,6 @@ pub fn show(ui: &mut egui::Ui, icon: Icon, size: f32, col: Color32) -> egui::Res
     resp
 }
 
-/// A touch-sized button: an icon and an optional short word. `on` fills it
-/// with `colour`; off it is dark with a `colour` outline.
-pub fn button(ui: &mut egui::Ui, icon: Icon, text: &str, on: bool, colour: Color32, enabled: bool) -> egui::Response {
-    const H: f32 = 46.0;
-    let fg = if on { Color32::BLACK } else { Color32::WHITE };
-    let galley = (!text.is_empty()).then(|| ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(18.0), fg));
-    let w = H + galley.as_ref().map_or(0.0, |g| g.size().x + 14.0);
-    let (r, resp) = ui.allocate_exact_size(vec2(w, H), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    let hot = resp.hovered() && enabled;
-    let fill = if on { colour } else if hot { Color32::from_gray(70) } else { Color32::from_gray(46) };
-    let p = ui.painter();
-    p.rect_filled(r, 9.0, fill);
-    p.rect_stroke(r, 9.0, Stroke::new(2.0, colour), egui::StrokeKind::Middle);
-    if hot {
-        p.rect_stroke(r.expand(2.0), 10.0, Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Middle);
-    }
-    let icon_rect = Rect::from_min_size(r.min, vec2(H, H)).shrink(11.0);
-    draw(p, icon_rect, icon, if on { Color32::BLACK } else { colour });
-    if let Some(g) = galley {
-        p.galley(pos2(r.left() + H - 4.0, r.center().y - g.size().y / 2.0), g, fg);
-    }
-    if !enabled {
-        p.rect_filled(r, 9.0, Color32::from_black_alpha(120));
-    }
-    crate::playtest::control(text, &resp, enabled);
-    pointing(resp)
-}
-
 /// A hand over what can be pressed (playtest colleghi: the arrow over the
 /// level buttons did not say they were buttons). egui's own buttons get it
 /// from `Visuals::interact_cursor`; drawn ones call this.
@@ -166,52 +114,4 @@ pub fn pointing(resp: egui::Response) -> egui::Response {
     } else {
         resp
     }
-}
-
-/// An order on a card: the icon above, the word below, a fixed width so
-/// three sit on one row (playtest colleghi).
-pub fn tall_button(ui: &mut egui::Ui, icon: Icon, text: &str, on: bool, colour: Color32, enabled: bool, width: f32) -> egui::Response {
-    const H: f32 = 70.0;
-    let (r, resp) = ui.allocate_exact_size(vec2(width, H), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    let hot = resp.hovered() && enabled;
-    let fill = if on { colour } else if hot { Color32::from_gray(70) } else { Color32::from_gray(46) };
-    // switched off and not given: grey all over, not the colour of a live
-    // button (playtest: «Evacua» looked pressable before the mayor's word)
-    let dead = !enabled && !on;
-    let (colour, fill) = if dead { (Color32::from_gray(85), Color32::from_gray(34)) } else { (colour, fill) };
-    let fg = if on { Color32::BLACK } else if dead { Color32::from_gray(120) } else { Color32::WHITE };
-    let p = ui.painter();
-    p.rect_filled(r, 9.0, fill);
-    p.rect_stroke(r, 9.0, Stroke::new(2.0, colour), egui::StrokeKind::Middle);
-    if hot {
-        p.rect_stroke(r.expand(2.0), 10.0, Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Middle);
-    }
-    draw(p, Rect::from_center_size(pos2(r.center().x, r.top() + 22.0), vec2(28.0, 28.0)), icon, if on { Color32::BLACK } else { colour });
-    let g = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(17.0), fg);
-    p.galley(pos2(r.center().x - g.size().x / 2.0, r.bottom() - 10.0 - g.size().y), g, fg);
-    if !enabled && on {
-        p.rect_filled(r, 9.0, Color32::from_black_alpha(120));
-    }
-    crate::playtest::control(text, &resp, enabled);
-    pointing(resp)
-}
-
-/// A bar split into coloured parts, proportional to the counts.
-pub fn stack_bar(ui: &mut egui::Ui, width: f32, parts: &[(usize, Color32)]) {
-    let (r, _) = ui.allocate_exact_size(vec2(width, 14.0), egui::Sense::hover());
-    let total: usize = parts.iter().map(|(n, _)| n).sum();
-    let p = ui.painter();
-    p.rect_filled(r, 4.0, Color32::from_gray(50));
-    if total == 0 {
-        return;
-    }
-    let mut x = r.left();
-    for &(n, c) in parts {
-        let w = r.width() * n as f32 / total as f32;
-        if w > 0.0 {
-            p.rect_filled(Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height())), 0.0, c);
-        }
-        x += w;
-    }
-    p.rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_gray(90)), egui::StrokeKind::Middle);
 }

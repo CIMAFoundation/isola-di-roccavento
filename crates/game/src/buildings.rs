@@ -111,10 +111,6 @@ struct Chunk {
 #[derive(Resource)]
 pub struct Buildings {
     chunks: Vec<Chunk>,
-    /// Household id -> (chunk index, structure index), for the hover pass
-    /// and the click-select pipeline: both need to go from "which house" to
-    /// "which few thousand vertices" without a linear scan.
-    by_household: HashMap<u32, (usize, usize)>,
     /// Sim generation `damage` last ran for (`u64::MAX` = none, after a restart).
     damage_gen: u64,
 }
@@ -165,7 +161,6 @@ pub fn spawn(
     }
 
     let mut chunks = Vec::new();
-    let mut by_household: HashMap<u32, (usize, usize)> = HashMap::new();
     let (mut count, mut tris) = (0usize, 0usize);
 
     for bucket in buckets {
@@ -183,10 +178,6 @@ pub fn spawn(
                 continue;
             };
             let households = residents.get(&b.id).cloned().unwrap_or_default();
-            let struct_idx = structures.len();
-            for &h in &households {
-                by_household.insert(h, (chunks.len(), struct_idx));
-            }
             structures.push(Structure {
                 households,
                 pos: Pos {
@@ -227,7 +218,6 @@ pub fn spawn(
     );
     commands.insert_resource(Buildings {
         chunks,
-        by_household,
         damage_gen: u64::MAX,
     });
 }

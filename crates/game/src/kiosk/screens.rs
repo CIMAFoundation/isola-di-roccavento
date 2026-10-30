@@ -17,8 +17,6 @@ use scenario::Pos;
 use crate::sim::{Sim, SimRestarted};
 
 const INK: Color32 = Color32::from_rgb(18, 20, 24);
-/// Widest the volunteer's text gets.
-const TALK_W: f32 = 560.0;
 
 /// The dim behind a full-screen card.
 fn backdrop(ctx: &egui::Context, id: &str, alpha: u8) {

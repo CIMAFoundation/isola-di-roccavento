@@ -993,25 +993,6 @@ impl Builder {
         i
     }
 
-    fn boulder(&mut self, base: Vec3, radius: f32, aspect: f32, yaw: f32) {
-        let start = self.positions.len() as u32;
-        for level in 0..2 {
-            for i in 0..6 {
-                let a = yaw + i as f32 * std::f32::consts::TAU / 6.0;
-                let r = radius * if level == 0 { 1.0 } else { 0.65 + 0.12 * a.sin() };
-                let h = if level == 0 { 0.0 } else { radius * aspect * (0.75 + 0.15 * a.cos()) };
-                self.vertex(base + Vec3::new(a.cos()*r, h, a.sin()*r),
-                    if level == 0 { [0.39, 0.38, 0.33] } else { [0.64, 0.63, 0.56] });
-            }
-        }
-        let cap = self.vertex(base + Vec3::Y * radius * aspect, [0.70, 0.68, 0.61]);
-        for i in 0..6u32 {
-            let a = start+i;
-            let b = start+(i+1)%6;
-            self.indices.extend_from_slice(&[a, a+6, b, b, a+6, b+6, cap, b+6, a+6]);
-        }
-    }
-
     /// Low, irregular dome for the remaining procedural grass tussocks.
     fn dome(&mut self, base: Vec3, radius: f32, height: f32, yaw: f32, color: [f32; 3]) {
         const SEGMENTS: usize = 5;
@@ -1822,8 +1803,8 @@ mod tests {
         // incremental state
         let n = plants.len();
         let (mut drawn, mut lit, mut burnt) = (vec![0u8; n], 0usize, 0usize);
-        let (mut pos, mut col, mut lpos, mut lcol) = (pos_base.clone(), base.clone(), low_pos_base.clone(), low_base.clone());
-        let (mut cpos, mut ccol) = (hidden.clone(), cbase.clone());
+        let (pos, col, lpos, lcol) = (pos_base.clone(), base.clone(), low_pos_base.clone(), low_base.clone());
+        let (cpos, ccol) = (hidden.clone(), cbase.clone());
         // reference state
         let mut st = (vec![0u8; n], Duration::ZERO, Duration::ZERO, 0usize);
         let check = |sim: &Sim, restarted: bool, st: &mut (Vec<u8>, Duration, Duration, usize), drawn: &mut Vec<u8>, lit: &mut usize, burnt: &mut usize,

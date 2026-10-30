@@ -30,8 +30,6 @@ const GREEN: Color32 = Color32::from_rgb(110, 230, 150);
 /// The evacuation's colour, the same as its route on the map (`marks::EVAC`).
 const EVAC: Color32 = Color32::from_rgb((super::marks::EVAC[0] * 255.0) as u8, (super::marks::EVAC[1] * 255.0) as u8, (super::marks::EVAC[2] * 255.0) as u8);
 pub(super) const GREY: Color32 = Color32::from_rgb(205, 208, 212);
-/// The AIB teams' yellow-green.
-pub const AIB: Color32 = Color32::from_rgb(200, 215, 60);
 
 /// The colour of team `t`: the same on its badge, cone, zone and road.
 pub(super) fn team_colour(t: usize) -> Color32 {

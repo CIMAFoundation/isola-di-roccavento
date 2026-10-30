@@ -225,6 +225,8 @@ fn main() -> anyhow::Result<()> {
         app.add_systems(Update, adaptive::adapt);
     }
     let exit = app.run();
+    #[cfg(target_arch = "wasm32")]
+    let _ = exit;
     #[cfg(not(target_arch = "wasm32"))]
     memory::end();
     #[cfg(not(target_arch = "wasm32"))]
@@ -245,8 +247,7 @@ fn setup_scene(
 ) {
     terrain_mesh::build(&sim.scn, &mut commands, &mut meshes, &mut terrain, &mut images, &gfx);
     fields::build(&sim.scn, &mut commands, &mut meshes, &mut standard);
-    // Roads are drawn by the terrain shader from `ground_mask`; `roads::build`
-    // (ribbon meshes) is no longer called.
+    // Roads are drawn by the terrain shader from `ground_mask`.
 
     // The sun: `sky::update_sky` places and colours it from the game's clock
     // (11:00 to 14:00), so the shadows lengthen and the light warms as it runs.

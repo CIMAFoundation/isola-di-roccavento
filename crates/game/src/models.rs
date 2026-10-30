@@ -8,14 +8,10 @@ use std::{collections::HashMap, sync::OnceLock};
 #[derive(serde::Deserialize)]
 pub struct Model {
     pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub wood: Vec<bool>,
 }
-
-/// The archetypes scattered as vegetation, by the thousand.
-const PLANTS: [&str; 6] = ["pine", "oak", "chestnut", "bush", "olive", "cypress"];
 
 pub fn model(name: &str) -> &'static Model {
     static MODELS: OnceLock<HashMap<String, Model>> = OnceLock::new();
@@ -117,7 +113,6 @@ pub fn island_mesh(name: &str) -> Mesh {
 #[derive(serde::Deserialize)]
 pub struct Piece {
     pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
     pub colors: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
     pub debris: Vec<bool>,
@@ -210,34 +205,6 @@ pub fn unit_parts(name: &str) -> Vec<(String, Mesh, Rig)> {
     parts
 }
 
-/// A kit piece as a standalone mesh (people and vehicles, which move).
-pub fn kit_mesh(name: &str) -> Mesh {
-    let m = kit(name);
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m.positions.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, m.colors.iter().map(|c| [c[0], c[1], c[2], 1.0]).collect::<Vec<_>>());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; m.positions.len()]);
-    mesh.insert_indices(Indices::U32(m.indices.clone()));
-    mesh.compress_indices();
-    mesh
-}
-
-pub fn mesh(name: &str) -> Mesh {
-    let m = model(name);
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m.positions.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, m.colors.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; m.positions.len()]);
-    mesh.insert_indices(Indices::U32(m.indices.clone()));
-    mesh.compress_indices();
-    mesh
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,7 +284,6 @@ mod tests {
         ] {
             let m = model(name);
             assert!(!m.positions.is_empty(), "{name}");
-            assert_eq!(m.positions.len(), m.normals.len(), "{name}");
             assert_eq!(m.positions.len(), m.colors.len(), "{name}");
             assert_eq!(m.positions.len(), m.wood.len(), "{name}");
             assert_eq!(m.indices.len() % 3, 0, "{name}");

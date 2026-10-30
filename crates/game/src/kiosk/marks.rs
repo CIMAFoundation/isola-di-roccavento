@@ -27,8 +27,6 @@ const BUFFER_M: f32 = 110.0;
 /// Half the width of the district's zone: the buffer around each home, so
 /// homes closer than twice this are one patch (user, 2026-10-21).
 const DISTRICT_BUFFER_M: f32 = 80.0;
-/// The dark under-stroke of the hex lines, wider, a little lower.
-const HEX_UNDER_M: f32 = 24.0;
 const HEX_PICK_M: f32 = 16.0;
 /// Radius of the circle that marks a place, and the larger one for the tutorial's.
 const DOT_R_M: f32 = 28.0;
@@ -90,7 +88,6 @@ pub struct MarkAssets {
     want: Handle<FlatMaterial>,
     /// The hexes a team placed on a hex covers.
     area: Handle<FlatMaterial>,
-    route: Handle<FlatMaterial>,
     /// The evacuation's route, in course (flowing light) and proposed (plain).
     evac_line: Handle<RouteMaterial>,
     evac_plan: Handle<RouteMaterial>,
@@ -98,10 +95,8 @@ pub struct MarkAssets {
     tape: Handle<TapeMaterial>,
     tape_open: Handle<TapeMaterial>,
     closed_key: u64,
-    active: Handle<FlatMaterial>,
     /// Per team: zone line, the road it drives and its hex outline.
     team_zone: Vec<Handle<FlatMaterial>>,
-    team_route: Vec<Handle<FlatMaterial>>,
     team_hex: Vec<Handle<FlatMaterial>>,
     team_key: u64,
     /// What the hex grid and the orders were built for.
@@ -145,13 +140,10 @@ pub fn setup(mut commands: Commands, mut lines: ResMut<Assets<RouteMaterial>>, m
         pick: materials.add(FlatMaterial::new([1.0, 1.0, 1.0]).pulled(HEX_PULL_M + 4.0)),
         want: materials.add(FlatMaterial::new(WANT).pulled(HEX_PULL_M + 4.0)),
         area: materials.add(FlatMaterial::new(ROUTE).pulled(HEX_PULL_M + 2.0)),
-        route: materials.add(FlatMaterial::new(ROUTE)),
         evac_line: lines.add(RouteMaterial::new(EVAC, ROUTE_M * 1.0, ROUTE_M * 1.8)),
         evac_plan: lines.add(RouteMaterial::dashed(EVAC, ROUTE_M * 1.0, ROUTE_M * 1.8, 0.95, 60.0)),
         closed: materials.add(FlatMaterial::new(CLOSED).pulled(1.0)),
-        active: materials.add(FlatMaterial::new([1.0, 0.9, 0.0]).pulled(HEX_PULL_M + 6.0)),
         team_zone: TEAM_COLOURS.iter().map(|&c| materials.add(FlatMaterial::new(c).pulled(HEX_PULL_M + 3.0))).collect(),
-        team_route: TEAM_COLOURS.iter().map(|&c| materials.add(FlatMaterial::new(c).pulled(3.0))).collect(),
         team_hex: TEAM_COLOURS.iter().map(|&c| materials.add(FlatMaterial::new(c).pulled(HEX_PULL_M + 5.0))).collect(),
         tape: tapes.add(TapeMaterial::closed()),
         tape_open: tapes.add(TapeMaterial::open_part()),

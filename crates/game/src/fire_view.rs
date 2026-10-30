@@ -40,36 +40,12 @@ use crate::textures;
 pub enum FireLayer {
     #[default]
     Flames,
-    Intensity,
-    Arrival,
     Hazard,
 }
 
+#[cfg(test)]
 impl FireLayer {
-    pub const ALL: [FireLayer; 4] = [
-        FireLayer::Flames,
-        FireLayer::Intensity,
-        FireLayer::Arrival,
-        FireLayer::Hazard,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            FireLayer::Flames => "Flames",
-            FireLayer::Intensity => "Intensity",
-            FireLayer::Arrival => "Arrival",
-            FireLayer::Hazard => "Spread risk",
-        }
-    }
-
-    pub fn legend(self) -> &'static str {
-        match self {
-            FireLayer::Flames => "fresh burn · cooling · scar",
-            FireLayer::Intensity => "kW/m, log scale: 10 to 10 000",
-            FireLayer::Arrival => "10-minute isochrones since ignition",
-            FireLayer::Hazard => "probability the front takes this ground next",
-        }
-    }
+    pub const ALL: [FireLayer; 2] = [FireLayer::Flames, FireLayer::Hazard];
 }
 
 /// Overlay rebuild throttle. At high time acceleration the generation advances
@@ -508,17 +484,6 @@ fn sample_color(
                 cover * 0.95,
             ]
         }
-        FireLayer::Intensity => {
-            let c = intensity_color(field.intensity(p));
-            [c[0], c[1], c[2], cover * 0.9]
-        }
-        FireLayer::Arrival => match field.arrival(p) {
-            None => [0.0, 0.0, 0.0, 0.0],
-            Some(t) => {
-                let c = arrival_color(t, now);
-                [c[0], c[1], c[2], cover * 0.9]
-            }
-        },
         FireLayer::Hazard => {
             let scar = cover;
             let risk = bilinear_hazard(field, hazard, p) * (1.0 - scar);
@@ -550,53 +515,6 @@ fn bilinear_hazard(field: &FireField, hazard: &[f32], p: Pos) -> f32 {
     let top = v(y0, x0) * (1.0 - tx) + v(y0, x1) * tx;
     let bot = v(y1, x0) * (1.0 - tx) + v(y1, x1) * tx;
     top * (1.0 - ty) + bot * ty
-}
-
-/// Log ramp over 10 .. 10 000 kW/m: the decade is what changes the tactics.
-/// Roughly the standard suppression bands — direct attack (green/yellow),
-/// heavy equipment only (orange), nothing works (white-hot).
-pub(crate) fn intensity_color(fli: f32) -> [f32; 3] {
-    let t = ((fli.max(10.0).log10() - 1.0) / 3.0).clamp(0.0, 1.0);
-    ramp(
-        t,
-        &[
-            (0.00, [0.15, 0.35, 0.30]),
-            (0.35, [0.85, 0.85, 0.25]),
-            (0.60, [0.95, 0.50, 0.10]),
-            (0.80, [0.90, 0.15, 0.10]),
-            (1.00, [1.00, 0.95, 0.90]),
-        ],
-    )
-}
-
-/// 10-minute isochrones.
-///
-/// The spacing between bands *is* the rate of spread, so the bands have to be
-/// countable: each gets its own colour from a repeating six-step ramp, with a
-/// dark line drawn where one band meets the next. A smooth ramp over elapsed
-/// time — the obvious implementation — is unreadable, because a fire that has
-/// been running 25 minutes covers a quarter of it.
-pub(crate) fn arrival_color(arrival_s: f32, now_s: f32) -> [f32; 3] {
-    const BAND_S: f32 = 600.0;
-    let _ = now_s;
-    let bands = (arrival_s.max(0.0) / BAND_S).max(0.0);
-    let index = bands.floor() as usize;
-    let within = bands.fract();
-
-    // Six steps, then the cycle repeats: an hour of fire per revolution.
-    let palette = [
-        [0.85, 0.16, 0.10],
-        [0.96, 0.55, 0.12],
-        [0.95, 0.85, 0.25],
-        [0.45, 0.75, 0.35],
-        [0.20, 0.62, 0.70],
-        [0.35, 0.36, 0.72],
-    ];
-    let c = palette[index % palette.len()];
-
-    // Dark contour in the last tenth of each band: the isochrone itself.
-    let edge = if within > 0.9 { 0.45 } else { 1.0 };
-    [c[0] * edge, c[1] * edge, c[2] * edge]
 }
 
 pub(crate) fn hazard_color(p: f32) -> [f32; 3] {

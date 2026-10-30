@@ -49,8 +49,6 @@ const BLADES: u32 = 12;
 /// is not drawn at all.
 pub const BANDS_M: [f32; RINGS] = [50.0, 140.0, 400.0];
 const RINGS: usize = 3;
-/// Blades never grow taller than this many times their size at scale 1.
-const MAX_HEIGHT_SCALE: f32 = 2.4;
 /// Real seconds between rewrites of the fire channel of the cover map.
 const FIRE_REFRESH_S: f32 = 0.25;
 

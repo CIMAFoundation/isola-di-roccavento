@@ -115,12 +115,14 @@ impl Graphics {
     /// lighter, near the browser's: terrain at every 2nd sample (road mask
     /// 4 m), a tenth of the plants, no near grass. Measured 2026-10-29 at
     /// 1280x800, T+90: resident 2.5 GB «alta», 1.7 GB «bassa», 0.96 GB this.
+    #[cfg(not(target_arch = "wasm32"))]
     pub const RISPARMIO: Graphics = Graphics {
         vegetation: 0.1, terrain_stride: 2, cover_m: 0.0,
         ..Graphics::BASSA
     };
 
     /// What is built at launch from `RISPARMIO`, the rest kept.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn lighter(self) -> Graphics {
         let r = Graphics::RISPARMIO;
         Graphics {

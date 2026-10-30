@@ -59,6 +59,7 @@ impl Sim {
 
     /// Fast automation clock: fixed model steps, stopping exactly at a decision
     /// or the end. Does not accumulate wall time or skip simulation work.
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub fn advance_steps(&mut self, max_steps: usize) -> anyhow::Result<usize> {
         let mut count = 0;
         while count < max_steps && !self.game.is_over() {

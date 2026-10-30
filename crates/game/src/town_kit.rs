@@ -339,16 +339,6 @@ fn ground_at(scn: &Scenario, p: Pos) -> f32 {
     scn.terrain.height_at(p)
 }
 
-fn lowest(scn: &Scenario, c: Pos, w: f32, d: f32) -> f32 {
-    let mut lo = f32::MAX;
-    for dx in [-0.5f32, 0.0, 0.5] {
-        for dy in [-0.5f32, 0.0, 0.5] {
-            lo = lo.min(ground_at(scn, Pos { x: c.x + dx * w, y: c.y + dy * d }));
-        }
-    }
-    lo
-}
-
 /// A kit model at world position `c` (ground height `y`), scaled per axis and
 /// turned `yaw` radians about the vertical. `paint` recolours its white parts.
 fn place(out: &mut Builder, m: &Kit, c: Pos, y: f32, s: [f32; 3], yaw: f32, paint: Option<[f32; 3]>) {

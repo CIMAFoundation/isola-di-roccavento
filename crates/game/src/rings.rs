@@ -31,15 +31,6 @@ pub(crate) fn ring_mesh(scn: &Scenario, centre: Pos, radius_m: f32) -> Mesh {
     annulus(scn, centre, radius_m, ring_width(radius_m))
 }
 
-/// The dark band drawn just under a ring, wider than it, so the ring stands
-/// out on the green of the woods (playtest 3).
-pub(crate) fn halo_mesh(scn: &Scenario, centre: Pos, radius_m: f32) -> Mesh {
-    annulus(scn, centre, radius_m, ring_width(radius_m) * HALO)
-}
-
-/// How much wider a halo is than what it outlines.
-pub(crate) const HALO: f32 = 2.2;
-
 fn annulus(scn: &Scenario, centre: Pos, radius_m: f32, width_m: f32) -> Mesh {
     let w = width_m * 0.5;
     let (inner, outer) = ((radius_m - w).max(1.0), radius_m + w);

@@ -32,6 +32,7 @@ impl NativeAudio {
         q.horn = false;
     }
     pub fn clear(&self) { let mut q = self.queue.lock().unwrap(); q.samples.clear(); q.horn = false; }
+    #[cfg(test)]
     pub fn honk(&self) { let mut q = self.queue.lock().unwrap(); q.horn = true; q.horn_frame = 0; }
     pub fn queued_frames(&self) -> usize { self.queue.lock().unwrap().samples.len() / 2 }
     pub fn push(&self, samples: &[i16]) {

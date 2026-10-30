@@ -644,43 +644,6 @@ const WET_SHOW_S: f32 = 600.0;
 /// linger as a stain for the rest of the incident.
 const WET_SHOW_PTS: f32 = 1.5;
 
-/// One flat quad per cell, draped at each corner.
-fn cell_patches(scn: &Scenario, cells: &[Cell]) -> Mesh {
-    let h = scn.world.cellsize * 0.5;
-    let mut positions = Vec::with_capacity(cells.len() * 4);
-    let mut normals = Vec::with_capacity(cells.len() * 4);
-    let mut uvs = Vec::with_capacity(cells.len() * 4);
-    let mut indices = Vec::with_capacity(cells.len() * 6);
-
-    for (n, c) in cells.iter().enumerate() {
-        let p = scn.world.centre_of(*c);
-        let base = (n * 4) as u32;
-        for (dx, dy) in [(-h, -h), (h, -h), (-h, h), (h, h)] {
-            let q = Pos {
-                x: p.x + dx,
-                y: p.y + dy,
-            };
-            positions.push([q.x, scn.terrain.height_at(q) + RING_LIFT_M, -q.y]);
-            normals.push([0.0, 1.0, 0.0]);
-            uvs.push([(dx > 0.0) as u32 as f32, (dy > 0.0) as u32 as f32]);
-        }
-        // Wound anticlockwise seen from above. The other order faces the ground
-        // and is invisible rather than inside-out -- the trap the road ribbons
-        // and the ignition rings both hit.
-        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
-    }
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
 /// A flat ribbon of `width_m` from `a` to `b`, draped and resampled.
 ///
 /// Resampled at the render posting for the reason the roads are: a straight run
@@ -747,58 +710,6 @@ fn ribbon_pieces(scn: &Scenario, pieces: &[(Pos, Pos)], width_m: f32) -> Mesh {
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
-/// Fuselage plus wing, as one mesh: an unmistakable plan-view aircraft at any
-/// zoom, and cheaper than loading a model for eight pixels of screen.
-fn tanker_mesh() -> Mesh {
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-
-    // Two crossed slabs, drawn top and bottom so it reads from above and below.
-    let mut slab = |hx: f32, hz: f32, y: f32| {
-        for (sy, ny) in [(y, 1.0f32), (-y, -1.0f32)] {
-            let base = positions.len() as u32;
-            for (x, z) in [(-hx, -hz), (hx, -hz), (-hx, hz), (hx, hz)] {
-                positions.push([x, sy, z]);
-                normals.push([0.0, ny, 0.0]);
-                uvs.push([0.0, 0.0]);
-            }
-            if ny > 0.0 {
-                indices.extend_from_slice(&[
-                    base,
-                    base + 2,
-                    base + 1,
-                    base + 1,
-                    base + 2,
-                    base + 3,
-                ]);
-            } else {
-                indices.extend_from_slice(&[
-                    base,
-                    base + 1,
-                    base + 2,
-                    base + 1,
-                    base + 3,
-                    base + 2,
-                ]);
-            }
-        }
-    };
-    slab(0.6, 3.6, 0.25); // fuselage, nose along +Z
-    slab(3.2, 0.7, 0.20); // wing
-
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);

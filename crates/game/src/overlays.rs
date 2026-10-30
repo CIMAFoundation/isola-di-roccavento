@@ -30,15 +30,11 @@ pub struct RouteMark;
 
 #[derive(Resource)]
 pub struct OverlayAssets {
-    unlit_white: Handle<StandardMaterial>,
-    ring_orange: Handle<StandardMaterial>,
     key: (usize, usize, i64),
     /// What the order rings were built for: (warned districts, engine posts).
     order_key: (usize, usize),
     ring_cover: Handle<StandardMaterial>,
     ring_white: Handle<StandardMaterial>,
-    /// Dark, under rings and routes.
-    halo: Handle<StandardMaterial>,
     /// What the routes were built for.
     route_key: u64,
 }
@@ -70,16 +66,10 @@ pub fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let mut mat = |c: [f32; 3], a: f32, boost: f32| materials.add(glow(c, a, boost));
-    let unlit_white = mat([1.0, 1.0, 1.0], 1.0, 1.4);
-    let ring_orange = mat([1.0, 0.62, 0.1], 0.9, 1.6);
     // UI in 3D is all blues: cyan = defended area and active routes, ice = proposed plan.
     let ring_cover = mat([0.00, 0.90, 1.00], 0.9, 1.6);
     let ring_white = mat([0.65, 0.90, 1.00], 0.9, 1.6);
-    let halo = mat([0.03, 0.05, 0.06], 0.75, 0.0);
     commands.insert_resource(OverlayAssets {
-        halo,
-        unlit_white,
-        ring_orange,
         key: (usize::MAX, 0, 0),
         order_key: (usize::MAX, 0),
         ring_cover,

@@ -58,10 +58,8 @@ mod browser {
     }
 }
 
-pub fn active() -> bool {
-    #[cfg(target_arch = "wasm32")] { browser::bridge().is_some() }
-    #[cfg(not(target_arch = "wasm32"))] { false }
-}
+#[cfg(target_arch = "wasm32")]
+fn active() -> bool { browser::bridge().is_some() }
 pub fn begin() {
     #[cfg(target_arch = "wasm32")] browser::begin();
 }

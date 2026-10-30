@@ -202,11 +202,6 @@ impl Default for Playground {
 }
 
 impl Playground {
-    pub(crate) fn request_start(&mut self) {
-        self.error = None;
-        self.toggle = true;
-    }
-    pub(crate) fn error_message(&self) -> Option<&str> { self.error.as_deref() }
     pub(crate) fn request_start_for_snapshot(&mut self, wing_cap: bool) {
         self.toggle = true;
         self.snapshot_wing_cap = wing_cap;
@@ -691,7 +686,6 @@ fn drive(
             &Mesh3d,
             &Transform,
             Option<&crate::terrain_mesh::TerrainChunk>,
-            Option<&crate::roads::RoadChunk>,
         ),
         With<PauseSolid>,
     >,
@@ -799,10 +793,8 @@ fn drive(
             }
         }
         runtime.collision_world = CollisionWorld::default();
-        for (handle, tf, terrain, road) in &solids {
-            // Draped roads share the smoothed terrain floor. Loading their
-            // unsmoothed ribbons would reintroduce bumps and overlapping floors.
-            if terrain.is_some() || road.is_some() {
+        for (handle, tf, terrain) in &solids {
+            if terrain.is_some() {
                 continue;
             }
             if let Some(mesh) = meshes.get(handle).filter(|mesh| {
