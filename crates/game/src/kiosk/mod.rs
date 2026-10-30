@@ -15,6 +15,7 @@
 pub mod board;
 pub mod chat;
 pub mod characters;
+pub mod flags;
 pub mod icons;
 pub mod lang;
 pub mod marks;

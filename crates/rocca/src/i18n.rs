@@ -92,6 +92,13 @@ pub fn parse(tag: &str) -> Option<&'static str> {
     LANGS.iter().chain([&EASTER_EGG]).map(|(c, _)| *c).find(|c| *c == base)
 }
 
+/// The first language the game speaks in a list of locale tags in order of
+/// preference (the browser's `navigator.languages`, the system's languages):
+/// `["ja-JP", "de-AT", "en"]` gives `de`. The easter egg is never picked here.
+pub fn first<S: AsRef<str>>(tags: impl IntoIterator<Item = S>) -> Option<&'static str> {
+    tags.into_iter().filter_map(|t| parse(t.as_ref())).find(|c| *c != EASTER_EGG.0)
+}
+
 /// Where the data folder is (`ROCCA_DATA`, default `data`): the catalogs are in `<root>/i18n/`.
 static ROOT: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 
@@ -174,6 +181,16 @@ mod tests {
         assert_eq!(parse("NO"), Some("nb"));
         assert_eq!(parse("tlh"), Some("tlh"));
         assert_eq!(parse("ja"), None);
+    }
+
+    #[test]
+    fn first_supported_of_the_preferred() {
+        assert_eq!(first(["ja-JP", "de-AT", "en"]), Some("de"));
+        assert_eq!(first(["en-GB", "it"]), Some("en"));
+        assert_eq!(first(["zh-CN", "nn-NO"]), Some("nb"));
+        assert_eq!(first(["tlh", "fr-CA"]), Some("fr"));
+        assert_eq!(first(["ja", "ko"]), None);
+        assert_eq!(first(Vec::<String>::new()), None);
     }
 
     #[test]

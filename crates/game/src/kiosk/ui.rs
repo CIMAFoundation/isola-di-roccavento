@@ -166,7 +166,6 @@ pub fn draw(
         Phase::Intro => {
             k.side_w = 0.0;
             if cfg!(target_arch = "wasm32") && !compact(ctx) { banner(ctx); }
-            super::lang::picker(ctx);
             if k.title {
                 if screens::title(ctx, k, &sim, logo.as_deref()) {
                     k.title = false;
@@ -234,11 +233,18 @@ pub fn draw(
         }
     }
     }
+    let mut pad_h = 0.0;
     if pads.iter().next().is_some() {
-        pad_help(ctx, k, &sim);
+        pad_h = pad_help(ctx, k, &sim) + 8.0;
         if matches!(k.phase, Phase::Tutorial | Phase::Gioco) {
             pad_list(ctx, k, &sim);
         }
+    }
+    // the flags, bottom right, before the game only (2026-10-30): during play
+    // the corner holds the weather, and the chat keeps the language it was
+    // written in; the settings menu still has the list
+    if k.phase == Phase::Intro && !k.freecam && !(k.operator && compact(ctx)) {
+        super::lang::button(ctx, pad_h);
     }
     if k.operator {
         operator(ctx, k, &mut gfx, auto.as_deref(), &mut commands);
@@ -603,7 +609,8 @@ fn pad_orders(k: &mut Kiosk, sim: &mut Sim, cam: (&Camera, &GlobalTransform), pa
 }
 
 /// What the buttons do now, shown while a gamepad is connected (2026-10-17).
-fn pad_help(ctx: &egui::Context, k: &Kiosk, sim: &Sim) {
+/// Returns the panel's height.
+fn pad_help(ctx: &egui::Context, k: &Kiosk, sim: &Sim) -> f32 {
     let rows: &[(&str, Color32, &str)] = match k.selection {
         Selection::Team(_) if sim.paused() => &[
             ("Stick sx", Color32::WHITE, rocca::tr!("porta il mirino sul punto")),
@@ -635,7 +642,7 @@ fn pad_help(ctx: &egui::Context, k: &Kiosk, sim: &Sim) {
                 });
             }
         });
-    });
+    }).response.rect.height()
 }
 
 /// The teams, then the districts, with the chosen one outlined.

@@ -103,7 +103,8 @@ pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>) -> 
             play = super::icons::pointing(r).clicked();
         });
     });
-    egui::Area::new(egui::Id::new("titolo_nota")).anchor(Align2::RIGHT_BOTTOM, [-18.0, -14.0]).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
+    // left of the language button (`lang::button`, 82 px wide)
+    egui::Area::new(egui::Id::new("titolo_nota")).anchor(Align2::RIGHT_BOTTOM, [-104.0, -24.0]).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
         ui.label(RichText::new(rocca::tr!("Simulazione dimostrativa · {0} · versione {1}", k.territory.levels.iter().find(|l| l.case == sim.case.name).map_or(sim.case.name.as_str(), |l| l.name.as_str()), super::BUILD)).size(14.0 * sc.max(0.7)).color(GREY.gamma_multiply(0.75)));
     });
     ctx.request_repaint();

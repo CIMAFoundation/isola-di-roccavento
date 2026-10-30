@@ -66,7 +66,7 @@ Il test touch ha ora una lingua esplicita (`it-IT`), coerente con i testi che ce
 
 ## Lingua (2026-10-21)
 
-Il gioco segue la lingua del browser (`navigator.language`); `?lang=de` la forza (la pagina la passa al wasm come `window.roccaLang`). I cataloghi `data/i18n/*.json` sono nel manifesto dei dati come gli altri (`scripts/build_web.sh`; `keys.json` è escluso). **La pagina introduttiva e i testi di caricamento restano in italiano.**
+Il gioco segue la prima lingua supportata tra quelle preferite del browser (`navigator.languages`, anche per prefisso: `de-AT` → `de`; altrimenti inglese, 2026-10-30), dopo l'ultima scelta salvata in `localStorage`; `?lang=de` la forza (la pagina la passa al wasm come `window.roccaLang`). I cataloghi `data/i18n/*.json` sono nel manifesto dei dati come gli altri (`scripts/build_web.sh`; `keys.json` è escluso). **La pagina introduttiva e i testi di caricamento restano in italiano** (`web/index.html` non ha testi tradotti). Il pulsante delle bandiere del titolo c'è anche sul web.
 
 ## Telefono e budget grafico (2026-10-15)
 
