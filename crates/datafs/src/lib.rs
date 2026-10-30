@@ -57,6 +57,12 @@ mod store {
         Some(plain)
     }
 
+    pub fn forget(key: &str) {
+        if let Some(f) = files() {
+            let _ = Reflect::delete_property(&f, &key.into());
+        }
+    }
+
     pub fn keys() -> Vec<String> {
         files().map(|f| Object::keys(&f).iter().filter_map(|k| k.as_string()).collect()).unwrap_or_default()
     }
@@ -77,6 +83,15 @@ pub fn read(p: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     {
         std::fs::read(p)
     }
+}
+
+/// [`read`], for a file needed once: in the browser the page's copy is dropped
+/// too, so its memory can go.
+pub fn take(p: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    let bytes = read(&p)?;
+    #[cfg(target_arch = "wasm32")]
+    store::forget(&key(p.as_ref()));
+    Ok(bytes)
 }
 
 pub fn read_to_string(p: impl AsRef<Path>) -> io::Result<String> {

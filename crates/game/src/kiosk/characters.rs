@@ -92,13 +92,25 @@ fn texture(bytes: &[u8], images: &mut Assets<Image>, contexts: &mut EguiContexts
     Some(contexts.add_image(bevy_egui::EguiTextureHandle::Strong(images.add(img))))
 }
 
+/// A picture in `assets/`: compiled into the desktop binary, with the data
+/// files in the browser (`datafs`), so the wasm stays small (2026-10-30).
+macro_rules! picture {
+    ($path:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes: std::borrow::Cow<'static, [u8]> = include_bytes!(concat!("../../../../assets/", $path)).as_slice().into();
+        #[cfg(target_arch = "wasm32")]
+        let bytes: std::borrow::Cow<'static, [u8]> = datafs::take(concat!("assets/", $path)).unwrap_or_default().into();
+        bytes
+    }};
+}
+
 pub fn load_portraits(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut contexts: EguiContexts) {
     macro_rules! png {
         ($f:literal) => {
-            include_bytes!(concat!("../../../../assets/characters/", $f, ".png")).as_slice()
+            picture!(concat!("characters/", $f, ".png"))
         };
     }
-    let all: [((Who, Mood), &[u8]); 8] = [
+    let all: [((Who, Mood), std::borrow::Cow<'static, [u8]>); 8] = [
         ((Who::Volontaria, Mood::Calmo), png!("volontaria_calmo")),
         ((Who::Volontaria, Mood::Preoccupato), png!("volontaria_preoccupato")),
         ((Who::Esperto, Mood::Calmo), png!("meteo_calmo")),
@@ -108,24 +120,24 @@ pub fn load_portraits(mut commands: Commands, mut images: ResMut<Assets<Image>>,
         ((Who::Sindaca, Mood::Calmo), png!("sindaca_calmo")),
         ((Who::Sindaca, Mood::Preoccupato), png!("sindaca_preoccupato")),
     ];
-    let out = all.into_iter().filter_map(|(key, bytes)| texture(bytes, &mut images, &mut contexts).map(|t| (key, t))).collect();
+    let out = all.into_iter().filter_map(|(key, bytes)| texture(&bytes, &mut images, &mut contexts).map(|t| (key, t))).collect();
     commands.insert_resource(Portraits(out));
     macro_rules! icon {
         ($f:literal) => {
-            ($f, include_bytes!(concat!("../../../../assets/scenarios/", $f, ".png")).as_slice())
+            ($f, picture!(concat!("scenarios/", $f, ".png")))
         };
     }
-    let icons: [(&'static str, &[u8]); 4] = [
+    let icons: [(&'static str, std::borrow::Cow<'static, [u8]>); 4] = [
         icon!("medium"),
         icon!("impatti_valico_due_lati_30_6"),
         icon!("impatti_nuclei_valico_costante_lungo_28_7_0_60"),
         icon!("impatti_nuclei_est_giro_lungo_28_6_75_60"),
     ];
-    let icons = icons.into_iter().filter_map(|(c, bytes)| texture(bytes, &mut images, &mut contexts).map(|t| (c, t))).collect();
+    let icons = icons.into_iter().filter_map(|(c, bytes)| texture(&bytes, &mut images, &mut contexts).map(|t| (c, t))).collect();
     commands.insert_resource(ScenarioIcons(icons));
-    let logo = include_bytes!("../../../../assets/brand/cima_logo_white.png");
-    if let Some(t) = texture(logo, &mut images, &mut contexts) {
-        let large = texture(include_bytes!("../../../../assets/brand/cima_logo_white_1200.png"), &mut images, &mut contexts);
+    let logo = picture!("brand/cima_logo_white.png");
+    if let Some(t) = texture(&logo, &mut images, &mut contexts) {
+        let large = texture(&picture!("brand/cima_logo_white_1200.png"), &mut images, &mut contexts);
         commands.insert_resource(Logo(t, large));
     }
 }

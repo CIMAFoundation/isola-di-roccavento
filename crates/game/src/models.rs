@@ -1,9 +1,26 @@
 //! Blender-authored meshes baked by `scripts/build_models.py`.
-//! Embedded for identical native/web loading; one mesh and material per symbol.
+//! Compiled into the desktop binary; in the browser they come with the data
+//! files (`datafs`), so the wasm stays small (2026-10-30). One mesh and
+//! material per symbol.
 use bevy::prelude::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use std::{collections::HashMap, sync::OnceLock};
+
+/// The text of a bake in `assets/models/`, read once.
+macro_rules! bake {
+    ($name:literal) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        let text: std::borrow::Cow<'static, str> = include_str!(concat!("../../../assets/models/", $name, ".json")).into();
+        #[cfg(target_arch = "wasm32")]
+        let text: std::borrow::Cow<'static, str> = datafs::take(concat!("assets/models/", $name, ".json"))
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_else(|| panic!("assets/models/{}.json is not in the page's data", $name))
+            .into();
+        text
+    }};
+}
 
 #[derive(serde::Deserialize)]
 pub struct Model {
@@ -16,7 +33,7 @@ pub struct Model {
 pub fn model(name: &str) -> &'static Model {
     static MODELS: OnceLock<HashMap<String, Model>> = OnceLock::new();
     &MODELS.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../assets/models/meshes.json"))
+        serde_json::from_str(&bake!("meshes"))
             .expect("valid Blender mesh bake")
     })[name]
 }
@@ -65,7 +82,7 @@ fn parse_kit(json: &str, what: &str) -> HashMap<String, Kit> {
 
 pub fn kit(name: &str) -> &'static Kit {
     static KIT: OnceLock<HashMap<String, Kit>> = OnceLock::new();
-    KIT.get_or_init(|| parse_kit(include_str!("../../../assets/models/town.json"), "town kit"))
+    KIT.get_or_init(|| parse_kit(&bake!("town"), "town kit"))
         .get(name)
         .unwrap_or_else(|| panic!("town kit has no `{name}`"))
 }
@@ -75,7 +92,7 @@ pub fn kit(name: &str) -> &'static Kit {
 pub fn island(name: &str) -> &'static Kit {
     static ISLAND: OnceLock<HashMap<String, Kit>> = OnceLock::new();
     ISLAND
-        .get_or_init(|| parse_kit(include_str!("../../../assets/models/island.json"), "island kit"))
+        .get_or_init(|| parse_kit(&bake!("island"), "island kit"))
         .get(name)
         .unwrap_or_else(|| panic!("island kit has no `{name}`"))
 }
@@ -84,7 +101,7 @@ pub fn island(name: &str) -> &'static Kit {
 pub fn coast(name: &str) -> &'static Kit {
     static COAST: OnceLock<HashMap<String, Kit>> = OnceLock::new();
     COAST
-        .get_or_init(|| parse_kit(include_str!("../../../assets/models/coast.json"), "coast kit"))
+        .get_or_init(|| parse_kit(&bake!("coast"), "coast kit"))
         .get(name)
         .unwrap_or_else(|| panic!("coast kit has no `{name}`"))
 }
@@ -150,7 +167,7 @@ pub fn variety(name: &str) -> &'static Variety {
     static VARIETIES: OnceLock<HashMap<String, Variety>> = OnceLock::new();
     VARIETIES
         .get_or_init(|| {
-            serde_json::from_str(include_str!("../../../assets/models/vegetation.json"))
+            serde_json::from_str(&bake!("vegetation"))
                 .expect("valid vegetation bake")
         })
         .get(name)
@@ -164,7 +181,7 @@ pub fn live(name: &str) -> &'static Model {
 
 fn units() -> &'static HashMap<String, Kit> {
     static UNITS: OnceLock<HashMap<String, Kit>> = OnceLock::new();
-    UNITS.get_or_init(|| parse_kit(include_str!("../../../assets/models/units.json"), "unit models"))
+    UNITS.get_or_init(|| parse_kit(&bake!("units"), "unit models"))
 }
 
 /// The surface of each vertex goes in its colour's alpha

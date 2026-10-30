@@ -41,8 +41,9 @@ opt-level = 3
 # The browser build (`scripts/build_web.sh`): small and fast.
 [profile.wasm-release]
 inherits = "release"
-opt-level = "s"
-lto = "thin"
+# z and full LTO: the smallest code (2026-10-30, the iPhone's memory)
+opt-level = "z"
+lto = true
 codegen-units = 1
 # Drop the 60 MB wasm "name" section.
 strip = "symbols"

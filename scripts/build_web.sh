@@ -33,17 +33,30 @@ cp -R web/img "$out"/img
 # The landing page's texts (tools/i18n/landing.py)
 cp web/i18n.js "$out"/i18n.js
 # Apache hosts (games.cimafoundation.org) serve .wasm without its type unless told
-printf 'AddType application/wasm .wasm\n' > "$out"/.htaccess
-# What the game loads: the one scenario, the behaviours, the fuels, the sounds.
+# and compressed on the way when the server can (mod_deflate): the wasm is
+# about a quarter of its size gzipped
+cat > "$out"/.htaccess <<'HT'
+AddType application/wasm .wasm
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE application/wasm application/javascript text/javascript text/html text/css application/json
+</IfModule>
+HT
+# What the game loads: the one scenario, the behaviours, the fuels, the sounds,
+# the models and pictures.
 python3 -I - "$root" "$out" <<'PY'
 import gzip, hashlib, json, os, sys
 
 root, out = sys.argv[1], sys.argv[2]
 files = []
-for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "data/sounds"):
+# assets/: the models and pictures the desktop binary has compiled in (2026-10-30)
+for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "data/sounds", "assets/models", "assets/characters", "assets/scenarios", "assets/brand"):
     for d, _, names in os.walk(os.path.join(root, sub)):
         for n in names:
-            files.append(os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/"))
+            rel = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
+            # from assets/ only what the game reads: the bakes and the pictures
+            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel):
+                continue
+            files.append(rel)
 files.append("data/fuels_eu12.json")
 manifest = []
 for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys.json", "CREDITS.txt"))):
@@ -60,7 +73,14 @@ print("data: %d files, %.1f MB gzipped (of %.1f MB)" % (
     sum(os.path.getsize(os.path.join(root, m["path"])) for m in manifest) / 1e6))
 PY
 if command -v wasm-opt >/dev/null; then
-  wasm-opt -Os --strip-debug -o "$out"/game.opt.wasm "$out"/game_bg.wasm
-  mv "$out"/game.opt.wasm "$out"/game_bg.wasm
+  # Rust's default wasm features; a failure keeps the unoptimised file
+  if wasm-opt -Oz --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+      --enable-mutable-globals --enable-reference-types --enable-multivalue \
+      -o "$out"/game.opt.wasm "$out"/game_bg.wasm; then
+    mv "$out"/game.opt.wasm "$out"/game_bg.wasm
+  else
+    echo "wasm-opt failed: the wasm is not optimised" >&2
+    rm -f "$out"/game.opt.wasm
+  fi
 fi
 echo "Built $out ($(du -sh "$out"/game_bg.wasm | cut -f1) wasm)"

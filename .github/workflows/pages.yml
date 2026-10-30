@@ -26,6 +26,15 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      # wasm-opt (binaryen) shrinks the wasm; build_web.sh uses it when found
+      - name: Install wasm-opt
+        run: |
+          v=version_133
+          f=binaryen-$v-x86_64-linux.tar.gz
+          curl -sSLO https://github.com/WebAssembly/binaryen/releases/download/$v/$f
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/$v/$f.sha256 | awk '{print $1"  '"$f"'"}' | sha256sum -c
+          tar xzf $f
+          echo "$PWD/binaryen-$v/bin" >> "$GITHUB_PATH"
       - run: ./scripts/build_web.sh
       # games.cimafoundation.org/isola-di-roccavento: CIMA hosting (Ergonet),
       # FTPS with password, certificate checked (docs/web.md). Only from main.
