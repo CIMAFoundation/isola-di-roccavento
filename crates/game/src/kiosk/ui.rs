@@ -112,7 +112,7 @@ pub fn draw(
     mut focus: ResMut<crate::ui::UiFocus>,
     mut restarted: MessageWriter<SimRestarted>,
     cameras: Query<(&Camera, &GlobalTransform), With<crate::camera::OrbitCamera>>,
-    mut gfx: ResMut<crate::quality::Graphics>,
+    (mut gfx, mut audio, time): (ResMut<crate::quality::Graphics>, ResMut<crate::sound::AudioPrefs>, Res<Time>),
     faces: Option<Res<Portraits>>,
     logo: Option<Res<Logo>>,
     scenario_icons: Option<Res<ScenarioIcons>>,
@@ -149,11 +149,15 @@ pub fn draw(
     }
     egui::Area::new(egui::Id::new("menu_btn")).anchor(Align2::LEFT_BOTTOM, [10.0, -10.0]).order(egui::Order::Foreground).show(ctx, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let r = ui.add(secondary(if k.operator { rocca::tr!("Chiudi impostazioni") } else { rocca::tr!("Impostazioni") }));
-        crate::playtest::control("Menu", &r, true);
-        if r.clicked() {
-            k.operator = !k.operator;
-        }
+        ui.horizontal(|ui| {
+            let r = ui.add(secondary(if k.operator { rocca::tr!("Chiudi impostazioni") } else { rocca::tr!("Impostazioni") }));
+            crate::playtest::control("Menu", &r, true);
+            if r.clicked() {
+                k.operator = !k.operator;
+            }
+            let r = mute_button(ui, &mut audio);
+            crate::playtest::control("Audio", &r, true);
+        });
     });
     // On a phone the menu is a page of its own: nothing is drawn under it.
     if k.operator && compact(ctx) {
@@ -165,7 +169,18 @@ pub fn draw(
             k.side_w = 0.0;
             if cfg!(target_arch = "wasm32") && !compact(ctx) { banner(ctx); }
             if k.title {
-                if screens::title(ctx, k, &sim, logo.as_deref()) {
+                // the opening sequence, once at launch; a click or a key skips
+                // it (a phone goes straight to the title)
+                if let Some(t) = k.opening {
+                    let skip = compact(ctx) || ctx.input(|i| i.pointer.any_pressed() || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
+                    // a snapshot holds the moment it asks for; a recording runs
+                    // it on the game's clock, one frame's step at a time
+                    let t = if super::snap::active() && !crate::record::running() { t } else { t + time.delta_secs().min(0.1) };
+                    k.opening = (!skip && t < screens::OPENING_S).then_some(t);
+                    screens::opening(ctx, t, logo.as_deref());
+                }
+                let alpha = screens::title_alpha(k.opening);
+                if alpha > 0.0 && screens::title(ctx, k, &sim, logo.as_deref(), alpha) && k.opening.is_none() {
                     k.title = false;
                 }
             } else {
@@ -245,7 +260,7 @@ pub fn draw(
         super::lang::button(ctx, pad_h);
     }
     if k.operator {
-        operator(ctx, k, &mut gfx, auto.as_deref(), &mut commands);
+        operator(ctx, k, &mut gfx, &mut audio, auto.as_deref(), &mut commands);
     }
     pad_mode.game = matches!(k.phase, Phase::Tutorial | Phase::Gioco);
     focus.pointer = ctx.is_pointer_over_egui();
@@ -1410,7 +1425,8 @@ pub fn fps(
     // (mean frame time in s, shown FPS, s since the shown value changed)
     mut filter: Local<(f32, f32, f32)>,
 ) {
-    if kiosk.phase != Phase::Intro || mario.active {
+    // not in a recording (`record`): its frame rate is the video's
+    if kiosk.phase != Phase::Intro || mario.active || crate::record::running() {
         return;
     }
     // Low-pass the frame time (about 1.5 s), not the FPS: a hitch then weighs
@@ -1451,15 +1467,26 @@ fn notice(ctx: &egui::Context, k: &Kiosk) {
     });
 }
 
-/// The settings menu (F2): language, view, graphics.
-fn operator(ctx: &egui::Context, k: &mut Kiosk, gfx: &mut crate::quality::Graphics, auto: Option<&crate::adaptive::Adaptive>, commands: &mut Commands) {
+/// The small button that mutes or unmutes, beside «Impostazioni».
+fn mute_button(ui: &mut egui::Ui, prefs: &mut crate::sound::AudioPrefs) -> egui::Response {
+    let r = ui.add(secondary(if prefs.muted { "🔇" } else { "🔊" }))
+        .on_hover_text(if prefs.muted { rocca::tr!("Attiva l'audio") } else { rocca::tr!("Togli l'audio") });
+    if r.clicked() {
+        prefs.muted = !prefs.muted;
+        prefs.save();
+    }
+    r
+}
+
+/// The settings menu (F2): language, view, audio, graphics.
+fn operator(ctx: &egui::Context, k: &mut Kiosk, gfx: &mut crate::quality::Graphics, audio: &mut crate::sound::AudioPrefs, auto: Option<&crate::adaptive::Adaptive>, commands: &mut Commands) {
     if compact(ctx) {
         // On a phone: a page of its own over the screen, big buttons, and
         // «Chiudi» pinned under the scrolling controls.
         let mut close = false;
         super::screens::compact_page_footer(ctx, "operatore_mobile", |ui| {
             ui.heading(rocca::tr!("Impostazioni"));
-            operator_body(ui, k, gfx, auto, commands, true);
+            operator_body(ui, k, gfx, audio, auto, commands, true);
         }, |ui| {
             close = ui.add_sized([ui.available_width(), 46.0], secondary(rocca::tr!("Chiudi"))).clicked();
         });
@@ -1469,13 +1496,13 @@ fn operator(ctx: &egui::Context, k: &mut Kiosk, gfx: &mut crate::quality::Graphi
     egui::Window::new(rocca::tr!("Impostazioni")).id(egui::Id::new("operatore")).anchor(Align2::LEFT_BOTTOM, [8.0, -60.0]).default_width((ctx.viewport_rect().width() - 48.0).min(380.0)).max_height(ctx.viewport_rect().height() - 90.0).resizable(false).collapsible(false).vscroll(true).show(ctx, |ui| {
         panel().show(ui, |ui| {
             ui.label(RichText::new(rocca::tr!("Impostazioni (F2 per chiudere)")).strong().color(Color32::WHITE));
-            operator_body(ui, k, gfx, auto, commands, false);
+            operator_body(ui, k, gfx, audio, auto, commands, false);
         });
     });
 }
 
 /// The controls of the operator menu. `touch`: finger-sized buttons.
-fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Graphics, auto: Option<&crate::adaptive::Adaptive>, commands: &mut Commands, touch: bool) {
+fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Graphics, audio: &mut crate::sound::AudioPrefs, auto: Option<&crate::adaptive::Adaptive>, commands: &mut Commands, touch: bool) {
     let button = |ui: &mut egui::Ui, label: &str| -> bool {
         if touch { ui.add_sized([ui.available_width(), 46.0], secondary(label)).clicked() } else { ui.add(secondary(label)).clicked() }
     };
@@ -1488,6 +1515,7 @@ fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Gra
             if button(ui, rocca::tr!("Vista iniziale")) {
                 k.reset_view = true;
             }
+            crate::sound::settings_ui(ui, audio);
             if !cfg!(target_arch = "wasm32") { ui.horizontal(|ui| {
                 use crate::quality::Graphics;
                 ui.label(rocca::tr!("Grafica:"));

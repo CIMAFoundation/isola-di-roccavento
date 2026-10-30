@@ -1,0 +1,9 @@
+Suoni registrati del gioco (tools/sounds/prepare.py). Tutto il resto è sintetizzato in crates/sfx.
+
+gabbiano_*.mp3: XC707075 - European Herring Gull - Larus argentatus, Sonothèque ADVL, CC0 (https://upload.wikimedia.org/wikipedia/commons/5/5c/XC707075_-_European_Herring_Gull_-_Larus_argentatus.mp3)
+cicale_1.mp3: Cicada orni, DavidDelon, public domain (https://upload.wikimedia.org/wikipedia/commons/a/a8/Cicada_orni.ogg)
+cicale_2.mp3: Cicadas in Greece, Channel R, public domain (https://upload.wikimedia.org/wikipedia/commons/f/f4/Cicadas_in_Greece.ogg)
+cicale_3.mp3: Cicada 20200619, Shyamal, CC0 (https://upload.wikimedia.org/wikipedia/commons/3/3d/Cicada_20200619.wav)
+ui_*.mp3: Kenney, «Interface Sounds» 1.0, CC0 (https://kenney.nl/assets/interface-sounds)
+jingle_logo.mp3: generato con Google Lyria 3 (lyria-3-clip-preview, via OpenRouter) il 2026-10-30, 2.6 s da 7.4 s
+jingle_isola.mp3: generato con Google Lyria 3 (lyria-3-clip-preview, via OpenRouter) il 2026-10-30, 2.7 s da 27.0 s

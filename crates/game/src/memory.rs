@@ -45,6 +45,7 @@ pub fn begin(level_chosen: bool) -> Option<Short> {
         return None;
     }
     let short = decide(&dir(), level_chosen, std::env::var("KIOSK_MEMORY").ok().as_deref(), total_ram_gib);
+    end_at_exit();
     match short {
         Some(Short::Crash) => bevy::log::warn!("memoria: avvio precedente non terminato, scena leggera e grafica bassa"),
         Some(Short::Ram) => bevy::log::info!("memoria: poca RAM, scena leggera"),
@@ -89,6 +90,30 @@ fn running(_pid: i32) -> bool {
 /// The game ended on its own: the next launch is not a recovery.
 pub fn end() {
     end_in(&dir());
+}
+
+static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `end` also when the process ends through `exit()` without coming back from
+/// `App::run`: on macOS Cmd+Q (AppKit's `terminate:`) does that, and every
+/// launch after a Cmd+Q was taken for a crash and built the lighter scene
+/// (2026-10-30). A panic still leaves the marker; a kill or a freeze never
+/// reaches here.
+fn end_at_exit() {
+    #[cfg(unix)]
+    {
+        extern "C" fn on_exit() {
+            if !PANICKED.load(std::sync::atomic::Ordering::Relaxed) {
+                end();
+            }
+        }
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            PANICKED.store(true, std::sync::atomic::Ordering::Relaxed);
+            hook(info);
+        }));
+        unsafe { libc::atexit(on_exit) };
+    }
 }
 
 fn end_in(dir: &std::path::Path) {

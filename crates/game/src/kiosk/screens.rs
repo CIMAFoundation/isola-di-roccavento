@@ -52,12 +52,79 @@ fn volunteer(ui: &mut egui::Ui, faces: Option<&Portraits>, mood: Mood, size: f32
 
 /// The title screen: the fire plays behind it with the roaming camera, here
 /// only the name and «Gioca». True when «Gioca» was pressed.
-pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>) -> bool {
+// --- the opening sequence (user, 2026-10-30) ----------------------------------
+// At launch, real seconds: the CIMA logo on black with the jingle's climax;
+// then, to its cadence, the black lifts on the island at dawn, the camera
+// flying in to it fast and slowing down, as from a plane; the title and
+// «Gioca» come as the cadence dies away. A click or a key skips it. The times
+// follow the two cuts' envelopes (`tools/sounds/prepare.py`), without gaps
+// (user, 2026-10-30).
+
+const LOGO_IN_S: f32 = 0.8;
+/// The jingle's climax (`sound`), as the logo comes up.
+pub const JINGLE_S: f32 = 0.2;
+/// The logo starts to fade out.
+const LOGO_OUT_S: f32 = 1.9;
+/// The jingle's cadence, as the climax dies away and the logo fades out.
+pub const JINGLE_ISLAND_S: f32 = 1.9;
+/// The black starts to lift on the island.
+pub const ISLAND_S: f32 = 2.3;
+/// No black left.
+const CLEAR_S: f32 = 3.8;
+/// The title starts to show, and is all there one second later.
+const TITLE_S: f32 = 3.6;
+/// The end: the camera has arrived and is the director's again (`view`).
+pub const OPENING_S: f32 = 8.0;
+
+fn ramp(t: f32, from: f32, to: f32) -> f32 {
+    let x = ((t - from) / (to - from)).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// How far the camera has come in to the island, 0..1: from the start (under
+/// the black) fast, then slower and slower, landing at rest.
+pub fn opening_descent(t: f32) -> f32 {
+    1.0 - (1.0 - (t / OPENING_S).clamp(0.0, 1.0)).powi(2)
+}
+
+/// The director's share of the camera after the opening (`view`): from
+/// nothing to all of it in `HANDOFF_S`, so the flight in slows to rest and
+/// the shot drifts off from there, with no jolt.
+pub fn handoff(after: f32) -> f32 {
+    ramp(after, 0.0, HANDOFF_S)
+}
+const HANDOFF_S: f32 = 4.0;
+
+/// The title screen's opacity: hidden in the opening until its last seconds.
+pub fn title_alpha(opening: Option<f32>) -> f32 {
+    opening.map_or(1.0, |t| ramp(t, TITLE_S, TITLE_S + 1.0))
+}
+
+/// The black and the logo over everything, `t` seconds into the opening.
+pub fn opening(ctx: &egui::Context, t: f32, logo: Option<&Logo>) {
+    let screen = ctx.viewport_rect();
+    let black = 1.0 - ramp(t, ISLAND_S, CLEAR_S);
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("apertura")));
+    if black > 0.0 {
+        p.rect_filled(screen, 0.0, Color32::from_black_alpha((black * 255.0) as u8));
+    }
+    let shown = ramp(t, 0.0, LOGO_IN_S) * (1.0 - ramp(t, LOGO_OUT_S, ISLAND_S));
+    if let (Some(l), true) = (logo, shown > 0.0) {
+        // the brand file is 77 x 96
+        let h = (screen.height() * 0.32).min(screen.width() * 0.4 * 96.0 / 77.0);
+        let r = egui::Rect::from_center_size(screen.center(), egui::vec2(h * 77.0 / 96.0, h));
+        p.image(l.1.unwrap_or(l.0), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::from_white_alpha((shown * 255.0) as u8));
+    }
+    ctx.request_repaint();
+}
+
+pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>, alpha: f32) -> bool {
     let screen = ctx.viewport_rect();
     // phones get the same screen, scaled down to the width
     let sc = (screen.width() / 1000.0).clamp(0.4, 1.0).min((screen.height() / 560.0).max(0.4));
     let mut play = false;
     egui::Area::new(egui::Id::new("titolo_fondo")).fixed_pos(screen.min).order(egui::Order::Middle).interactable(false).show(ctx, |ui| {
+        ui.set_opacity(alpha);
         let p = ui.painter();
         p.rect_filled(screen, 0.0, Color32::from_black_alpha(70));
         // two darker bands, where the title and the button are, and clear
@@ -83,6 +150,7 @@ pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>) -> 
     // the title above the middle, the button below it: the fire shows between
     let off = (screen.height() * 0.2).clamp(120.0 * sc, 220.0);
     egui::Area::new(egui::Id::new("titolo")).anchor(Align2::CENTER_CENTER, [0.0, -off]).order(egui::Order::Foreground).show(ctx, |ui| {
+        ui.set_opacity(alpha);
         ui.set_width((screen.width() - 24.0).min(900.0));
         ui.vertical_centered(|ui| {
             if let Some(l) = logo {
@@ -94,6 +162,7 @@ pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>) -> 
         });
     });
     egui::Area::new(egui::Id::new("titolo_gioca")).anchor(Align2::CENTER_CENTER, [0.0, off]).order(egui::Order::Foreground).show(ctx, |ui| {
+        ui.set_opacity(alpha);
         ui.vertical_centered(|ui| {
             let b = egui::Button::new(RichText::new(rocca::tr!("Gioca")).size(44.0 * sc.max(0.7)).strong().color(Color32::BLACK)).fill(AMBER).corner_radius(16.0).min_size(egui::vec2(360.0 * sc.max(0.7), 96.0 * sc.max(0.6)));
             let r = ui.add(b);
@@ -103,6 +172,7 @@ pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>) -> 
     });
     // left of the language button (`lang::button`, 82 px wide)
     egui::Area::new(egui::Id::new("titolo_nota")).anchor(Align2::RIGHT_BOTTOM, [-104.0, -24.0]).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
+        ui.set_opacity(alpha);
         ui.label(RichText::new(rocca::tr!("Simulazione dimostrativa · {0} · versione {1}", k.territory.levels.iter().find(|l| l.case == sim.case.name).map_or(sim.case.name.as_str(), |l| l.name.as_str()), super::BUILD)).size(14.0 * sc.max(0.7)).color(GREY.gamma_multiply(0.75)));
     });
     ctx.request_repaint();

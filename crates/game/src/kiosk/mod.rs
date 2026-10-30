@@ -155,6 +155,11 @@ pub struct Kiosk {
     pub(super) cut_subject: Subject,
     /// Black over the picture, 0..1 (drawn by `ui`).
     pub fade: f32,
+    /// Real seconds into the opening sequence at launch (the CIMA logo, then
+    /// the island; `screens::opening`), `None` once it is over or skipped.
+    pub opening: Option<f32>,
+    /// Real seconds since the opening ended (`screens::handoff`).
+    pub after_opening: f32,
     /// The operator menu (F2).
     pub operator: bool,
     /// Operator's free camera over the opening's fire: no director, the
@@ -166,6 +171,17 @@ pub struct Kiosk {
 }
 
 impl Kiosk {
+    /// How many of the opening's two jingles are due: the first as the logo
+    /// fades in, the second as it fades out on the island (or once it is over).
+    pub fn jingles_due(&self) -> u8 {
+        match self.opening {
+            None => 2,
+            Some(t) if t >= screens::JINGLE_ISLAND_S => 2,
+            Some(t) if t >= screens::JINGLE_S => 1,
+            Some(_) => 0,
+        }
+    }
+
     fn new(territory: Territory, data: PathBuf) -> Kiosk {
         Kiosk {
             phase: Phase::Intro,
@@ -178,6 +194,9 @@ impl Kiosk {
             cut: None,
             cut_subject: Subject::Wide,
             fade: 0.0,
+            // screenshots start where they are asked to
+            opening: (!snap::active()).then_some(0.0),
+            after_opening: f32::MAX,
             selected_case: territory.game.clone(),
             territory,
             data,

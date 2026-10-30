@@ -126,6 +126,8 @@ KIOSK_WINDOWED=1 KIOSK_SIZE=1600x1000 KIOSK_SCALE=1 KIOSK_SNAP=<cartella> KIOSK_
 - Il mondo resta fermo allo scatto. Il tempo va solo avanti: un `t` minore del precedente rifà la partita da capo.
 - **Dopo un avvio con `KIOSK_SNAP` guardare sempre l'immagine** (Read).
 - Chiave `live=1`: il mondo continua a scorrere (per misurare anche i costi CPU del fuoco).
+- Chiave `opening=<s>` (con `phase=title`): la sequenza d'apertura ferma a quell'istante; con `rec` la sequenza scorre.
+- **Video** (`record.rs`, 2026-10-30): `rec=<s>` registra `<s>` secondi di quello stato in `<nome>.mp4`, immagini e suoni del gioco, a passo fisso di 1/30 s (fluido su qualsiasi macchina, più veloce del tempo reale). Serve ffmpeg. Con `KIOSK_SIZE=1920x1080 KIOSK_SCALE=1.25` l'immagine è uscita nera, anche negli snapshot (2026-10-30): per i video usare `KIOSK_SCALE=1`. Esempio: `name=apertura,phase=title,opening=0,live=1,rec=14`. Il montaggio del video di presentazione (voce TTS, cartello) sta fuori dal repository, in `~/Movies/rocca-demo/cut.py`.
 - **FPS per stato:** `KIOSK_SNAP_BENCH=<s>` misura ogni stato per `<s>` secondi e stampa righe `bench:` (main, render thread, GPU, fps). La finestra nascosta è cadenzata a ~57 Hz e la GPU abbassa il clock, quindi alla dimensione reale i ms GPU non sono confrontabili: per un prima/dopo si usa `KIOSK_SIZE` a 4–8 volte i pixel (es. `3919x2449` con `KIOSK_SCALE=2`) finché il `mean` supera i 17,5 ms; lì è il costo vero. Dettagli in `crates/game/src/bench.rs`.
 
 ## Trappole note

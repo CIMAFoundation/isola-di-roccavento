@@ -32,19 +32,19 @@ sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?
 cp -R web/img "$out"/img
 # The landing page's texts (tools/i18n/landing.py)
 cp web/i18n.js "$out"/i18n.js
-# What the game loads: the one scenario, the behaviours, the fuels.
+# What the game loads: the one scenario, the behaviours, the fuels, the sounds.
 python3 -I - "$root" "$out" <<'PY'
 import gzip, hashlib, json, os, sys
 
 root, out = sys.argv[1], sys.argv[2]
 files = []
-for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n"):
+for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "data/sounds"):
     for d, _, names in os.walk(os.path.join(root, sub)):
         for n in names:
             files.append(os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/"))
 files.append("data/fuels_eu12.json")
 manifest = []
-for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys.json"))):
+for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys.json", "CREDITS.txt"))):
     raw = open(os.path.join(root, path), "rb").read()
     gz = gzip.compress(raw, 9, mtime=0)
     dest = os.path.join(out, path + ".gz")

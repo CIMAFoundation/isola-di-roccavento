@@ -204,9 +204,45 @@ impl Plugin for SkyPlugin {
             .add_systems(OnEnter(crate::AppState::Playing), spawn_sky)
             .add_systems(
                 Update,
-                update_sky.run_if(bevy::prelude::in_state(crate::AppState::Playing)),
-            );
+                (follow_opening, update_sky).chain().run_if(bevy::prelude::in_state(crate::AppState::Playing)),
+            )
+            .init_resource::<Dawn>();
     }
+}
+
+/// The opening's light (user, 2026-10-30): before the game, the title screen
+/// is lit by a sunrise over the sea that does not move; the world still runs,
+/// only the sun's hour stands. 1 = all dawn, 0 = the game's clock.
+#[derive(Resource, Default)]
+pub struct Dawn(pub f32);
+
+/// The sunrise's local solar hour: the sun about 11° over the sea, low enough
+/// to be in the opening's level shot; its colours are lifted (below) so it is
+/// golden, not red (user, 2026-10-30).
+pub const DAWN_H: f32 = 5.8;
+/// Degrees added to the dawn sun's elevation for its colours and light only.
+const DAWN_TONE_LIFT_DEG: f32 = 9.0;
+/// Real seconds the light takes from the dawn to the game's hour.
+const DAWN_FADE_S: f32 = 2.5;
+
+/// The camera's heading (`OrbitCamera::yaw`) that looks at the rising sun.
+pub fn dawn_yaw() -> f32 {
+    let (el, az) = solar_position(DAWN_H);
+    let d = sun_direction(el, az);
+    (-d.x).atan2(-d.z)
+}
+
+/// Dawn on the title screen, the game's clock in the game; `ROCCA_START_HOUR`
+/// (a screenshot of another hour) keeps its own.
+fn follow_opening(kiosk: Option<Res<crate::kiosk::Kiosk>>, time: Res<Time>, mut dawn: ResMut<Dawn>) {
+    let want = kiosk.is_some_and(|k| k.phase == crate::kiosk::Phase::Intro && !k.freecam) && std::env::var_os("ROCCA_START_HOUR").is_none();
+    let want = if want { 1.0 } else { 0.0 };
+    if crate::kiosk::snap::active() {
+        dawn.0 = want;
+        return;
+    }
+    let step = time.delta_secs().min(0.1) / DAWN_FADE_S;
+    dawn.0 = if want > dawn.0 { (dawn.0 + step).min(1.0) } else { (dawn.0 - step).max(0.0) };
 }
 
 fn spawn_sky(
@@ -292,7 +328,9 @@ fn solar_position(hour_of_day: f32) -> (f32, f32) {
         .clamp(-1.0, 1.0)
         .asin();
     let az_cos = ((decl.sin() - el.sin() * lat.sin()) / (el.cos() * lat.cos())).clamp(-1.0, 1.0);
-    let az = if h.rem_euclid(std::f32::consts::TAU) <= std::f32::consts::PI {
+    // morning (h < 0) east of the meridian, afternoon west (it was the other
+    // way round until 2026-10-30: a dawn in the west, shadows mirrored)
+    let az = if h <= 0.0 {
         az_cos.acos()
     } else {
         std::f32::consts::TAU - az_cos.acos()
@@ -432,6 +470,7 @@ const MOON_AMBIENT_TINT: [(f32, [f32; 3]); 3] = [
 pub fn update_sky(
     sim: Res<Sim>,
     day: Res<DayClock>,
+    dawn: Res<Dawn>,
     sky_handle: Option<Res<SkyHandle>>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
     mut sun_state: ResMut<SunState>,
@@ -450,15 +489,19 @@ pub fn update_sky(
     let (drift, wind) = crate::sea::wind_drift(&sim);
     *cloud_offset += drift * wind * CLOUD_SPEED_FACTOR * time.delta_secs();
 
-    let hour = day.hour(sim.time_s() as f32);
+    let w = dawn.0 * dawn.0 * (3.0 - 2.0 * dawn.0);
+    let hour = day.hour(sim.time_s() as f32) * (1.0 - w) + DAWN_H * w;
     let (el, az) = solar_position(hour);
     let el_deg = el.to_degrees();
     let dir = sun_direction(el, az);
+    // The dawn keeps the low sun's direction (long shadows) but takes the
+    // colours and light of a higher one: golden, not red (user, 2026-10-30).
+    let tone_deg = el_deg + DAWN_TONE_LIFT_DEG * w;
 
-    let illuminance = ramp1(el_deg, &ILLUMINANCE);
-    let sun_color = ramp3(el_deg, &SUN_COLOR);
-    let zenith = ramp3(el_deg, &ZENITH);
-    let horizon = ramp3(el_deg, &HORIZON);
+    let illuminance = ramp1(tone_deg, &ILLUMINANCE);
+    let sun_color = ramp3(tone_deg, &SUN_COLOR);
+    let zenith = ramp3(tone_deg, &ZENITH);
+    let horizon = ramp3(tone_deg, &HORIZON);
     let day_gate = el.sin().clamp(0.0, 1.0);
     let brightness = (illuminance / ILLUMINANCE[ILLUMINANCE.len() - 1].1).clamp(0.0, 1.0);
 
@@ -475,7 +518,7 @@ pub fn update_sky(
     // *actual* moon's contribution on top, so a full moon overhead reads as
     // brighter than one that has just set.
     let ambient_brightness = (illuminance / AMBIENT_FILL_RATIO).max(4.0) + moon_illuminance;
-    let base_ambient_color = ramp3(el_deg, &AMBIENT_COLOR);
+    let base_ambient_color = ramp3(tone_deg, &AMBIENT_COLOR);
     let moon_tint = ramp3(moon_el_deg, &MOON_AMBIENT_TINT);
     let ambient_color = [
         base_ambient_color[0] + (moon_tint[0] - base_ambient_color[0]) * moon_gate,
@@ -496,7 +539,7 @@ pub fn update_sky(
         light.color = Color::srgb(sun_color[0], sun_color[1], sun_color[2]);
     }
 
-    sky_env.el_deg = el_deg;
+    sky_env.el_deg = tone_deg;
     sky_env.ambient_brightness = ambient_brightness;
     ambient.brightness = ambient_brightness * sky_env.ambient_scale;
     ambient.color = Color::srgb(ambient_color[0], ambient_color[1], ambient_color[2]);
@@ -538,5 +581,19 @@ pub fn update_sky(
 
     for mut vis in &mut dome_q {
         *vis = Visibility::Inherited;
+    }
+}
+
+#[cfg(test)]
+mod sun_tests {
+    use super::*;
+
+    #[test]
+    fn the_sun_rises_in_the_east_and_sets_in_the_west() {
+        let east = |h: f32| { let (el, az) = solar_position(h); sun_direction(el, az).x };
+        assert!(east(DAWN_H) > 0.5, "dawn");
+        assert!(east(10.0) > 0.0 && east(14.0) < 0.0);
+        let (el, az) = solar_position(12.0);
+        assert!(sun_direction(el, az).z > 0.0, "noon in the south (+z)");
     }
 }

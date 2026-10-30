@@ -22,6 +22,8 @@
 //! | `ui`     | `0`: no interface at all (panels, labels, buttons)                   |
 //! | `mario`  | `1`: Mario beside the fire, turned to the camera (needs `pause=1`)   |
 //! | `live`   | `1`: the world keeps running (×300) instead of freezing at the shot  |
+//! | `opening`| real seconds into the opening sequence, held (with `phase=title`)     |
+//! | `rec`    | seconds of video with sound instead of a picture: `<name>.mp4` (`record`) |
 //!
 //! `KIOSK_SNAP_BENCH=<s>` also measures each state before its picture: the
 //! frame times over `<s>` real seconds (vsync off), printed as `bench:` lines.
@@ -76,6 +78,8 @@ struct State {
     hide: SnapHide,
     mario: bool,
     live: bool,
+    opening: Option<f32>,
+    rec: Option<f32>,
 }
 
 /// What the state on show leaves out of the picture.
@@ -124,6 +128,8 @@ fn parse(spec: &str) -> Vec<State> {
                     "ui" => st.hide.ui = v == "0",
                     "mario" => st.mario = v == "1",
                     "live" => st.live = v == "1",
+                    "opening" => st.opening = v.parse().ok(),
+                    "rec" => st.rec = v.parse().ok(),
                     other => eprintln!("snap: unknown key `{other}`"),
                 }
             }
@@ -218,6 +224,8 @@ pub struct Progress {
     waited: f32,
     goal: Option<(Vec3, Option<f32>, Option<f32>, Option<f32>)>,
     done_s: f32,
+    /// The state on show is being filmed (`rec`).
+    filming: bool,
     /// frame times (s) of the state on show, while benchmarking
     frames: Vec<f32>,
 }
@@ -277,6 +285,7 @@ fn apply(st: &State, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter
     sim.generation += 1;
     k.enter(phase);
     k.title = st.phase == "title";
+    k.opening = st.opening;
     if phase == Phase::Tutorial {
         k.script = rocca::tutorial::Script::of(sim);
         k.step = st.step;
@@ -286,7 +295,8 @@ fn apply(st: &State, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter
     if let Some(t) = st.team {
         k.selection = Selection::Team(t);
         if let Some(p) = st.hex {
-            let at = rocca::Axial::of(p);
+            // the usable hex nearest the point, as `move` does
+            let at = sim.hexes.nearest(p).map_or(rocca::Axial::of(p), |h| h.at);
             k.move_hex = Some(at);
             k.move_plan = Some(sim.plan_move(t, at));
             // as if the team's flag were being dragged there
@@ -350,6 +360,7 @@ pub fn drive(
     mut mario: ResMut<crate::mario::Playground>,
     costs: Option<Res<crate::bench::Costs>>,
     target: Option<Res<SnapTarget>>,
+    mut rec: ResMut<crate::record::Recorder>,
     mut p: Local<Progress>,
 ) {
     let Ok(dir) = std::env::var("KIOSK_SNAP") else { return };
@@ -431,6 +442,21 @@ pub fn drive(
             let long = f.iter().filter(|&&d| d > 0.025).count();
             eprintln!("bench: {:<14} {:6.1} fps  mean {:5.2} ms  p95 {:5.2} ms  max {:5.1} ms  ({} frames, {long} over 25 ms)", st.name, 1.0 / mean, mean * 1e3, p95 * 1e3, f[f.len() - 1] * 1e3, f.len());
         }
+    }
+    // filming: one picture a frame until the recording is written
+    if let (Some(seconds), Some(t)) = (st.rec, target.as_ref()) {
+        if p.waited > SETTLE_S && ready {
+            if !p.filming {
+                p.filming = true;
+                rec.start(&mut commands, &std::path::Path::new(&dir).join(&st.name), seconds);
+            }
+            if rec.frame(&mut commands, &t.0) {
+                p.filming = false;
+                p.at += 1;
+                p.applied = false;
+            }
+        }
+        return;
     }
     if p.waited > SETTLE_S && ready {
         let shot = target.as_ref().map_or(Screenshot::window(window), |t| Screenshot::image(t.0.clone()));

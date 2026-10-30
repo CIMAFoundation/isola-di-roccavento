@@ -1,0 +1,8 @@
+[package]
+name = "sfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The game's sounds made in code: the ambience of the island and the short cues"
+
+[dependencies]

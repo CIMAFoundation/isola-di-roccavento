@@ -18,6 +18,7 @@ abm.workspace = true
 behavior.workspace = true
 anyhow.workspace = true
 datafs.workspace = true
+sfx.workspace = true
 libsm64-native = { path = "../libsm64-native", optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -28,7 +29,7 @@ wgpu = { version = "30", default-features = false }
 bevy_egui = { version = "0.43.1", default-features = false, features = ["open_url", "default_fonts", "render"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bevy = { version = "0.20", default-features = true, features = ["track_location"] }
+bevy = { version = "0.20", default-features = true, features = ["track_location", "mp3"] }
 libc = "0.2"
 # total RAM at launch (`memory`); already in the tree through bevy_diagnostic
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
@@ -40,7 +41,7 @@ sys-locale = "0.3"
 bevy = { version = "0.20", default-features = false, features = [
     "default_app", "std", "bevy_winit", "bevy_gilrs", "webgl2", "png",
     "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_post_process",
-    "bevy_anti_alias", "bevy_gizmos_render", "bevy_audio",
+    "bevy_anti_alias", "bevy_gizmos_render", "bevy_audio", "mp3",
     "tonemapping_luts", "smaa_luts", "ktx2", "zstd_rust",
 ] }
 web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Element"] }

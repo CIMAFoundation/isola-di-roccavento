@@ -239,6 +239,21 @@
         apply();
       })();
     </script>
+    <script>
+      // Sound (2026-10-30): a browser keeps an AudioContext suspended until the
+      // first gesture on the page. The game's (cpal's) is made before that:
+      // every context is remembered and resumed at each gesture.
+      (() => {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        const made = [];
+        function Remembered(...args) { const c = new Ctx(...args); made.push(c); return c; }
+        Remembered.prototype = Ctx.prototype;
+        window.AudioContext = Remembered;
+        const wake = () => made.forEach(c => { if (c.state === 'suspended') c.resume(); });
+        for (const ev of ['pointerdown', 'keydown', 'touchend']) addEventListener(ev, wake, { capture: true });
+      })();
+    </script>
     <script type="module">
       // Explicitly opt in; normal visitors retain the real-time kiosk clock.
       if (new URLSearchParams(location.search).get('playtest') === '1') {

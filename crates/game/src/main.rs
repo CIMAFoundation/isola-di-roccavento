@@ -41,8 +41,11 @@ mod playtest;
 mod adaptive;
 mod quality;
 mod quality_live;
+mod record;
 mod flat;
 mod fonts;
+mod godrays;
+mod horizon;
 mod tactical;
 mod tape;
 mod materials;
@@ -54,6 +57,7 @@ mod sea;
 mod sky;
 mod sky_light;
 mod sim;
+mod sound;
 mod terrain_mesh;
 mod textures;
 mod ui;
@@ -161,11 +165,12 @@ fn main() -> anyhow::Result<()> {
     .add_plugins(tape::TapePlugin)
     .add_plugins(tactical::TacticalPlugin)
     // sun, sky and ambient light from the game's clock; the sea and its wind; the boats
-    .add_plugins((sky::SkyPlugin, sea::SeaPlugin, boats::BoatsPlugin, landmarks::LandmarksPlugin, coast::CoastPlugin))
+    .add_plugins((sky::SkyPlugin, sea::SeaPlugin, boats::BoatsPlugin, landmarks::LandmarksPlugin, coast::CoastPlugin, horizon::HorizonPlugin, godrays::GodRaysPlugin))
     .init_state::<AppState>()
     .init_resource::<units::Glide>()
     .init_resource::<kiosk::snap::SnapView>()
     .init_resource::<kiosk::snap::SnapHide>()
+    .init_resource::<record::Recorder>()
     .init_resource::<ui::UiFocus>()
     .add_message::<sim::SimRestarted>()
     .insert_resource(DataPath(std::path::PathBuf::from(&data)))
@@ -213,6 +218,7 @@ fn main() -> anyhow::Result<()> {
     }
     app.add_plugins(mario::MarioPlugin);
     app.add_plugins(pad::PadPlugin);
+    app.add_plugins(sound::SoundPlugin);
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);
     app.add_systems(PostUpdate, kiosk::snap::redirect_camera);
@@ -273,7 +279,8 @@ fn setup_scene(
         gfx.msaa(),
         grading(),
         Transform::from_xyz(focus.x, focus.y + distance * 0.77, focus.z + distance * 0.77),
-        Projection::from(PerspectiveProjection { far: 40_000.0, ..default() }),
+        // far enough for the land on the horizon (`horizon`, up to ~65 km)
+        Projection::from(PerspectiveProjection { far: 70_000.0, ..default() }),
         OrbitCamera { focus, distance, ..default() },
         // colour and reach are set every frame by `sky::update_sky`
         DistanceFog::default(),
@@ -333,6 +340,7 @@ fn kiosk_systems(app: &mut App) {
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(bevy_egui::EguiPrimaryContextPass, kiosk::ui::fps.after(kiosk::ui::draw).run_if(in_state(AppState::Playing)));
     app.add_systems(Update, near_cover::update.run_if(in_state(AppState::Playing)));
+    app.add_systems(Update, kiosk::view::curtain.after(sky::update_sky).run_if(in_state(AppState::Playing)));
     app.add_systems(
         Update,
         (

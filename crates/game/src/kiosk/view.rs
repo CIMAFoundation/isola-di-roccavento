@@ -388,7 +388,31 @@ pub fn camera(
     // Behind the name screen: a director, not a follower. A shot lasts
     // `SHOT_S`; its subject is picked when it begins, from what the fire is
     // doing then, and the camera glides to it slowly.
-    if kiosk.phase == Phase::Intro && !kiosk.frozen && !kiosk.freecam {
+    // The opening sequence (user, 2026-10-30): flying in from far out at sea,
+    // low, facing the sunrise, fast and then slower, as a plane coming in, to
+    // the island's wide shot; then the director.
+    if let (Some(t), Some((_, d)), Phase::Intro) = (kiosk.opening, *home_view, kiosk.phase) {
+        let x = super::screens::opening_descent(t);
+        orbit.focus = home;
+        orbit.yaw = crate::sky::dawn_yaw() + 0.2 * (1.0 - x);
+        // level for most of the way, so the rising sun is in the picture,
+        // tipping down to the island only at the end
+        let tip = ((x - 0.5) / 0.5).clamp(0.0, 1.0);
+        orbit.pitch = -0.03 + (INTRO_WIDE_PITCH + 0.03) * tip * tip * (3.0 - 2.0 * tip);
+        orbit.distance = d * (0.8 + 4.0 * (1.0 - x));
+        *tracked = None;
+        kiosk.cut = None;
+        kiosk.after_opening = 0.0;
+    }
+    if kiosk.phase == Phase::Intro && !kiosk.frozen && !kiosk.freecam && kiosk.opening.is_none() {
+        // just after the opening the director takes the camera over gently
+        kiosk.after_opening = (kiosk.after_opening + time.delta_secs().min(0.1)).min(1e6);
+        let soft = super::screens::handoff(kiosk.after_opening);
+        // and no cut to black while it does
+        if soft < 1.0 {
+            kiosk.cut = None;
+            kiosk.fade = 0.0;
+        }
         if let Some((yaw0, d)) = *home_view {
             let n = super::demo_shot(kiosk.demo_t);
             let sites = scenic_sites(&sim);
@@ -429,7 +453,7 @@ pub fn camera(
             if kiosk.demo_pick.1 != kiosk.cut_subject {
                 kiosk.cut_subject = kiosk.demo_pick.1;
                 let far = Vec2::new(goal.x - orbit.focus.x, goal.z - orbit.focus.z).length() > CUT_M || !(0.4..2.5).contains(&(dist / orbit.distance));
-                if far && kiosk.cut.is_none() && kiosk.demo_t > 1.0 {
+                if far && kiosk.cut.is_none() && kiosk.demo_t > 1.0 && soft >= 1.0 {
                     kiosk.cut = Some((0.0, false));
                 }
             }
@@ -453,7 +477,7 @@ pub fn camera(
                 }
             }
             let s = 1.0 - (-0.9 * dt).exp();
-            let a = 1.0 - (-0.5 * dt).exp();
+            let a = (1.0 - (-0.5 * dt).exp()) * soft;
             if !hold {
                 *g += (Vec2::new(goal.x, goal.z) - *g) * s;
                 *gd += (dist - *gd) * s;
@@ -465,7 +489,7 @@ pub fn camera(
             // like a helicopter circling: the heading keeps turning, slowly,
             // around the shot's own, and the pitch breathes a little
             let yaw = yaw0 + sway * 0.5 + 0.5 * (kiosk.demo_t * 0.12).sin();
-            orbit.yaw += (yaw - orbit.yaw) * (1.0 - (-0.35 * dt).exp());
+            orbit.yaw += (yaw - orbit.yaw) * (1.0 - (-0.35 * dt).exp()) * soft;
             let pitch = pitch + 0.03 * (kiosk.demo_t * 0.23).sin();
             orbit.pitch += (pitch - orbit.pitch) * a;
         }
@@ -505,7 +529,8 @@ pub fn camera(
 
     orbit.yaw = orbit.yaw.clamp(-MAX_YAW, MAX_YAW);
     let freecam = kiosk.freecam && kiosk.phase == Phase::Intro;
-    let max_pitch = if kiosk.phase == Phase::Intro && !kiosk.frozen && !freecam { INTRO_MAX_PITCH } else { MAX_PITCH };
+    // the opening looks level at the sunrise; the director's shots stay lower
+    let max_pitch = if kiosk.opening.is_some() { -0.01 } else if kiosk.phase == Phase::Intro && !kiosk.frozen && !freecam { INTRO_MAX_PITCH } else { MAX_PITCH };
     orbit.pitch = orbit.pitch.clamp(if mobile_web && kiosk.phase != Phase::Intro { NADIR_PITCH } else { MIN_PITCH }, max_pitch);
     orbit.distance = orbit.distance.clamp(MIN_DIST * shot_zoom().min(1.0), MAX_DIST);
     let off = Vec2::new(orbit.focus.x - home.x, orbit.focus.z - home.z);
@@ -696,4 +721,31 @@ fn shot_focus() -> Option<(f32, f32)> {
         let (a, b) = v.split_once(',')?;
         Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
     })
+}
+
+/// A render layer nothing is on: the scene is not drawn.
+const CURTAIN_LAYER: usize = 27;
+
+/// The opening's black, before the island (user, 2026-10-30: the island
+/// showed for a second before the logo): the camera draws no scene and the
+/// clear colour is black, so nothing shows while the interface, which draws
+/// the logo and the fade, is still compiling. Runs after `sky::update_sky`,
+/// which sets the clear colour every frame.
+pub fn curtain(
+    mut commands: Commands,
+    kiosk: Option<Res<Kiosk>>,
+    cams: Query<(Entity, Has<bevy::camera::visibility::RenderLayers>), With<crate::camera::OrbitCamera>>,
+    mut clear: ResMut<ClearColor>,
+) {
+    let shut = kiosk.is_some_and(|k| k.phase == Phase::Intro && k.opening.is_some_and(|t| t < super::screens::ISLAND_S));
+    for (e, layered) in &cams {
+        if shut && !layered {
+            commands.entity(e).insert(bevy::camera::visibility::RenderLayers::layer(CURTAIN_LAYER));
+        } else if !shut && layered {
+            commands.entity(e).remove::<bevy::camera::visibility::RenderLayers>();
+        }
+    }
+    if shut {
+        clear.0 = Color::BLACK;
+    }
 }

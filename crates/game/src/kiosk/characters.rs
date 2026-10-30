@@ -61,9 +61,11 @@ impl Portraits {
     }
 }
 
-/// The CIMA logo, as an egui texture.
+/// The CIMA logo, as egui textures: 360 px for the title and the screens, and
+/// 1200 px for the opening, where it fills a third of the screen (egui has no
+/// mipmaps: one size would be either blurred big or jagged small).
 #[derive(Resource)]
-pub struct Logo(pub egui::TextureId);
+pub struct Logo(pub egui::TextureId, pub Option<egui::TextureId>);
 
 /// The scenario screen's icons (`tools/factory/scenario_icons.py`), by case.
 #[derive(Resource)]
@@ -123,7 +125,8 @@ pub fn load_portraits(mut commands: Commands, mut images: ResMut<Assets<Image>>,
     commands.insert_resource(ScenarioIcons(icons));
     let logo = include_bytes!("../../../../assets/brand/cima_logo_white.png");
     if let Some(t) = texture(logo, &mut images, &mut contexts) {
-        commands.insert_resource(Logo(t));
+        let large = texture(include_bytes!("../../../../assets/brand/cima_logo_white_1200.png"), &mut images, &mut contexts);
+        commands.insert_resource(Logo(t, large));
     }
 }
 
