@@ -37,6 +37,13 @@ cp web/i18n.js "$out"/i18n.js
 # about a quarter of its size gzipped
 cat > "$out"/.htaccess <<'HT'
 AddType application/wasm .wasm
+# the page and the data list must never be kept by a proxy (the rest is
+# versioned in its URL)
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|json)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
 <IfModule mod_deflate.c>
   AddOutputFilterByType DEFLATE application/wasm application/javascript text/javascript text/html text/css application/json
 </IfModule>
@@ -83,6 +90,9 @@ if command -v wasm-opt >/dev/null; then
     rm -f "$out"/game.opt.wasm
   fi
 fi
+# the data list's URL carries its hash, as the wasm's does
+m="$(shasum "$out"/data/manifest.json | cut -c1-12)"
+sed -i.bak "s#'./data/manifest.json'#'./data/manifest.json?v=$m'#" "$out"/index.html && rm "$out"/index.html.bak
 # a gzipped copy, inflated by the page: some hosts do not compress
 gzip -9 -c "$out"/game_bg.wasm > "$out"/game_bg.wasm.gz
 echo "Built $out ($(du -sh "$out"/game_bg.wasm | cut -f1) wasm)"

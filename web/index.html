@@ -321,10 +321,32 @@
       // hashed URL, handed to the wasm as `window.roccaData` (path -> bytes).
       // On phones they stay gzipped; other browsers inflate them when possible
       // (`roccaDataGzip` tells crates/datafs which form to read).
+      // CIMA's host sometimes drops a download halfway («TypeError: Load
+      // failed» on an iPhone, 2026-10-30): every download, the read of its
+      // body included, is tried up to three times, waiting a little longer
+      // each time.
+      async function retried(what, run) {
+        for (let attempt = 1; ; attempt++) {
+          try {
+            return await run();
+          } catch (e) {
+            if (attempt >= 3) throw e;
+            console.warn(`${what}: attempt ${attempt} failed, trying again`, e);
+            await new Promise(r => setTimeout(r, 800 * attempt));
+          }
+        }
+      }
+
+      // versioned by build_web.sh: a proxy that keeps an old copy (CIMA's
+      // host, 2026-10-30) must not pair this build with another's data
+      const manifestUrl = './data/manifest.json';
+
       async function loadData() {
-        const listed = await fetch('./data/manifest.json', { cache: 'no-cache' });
-        if (!listed.ok) throw new Error(`data/manifest.json: ${listed.status}`);
-        const manifest = await listed.json();
+        const manifest = await retried('data/manifest.json', async () => {
+          const listed = await fetch(manifestUrl, { cache: 'no-cache' });
+          if (!listed.ok) throw new Error(`data/manifest.json: ${listed.status}`);
+          return listed.json();
+        });
         if (window.caches) {
           try {
             const store = await caches.open('rocca-data');
@@ -338,9 +360,11 @@
         const pending = manifest.values();
         async function worker() {
           for (const file of pending) {
-            const gz = await download(file.url, 'rocca-data', false);
-            const bytes = native ? gz.body.pipeThrough(new DecompressionStream('gzip')) : gz.body;
-            files[file.path] = new Uint8Array(await new Response(bytes).arrayBuffer());
+            files[file.path] = await retried(file.path, async () => {
+              const gz = await download(file.url, 'rocca-data', false);
+              const bytes = native ? gz.body.pipeThrough(new DecompressionStream('gzip')) : gz.body;
+              return new Uint8Array(await new Response(bytes).arrayBuffer());
+            });
           }
         }
         await Promise.all(Array.from({ length: lowMemory ? 2 : 6 }, worker));
@@ -444,7 +468,7 @@
         document.body.classList.add('playing');
         intro.classList.add('leaving');
         setTimeout(() => intro.remove(), 400);
-        const { default: init } = await import('./game.js');
+        const { default: init } = await retried('game.js', () => import('./game.js'));
         // On phones compilation finishes before loading data; on computers they overlap.
         (async () => {
           // The wasm also comes gzipped (build_web.sh), inflated here as it
@@ -460,7 +484,7 @@
               : (r.headers.get('Content-Type') || '').startsWith('application/wasm')
                 ? WebAssembly.compileStreaming(r)
                 : r.arrayBuffer().then(b => WebAssembly.compile(b)));
-          const compiling = compile().catch(e => { console.warn('wasm download failed, trying again', e); loadedBytes = 0; return compile(); });
+          const compiling = retried('game_bg.wasm', () => { loadedBytes = 0; return compile(); });
           if (!lowMemory) return Promise.all([compiling, loadData()]);
           const module = await compiling;
           await loadData();
