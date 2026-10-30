@@ -26,8 +26,12 @@ wasm-bindgen --target web --no-typescript --out-dir "$out" --out-name game \
 # A version in the URLs, so a browser that has the previous build cached
 # fetches the new one (python's server and GitHub Pages both let it cache).
 v="$(shasum "$out"/game_bg.wasm | cut -c1-12)"
-sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?v=$v'#" web/index.html > "$out"/index.html
+li="$(shasum web/i18n.js | cut -c1-12)"
+sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?v=$v'#" \
+  -e "s#\"./i18n.js\"#\"./i18n.js?v=$li\"#" web/index.html > "$out"/index.html
 cp -R web/img "$out"/img
+# The landing page's texts (tools/i18n/landing.py)
+cp web/i18n.js "$out"/i18n.js
 # What the game loads: the one scenario, the behaviours, the fuels.
 python3 -I - "$root" "$out" <<'PY'
 import gzip, hashlib, json, os, sys

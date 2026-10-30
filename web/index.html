@@ -38,6 +38,11 @@
       .brand span { font-size: 13px; line-height: 1.25; letter-spacing: .04em; text-transform: uppercase; font-weight: 600; opacity: .9; }
       .top a.ext { color: #fff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 9px 16px; border: 1px solid #fff6; border-radius: 999px; }
       .top a.ext:hover { background: #fff2; }
+      .tools { display: flex; align-items: center; gap: 12px; }
+      .lang { display: flex; align-items: center; gap: 6px; padding: 0 6px 0 12px; border: 1px solid #fff6; border-radius: 999px; color: #fff; font-size: 14px; }
+      .lang select { min-height: 38px; max-width: 9.5em; border: 0; background: transparent; color: #fff; font: 600 14px 'Montserrat', system-ui, sans-serif; cursor: pointer; }
+      .lang select option { color: #14202e; }
+      .lang:focus-within { outline: 3px solid #fff; outline-offset: 2px; }
       .hero { position: relative; min-height: min(100vh, 860px); display: flex; align-items: center; padding: 120px 0 72px; color: #fff; background: radial-gradient(1100px 600px at 85% 20%, #0f6fc4 0%, transparent 60%), linear-gradient(160deg, #06264a 0%, #0a3d75 60%, #0a5aa8 100%); overflow: hidden; }
       .hero .wrap { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 56px; align-items: center; }
       .eyebrow { display: inline-block; margin-bottom: 18px; padding: 6px 14px; border-radius: 999px; background: #19b4e61f; color: #8fe0ff; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
@@ -89,6 +94,7 @@
           .cards { grid-template-columns: 1fr; }
         section.block { padding: 60px 0; }
         .brand span { display: none; }
+        .top a.ext { display: none; }
       }
       @media (prefers-reduced-motion: reduce) { #intro, #play, .play { transition: none; } }
       #game, #loading { visibility: hidden; }
@@ -103,30 +109,33 @@
             <img src="./img/cima_logo_white.png" alt="CIMA Research Foundation">
             <span>CIMA Research<br>Foundation</span>
           </a>
-          <a class="ext" href="https://www.cimafoundation.org" target="_blank" rel="noopener">cimafoundation.org</a>
+          <div class="tools">
+            <label class="lang"><span aria-hidden="true">🌐</span><select id="lang" data-aria="lang" aria-label="Lingua"></select></label>
+            <a class="ext" href="https://www.cimafoundation.org" target="_blank" rel="noopener">cimafoundation.org</a>
+          </div>
         </div>
       </header>
 
       <section class="hero">
         <div class="wrap">
           <div>
-            <span class="eyebrow">Gioco di protezione civile</span>
+            <span class="eyebrow" data-t="eyebrow">Gioco di protezione civile</span>
             <h1>Isola di <em>Roccavento</em></h1>
-            <p class="lead">È una mattina di vento. Su una collina dell’isola si alza il fumo, e sotto ci sono cinque borghi. Il fuoco non aspetta nessuno: tocca a te decidere dove mandare i vigili del fuoco e chi mettere in salvo.</p>
+            <p class="lead" data-t="lead">È una mattina di vento. Su una collina dell’isola si alza il fumo, e sotto ci sono cinque borghi. Il fuoco non aspetta nessuno: tocca a te decidere dove mandare i vigili del fuoco e chi mettere in salvo.</p>
             <div class="cta">
               <button id="play" class="play" type="button">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5v17l14-8.5z" fill="currentColor"/></svg>
-                Gioca
+                <span data-t="play">Gioca</span>
               </button>
             </div>
-            <p class="dl">Meglio sul computer? Scarica per
+            <p class="dl"><span data-t="dl">Meglio sul computer? Scarica per</span>
               <a href="https://github.com/CIMAFoundation/isola-di-roccavento/releases/download/download/Isola-di-Roccavento-windows.zip">Windows</a> ·
               <a href="https://github.com/CIMAFoundation/isola-di-roccavento/releases/download/download/Isola-di-Roccavento-macos.zip">macOS</a> ·
               <a href="https://github.com/CIMAFoundation/isola-di-roccavento/releases/download/download/Isola-di-Roccavento-linux.zip">Linux</a></p>
           </div>
           <div class="shot">
-            <img src="./img/hero.jpg" alt="Il fuoco scende dalla collina verso un borgo dell’isola" width="1400" height="875">
-            <figure class="inset"><img src="./img/tattica-squadre.jpg" alt="Una schermata del gioco con la mappa tattica: squadre, fronte del fuoco e previsione" width="1208" height="755"><figcaption><i></i>Dal gioco</figcaption></figure>
+            <img src="./img/hero.jpg" data-alt="alt_hero" alt="Il fuoco scende dalla collina verso un borgo dell’isola" width="1400" height="875">
+            <figure class="inset"><img src="./img/tattica-squadre.jpg" data-alt="alt_inset" alt="Una schermata del gioco con la mappa tattica: squadre, fronte del fuoco e previsione" width="1208" height="755"><figcaption><i></i><span data-t="from_game">Dal gioco</span></figcaption></figure>
           </div>
         </div>
       </section>
@@ -135,16 +144,16 @@
         <div class="wrap">
           <div class="cards">
             <article class="card">
-              <img src="./img/scena-borgo.jpg" alt="Il fuoco che avanza sulla collina sopra la strada costiera dell’isola" loading="lazy" width="1400" height="875">
-              <div><span class="n">1</span><h3>Leggi l’incendio</h3><p>Vento, vegetazione e pendenza decidono dove va il fuoco. Tu devi anticiparlo.</p></div>
+              <img src="./img/scena-borgo.jpg" data-alt="alt1" alt="Il fuoco che avanza sulla collina sopra la strada costiera dell’isola" loading="lazy" width="1400" height="875">
+              <div><span class="n">1</span><h3 data-t="h1">Leggi l’incendio</h3><p data-t="p1">Vento, vegetazione e pendenza decidono dove va il fuoco. Tu devi anticiparlo.</p></div>
             </article>
             <article class="card">
-              <img src="./img/tattica-isola.jpg" alt="La mappa tattica con il fronte del fuoco e la previsione tra un’ora e tra tre" loading="lazy" width="1208" height="755">
-              <div><span class="n">2</span><h3>Scegli dove intervenire</h3><p>Le squadre sono poche e non puoi essere dappertutto. Ogni scelta lascia scoperto qualcosa.</p></div>
+              <img src="./img/tattica-isola.jpg" data-alt="alt2" alt="La mappa tattica con il fronte del fuoco e la previsione tra un’ora e tra tre" loading="lazy" width="1208" height="755">
+              <div><span class="n">2</span><h3 data-t="h2">Scegli dove intervenire</h3><p data-t="p2">Le squadre sono poche e non puoi essere dappertutto. Ogni scelta lascia scoperto qualcosa.</p></div>
             </article>
             <article class="card">
-              <img src="./img/tattica-evacua.jpg" alt="La scheda di un borgo con il pulsante Evacua e le strade chiuse dal fuoco" loading="lazy" width="1208" height="755">
-              <div><span class="n">3</span><h3>Metti in salvo i borghi</h3><p>Evacuare troppo presto o troppo tardi ha un costo. Alla fine scopri quanto hai salvato.</p></div>
+              <img src="./img/tattica-evacua.jpg" data-alt="alt3" alt="La scheda di un borgo con il pulsante Evacua e le strade chiuse dal fuoco" loading="lazy" width="1208" height="755">
+              <div><span class="n">3</span><h3 data-t="h3">Metti in salvo i borghi</h3><p data-t="p3">Evacuare troppo presto o troppo tardi ha un costo. Alla fine scopri quanto hai salvato.</p></div>
             </article>
           </div>
         </div>
@@ -152,17 +161,17 @@
 
       <section class="block alt">
         <div class="wrap">
-          <div class="kicker">Dalla ricerca al gioco</div>
-          <p class="sub">Sotto la mappa gira un vero modello di propagazione degli incendi, usato nella ricerca. Qui diventa un gioco per capire una cosa semplice e difficile: in protezione civile bisogna decidere subito, senza sapere tutto.</p>
+          <div class="kicker" data-t="kicker">Dalla ricerca al gioco</div>
+          <p class="sub" data-t="research">Sotto la mappa gira un vero modello di propagazione degli incendi, usato nella ricerca. Qui diventa un gioco per capire una cosa semplice e difficile: in protezione civile bisogna decidere subito, senza sapere tutto.</p>
         </div>
       </section>
 
       <section class="block bottom" style="background-image: linear-gradient(160deg, #06264aee, #0a5aa8bb), url(./img/scena-cicatrice.jpg); background-size: cover; background-position: center;">
         <div class="wrap">
-          <h2>Il fuoco sta arrivando. Cosa fai?</h2>
+          <h2 data-t="bottom">Il fuoco sta arrivando. Cosa fai?</h2>
           <button id="play-bottom" class="play" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5v17l14-8.5z" fill="currentColor"/></svg>
-            Gioca
+            <span data-t="play">Gioca</span>
           </button>
         </div>
       </section>
@@ -170,7 +179,7 @@
       <footer>
         <div class="wrap">
           <img src="./img/cima_logo_white.png" alt="CIMA Research Foundation">
-          <span>Realizzato da CIMA Research Foundation per la Settimana della Protezione Civile.</span>
+          <span data-t="footer">Realizzato da CIMA Research Foundation per la Settimana della Protezione Civile.</span>
           <a href="https://www.cimafoundation.org" target="_blank" rel="noopener">cimafoundation.org</a>
         </div>
       </footer>
@@ -179,17 +188,57 @@
     <div id="loading">
       <h1>Isola di Roccavento</h1>
       <div id="bar" class="wait"><div id="fill"></div></div>
-      <div id="status">Caricamento del territorio e della simulazione…</div>
+      <div id="status" data-t="loading">Caricamento del territorio e della simulazione…</div>
     </div>
     <div id="rom-toast"></div>
     <dialog id="name-dialog">
       <form method="dialog">
-        <label for="player-name">Come ti chiami?</label>
+        <label for="player-name" data-t="name">Come ti chiami?</label>
         <input id="player-name" name="name" maxlength="32" autocomplete="given-name" enterkeyhint="done">
-        <button type="submit">Continua</button>
+        <button type="submit" data-t="cont">Continua</button>
       </form>
     </dialog>
     <input id="rom-input" type="file" accept=".z64,.v64,.n64,.rom" hidden>
+    <script src="./i18n.js"></script>
+    <script>
+      // The page's language (2026-10-30): `?lang=` > the one chosen before
+      // (shared with the game, `rocca_ventosa_lingua`) > the browser's
+      // (`navigator.languages`, also by primary subtag: de-AT -> de) >
+      // English. The game reads the choice from `window.roccaLang`.
+      (() => {
+        const texts = window.ROCCA_TEXTS || {};
+        const known = code => code && Object.hasOwn(texts, code);
+        const primary = tag => String(tag).toLowerCase().split(/[-_]/)[0];
+        let saved = null;
+        try { saved = localStorage.getItem('rocca_ventosa_lingua'); } catch (e) {}
+        const forced = new URLSearchParams(location.search).get('lang');
+        const browser = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language]).map(primary).find(known);
+        // `tlh` (the Klingon easter egg) reaches the game; the page stays in English
+        const chosen = forced || saved || browser || 'en';
+        if (forced || saved) window.roccaLang = chosen;
+        const select = document.querySelector('#lang');
+        window.roccaText = (key, vars = {}) => {
+          const t = (texts[known(primary(window.roccaLang || chosen)) ? primary(window.roccaLang || chosen) : 'en'] || {})[key] || texts.it?.[key] || key;
+          return t.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
+        };
+        function apply() {
+          const code = known(primary(window.roccaLang || chosen)) ? primary(window.roccaLang || chosen) : 'en';
+          document.documentElement.lang = code;
+          document.querySelectorAll('[data-t]').forEach(el => { el.textContent = window.roccaText(el.dataset.t); });
+          document.querySelectorAll('[data-alt]').forEach(el => { el.alt = window.roccaText(el.dataset.alt); });
+          document.querySelectorAll('[data-aria]').forEach(el => { el.setAttribute('aria-label', window.roccaText(el.dataset.aria)); });
+          select.value = code;
+        }
+        for (const [code, name] of window.ROCCA_LANGS || []) select.add(new Option(name, code));
+        select.addEventListener('change', () => {
+          window.roccaLang = select.value;
+          try { localStorage.setItem('rocca_ventosa_lingua', select.value); } catch (e) {}
+          apply();
+        });
+        if (!window.roccaLang) window.roccaLang = known(chosen) ? chosen : 'en';
+        apply();
+      })();
+    </script>
     <script type="module">
       // Explicitly opt in; normal visitors retain the real-time kiosk clock.
       if (new URLSearchParams(location.search).get('playtest') === '1') {
@@ -246,7 +295,7 @@
         const counted = response.body.pipeThrough(new TransformStream({
           transform(chunk, controller) {
             loadedBytes += chunk.length;
-            status.textContent = `Scaricati ${(loadedBytes / 1e6).toFixed(1)} MB`;
+            status.textContent = roccaText('downloaded', { n: (loadedBytes / 1e6).toFixed(1) });
             controller.enqueue(chunk);
           },
         }));
@@ -258,9 +307,6 @@
       // On phones they stay gzipped; other browsers inflate them when possible
       // (`roccaDataGzip` tells crates/datafs which form to read).
       async function loadData() {
-        // `?lang=de` forces the game's language (the game otherwise follows the browser's)
-        const forcedLang = new URLSearchParams(location.search).get('lang');
-        if (forcedLang) window.roccaLang = forcedLang;
         const listed = await fetch('./data/manifest.json', { cache: 'no-cache' });
         if (!listed.ok) throw new Error(`data/manifest.json: ${listed.status}`);
         const manifest = await listed.json();
@@ -324,10 +370,10 @@
       }
       async function takeRom(file) {
         const rom = toZ64(new Uint8Array(await file.arrayBuffer()));
-        if (!rom) { say('Non è una ROM di Super Mario 64 (USA) da 8 MB.'); return; }
+        if (!rom) { say(roccaText('rom_bad')); return; }
         window.marioRom = rom;
         store('readwrite', s => s.put(rom, 'sm64')).catch(() => {});
-        say('ROM caricata.');
+        say(roccaText('rom_ok'));
       }
       window.marioPickRom = () => romInput.click();
       // the game found the ROM wrong (not the USA release): forget it
@@ -361,9 +407,9 @@
         message.id = 'loading';
         message.style.pointerEvents = 'auto';
         message.style.background = '#d0c6b4';
-        message.textContent = 'La grafica è stata interrotta dal browser.';
+        message.textContent = roccaText('gfx_lost');
         const retry = document.createElement('button');
-        retry.textContent = 'Ricarica il gioco';
+        retry.textContent = roccaText('reload');
         retry.style.cssText = 'min-height:44px;padding:10px 20px;font:18px system-ui';
         retry.onclick = () => location.reload();
         message.append(retry);
@@ -393,7 +439,7 @@
           return [module];
         })()
           .then(([module]) => {
-            status.textContent = 'Avvio della simulazione…';
+            status.textContent = roccaText('starting');
             return init({ module_or_path: module });
           }).then(() => { loading.remove(); focusCanvas(); })
           .catch(error => {
@@ -402,7 +448,7 @@
               focusCanvas();
               return;
             }
-            loading.textContent = `Impossibile avviare il gioco: ${error}`;
+            loading.textContent = roccaText('failed', { e: error });
             console.error(error);
           });
       }

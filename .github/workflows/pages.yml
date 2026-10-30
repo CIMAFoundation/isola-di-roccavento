@@ -17,6 +17,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      HAS_DEPLOY_KEY: ${{ secrets.DEPLOY_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,6 +27,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - run: ./scripts/build_web.sh
+      # games.cimafoundation.org/isola-di-roccavento (CIMA hosting, SFTP with a
+      # deploy key; docs/web.md). Only from main, and only once the key is set.
+      - name: Upload to games.cimafoundation.org
+        if: github.ref == 'refs/heads/main' && env.HAS_DEPLOY_KEY == 'true'
+        continue-on-error: true  # the Pages deploy below must not depend on it
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || 'isola-di-roccavento' }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf -- '-mkdir %s\ncd %s\nlcd target/web\nput -R *\n' "$DEPLOY_DIR" "$DEPLOY_DIR" > batch.txt
+          sftp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" -o StrictHostKeyChecking=yes -b batch.txt "$DEPLOY_USER@$DEPLOY_HOST"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: target/web
