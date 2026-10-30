@@ -806,7 +806,7 @@ impl Game {
             }
             if let Some(t) = self.teams.iter().position(|t| t.unit == k) {
                 let line = match (was, u.state) {
-                    (_, UnitState::Withdrawing) => Some((Kind::Withdraw, tr!("ci ritiriamo, troppo fuoco ⚠️"))),
+                    (_, UnitState::Withdrawing) => Some((Kind::Withdraw, tr!("ci ritiriamo, troppo fuoco ⚠"))),
                     (_, UnitState::Lost) => Some((Kind::Lost, tr!("il fuoco ci ha raggiunti, SOS 🆘"))),
                     _ => None,
                 };

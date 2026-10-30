@@ -42,6 +42,7 @@ mod adaptive;
 mod quality;
 mod quality_live;
 mod flat;
+mod fonts;
 mod tactical;
 mod tape;
 mod materials;
@@ -148,6 +149,7 @@ fn main() -> anyhow::Result<()> {
     .insert_resource(gfx)
     .insert_resource(bevy::light::DirectionalLightShadowMap { size: gfx.shadow_map })
     .add_plugins(EguiPlugin::default())
+    .add_plugins(fonts::FontsPlugin)
     .add_plugins(shader_lib::ShaderLibPlugin)
     .add_plugins(fire_shader::FireShaderPlugin)
     .add_plugins(materials::MaterialsPlugin)
