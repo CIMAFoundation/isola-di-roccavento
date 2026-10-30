@@ -447,7 +447,12 @@
         const { default: init } = await import('./game.js');
         // On phones compilation finishes before loading data; on computers they overlap.
         (async () => {
-          const compiling = WebAssembly.compileStreaming(download('./game_bg.wasm', 'rocca-wasm', true));
+          // Streaming needs the server to say application/wasm; a host that
+          // does not (CIMA's, 2026-10-30) gets the whole file compiled at once
+          const compiling = download('./game_bg.wasm', 'rocca-wasm', true).then(r =>
+            (r.headers.get('Content-Type') || '').startsWith('application/wasm')
+              ? WebAssembly.compileStreaming(r)
+              : r.arrayBuffer().then(b => WebAssembly.compile(b)));
           if (!lowMemory) return Promise.all([compiling, loadData()]);
           const module = await compiling;
           await loadData();

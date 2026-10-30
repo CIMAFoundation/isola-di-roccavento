@@ -32,6 +32,8 @@ sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?
 cp -R web/img "$out"/img
 # The landing page's texts (tools/i18n/landing.py)
 cp web/i18n.js "$out"/i18n.js
+# Apache hosts (games.cimafoundation.org) serve .wasm without its type unless told
+printf 'AddType application/wasm .wasm\n' > "$out"/.htaccess
 # What the game loads: the one scenario, the behaviours, the fuels, the sounds.
 python3 -I - "$root" "$out" <<'PY'
 import gzip, hashlib, json, os, sys
