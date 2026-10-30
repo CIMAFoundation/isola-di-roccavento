@@ -128,7 +128,7 @@ python3 -m http.server 8765 --directory target/web      # http://localhost:8765
 
 Con `CARGO_TARGET_DIR` impostato il sito va in `$CARGO_TARGET_DIR/web`. Da Bevy 0.20 (2026-10-21): Rust 1.97.1 (`rust-toolchain.toml`), `wasm-bindgen-cli` 0.2.129 (stessa versione di `Cargo.lock`, anche in `pages.yml`), `getrandom` 0.2 con `js` e 0.4 con `wasm_js` per il target wasm, `strip = "symbols"` nel profilo `wasm-release` (senza, il `.wasm` pesava 126 MB; ora 61 MB, `wasm-opt` non installato). Provato in Chrome headless solo con `q=bassa` fino al titolo.
 
-Pubblicazione: `.github/workflows/pages.yml` costruisce e pubblica su GitHub Pages a ogni push su `main`, `settimana-protezione-civile` o `nuovo-gioco`. Indirizzo: https://mirkodandrea.github.io/propagator_abm/
+Pubblicazione: `.github/workflows/pages.yml` costruisce e pubblica su GitHub Pages a ogni push su `main`, `settimana-protezione-civile` o `nuovo-gioco`. Indirizzo: https://cimafoundation.github.io/isola-di-roccavento/ (repository `CIMAFoundation/isola-di-roccavento` dal 2026-10-30; in futuro games.cimafoundation.org/isola-di-roccavento)
 
 **Versione provata (2026-10-15):** `crates/game/build.rs` registra il commit della compilazione (`GAME_COMMIT`, con `-modificato` se l'albero non è pulito; in CI è quello pubblicato). Compare sul titolo («versione xxxxxxxx») e il pulsante «Dai un feedback» lo scrive da solo nella domanda «Versione del gioco» del Google Form (`entry.2126742218`).
 
