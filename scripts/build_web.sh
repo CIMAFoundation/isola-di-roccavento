@@ -83,4 +83,6 @@ if command -v wasm-opt >/dev/null; then
     rm -f "$out"/game.opt.wasm
   fi
 fi
+# a gzipped copy, inflated by the page: some hosts do not compress
+gzip -9 -c "$out"/game_bg.wasm > "$out"/game_bg.wasm.gz
 echo "Built $out ($(du -sh "$out"/game_bg.wasm | cut -f1) wasm)"

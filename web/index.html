@@ -447,12 +447,20 @@
         const { default: init } = await import('./game.js');
         // On phones compilation finishes before loading data; on computers they overlap.
         (async () => {
-          // Streaming needs the server to say application/wasm; a host that
-          // does not (CIMA's, 2026-10-30) gets the whole file compiled at once
-          const compiling = download('./game_bg.wasm', 'rocca-wasm', true).then(r =>
-            (r.headers.get('Content-Type') || '').startsWith('application/wasm')
-              ? WebAssembly.compileStreaming(r)
-              : r.arrayBuffer().then(b => WebAssembly.compile(b)));
+          // The wasm also comes gzipped (build_web.sh), inflated here as it
+          // arrives: CIMA's host does not compress (2026-10-30), 25 MB -> 8.
+          // Streaming needs the type application/wasm; without it the whole
+          // file is compiled at once.
+          // A download cut halfway (seen on CIMA's host) is tried again.
+          const wasmUrl = './game_bg.wasm';
+          const zipped = typeof DecompressionStream === 'function';
+          const compile = () => download(zipped ? wasmUrl.replace('.wasm', '.wasm.gz') : wasmUrl, 'rocca-wasm', true).then(r =>
+            zipped
+              ? WebAssembly.compileStreaming(new Response(r.body.pipeThrough(new DecompressionStream('gzip')), { headers: { 'Content-Type': 'application/wasm' } }))
+              : (r.headers.get('Content-Type') || '').startsWith('application/wasm')
+                ? WebAssembly.compileStreaming(r)
+                : r.arrayBuffer().then(b => WebAssembly.compile(b)));
+          const compiling = compile().catch(e => { console.warn('wasm download failed, trying again', e); loadedBytes = 0; return compile(); });
           if (!lowMemory) return Promise.all([compiling, loadData()]);
           const module = await compiling;
           await loadData();
