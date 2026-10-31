@@ -282,6 +282,11 @@ pub fn update_overlay(
     mut view: ResMut<FireView>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    // `?fuoco=0` in the browser: the fire's meshes are never rewritten (a
+    // switch to find what kills an iPhone's page, 2026-10-31)
+    if crate::quality::web_off("fuoco") {
+        return;
+    }
     view.since_overlay += time.delta_secs();
     let layer = *layer;
     let stale = sim.generation != view.last_generation || layer != view.last_layer;
@@ -684,6 +689,10 @@ pub fn update_flames(
     mut view: ResMut<FireView>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    // `?fuoco=0`: no flames, smoke or sparks (see `update_overlay`)
+    if crate::quality::web_off("fuoco") {
+        return;
+    }
     let Ok(cam) = camera.single() else {
         return;
     };

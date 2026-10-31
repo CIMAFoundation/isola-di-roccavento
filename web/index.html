@@ -283,14 +283,35 @@
         }
         traceSteps.push(line);
         traceSteps = traceSteps.slice(-24);
-        try { localStorage.setItem(traceKey, JSON.stringify({ open: true, steps: traceSteps })); } catch (e) {}
+        saveTrace();
+      }
+      function saveTrace() {
+        try { localStorage.setItem(traceKey, JSON.stringify({ open: true, steps: traceSteps, logs: traceLogs })); } catch (e) {}
+      }
+      // The console's last messages too (the game's log, WebGL and wgpu
+      // errors): what the Web Inspector would show, for a phone that cannot
+      // be connected to one. Formatting (%c and its styles) is dropped.
+      let traceLogs = [];
+      for (const level of ['log', 'info', 'warn', 'error']) {
+        const original = console[level].bind(console);
+        console[level] = (...args) => {
+          original(...args);
+          try {
+            let text = args.map(a => typeof a === 'string' ? a : (a instanceof Error ? a.message : JSON.stringify(a))).join(' ');
+            if (text.includes('control flow')) return;
+            text = text.replace(/%c/g, '').replace(/\s*(color|background|font-style):[^;]*;?/g, '').replace(/\S*\/registry\/src\/[^/]+\//g, '').replace(/\s+/g, ' ').trim();
+            traceLogs.push(`${((performance.now() - born) / 1000).toFixed(1)} ${level[0].toUpperCase()} ${text.slice(0, 220)}`);
+            traceLogs = traceLogs.slice(-30);
+            saveTrace();
+          } catch (e) {}
+        };
       }
       try {
         const last = JSON.parse(localStorage.getItem(traceKey) || 'null');
         if (last && last.open && last.steps.length > 1) {
           const box = document.createElement('pre');
           box.style.cssText = 'margin:0;padding:10px 14px;background:#fff3cd;color:#5a4300;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap;border-bottom:1px solid #e0c870';
-          box.textContent = '⚠ ' + navigator.userAgent + '\n' + last.steps.join('\n');
+          box.textContent = '⚠ ' + navigator.userAgent + '\n' + last.steps.join('\n') + (last.logs && last.logs.length ? '\n— console —\n' + last.logs.join('\n') : '');
           intro.prepend(box);
         }
         localStorage.removeItem(traceKey);
