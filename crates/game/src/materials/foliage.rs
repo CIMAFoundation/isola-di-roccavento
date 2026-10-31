@@ -229,8 +229,14 @@ impl Material for FoliageMaterial {
                 fragment.shader_defs.push("PLAIN_FOLIAGE".into());
             }
         }
-        let plant = layout.0.get_layout(&[ATTRIBUTE_PLANT.at_shader_location(PLANT_LOCATION)])?;
-        descriptor.vertex.buffers[0].attributes.extend(plant.attributes);
+        // the plant index: a vertex attribute in the merged chunk meshes, the
+        // mesh tag of an instance (`vegetation::instanced`)
+        if layout.0.contains(ATTRIBUTE_PLANT) {
+            let plant = layout.0.get_layout(&[ATTRIBUTE_PLANT.at_shader_location(PLANT_LOCATION)])?;
+            descriptor.vertex.buffers[0].attributes.extend(plant.attributes);
+        } else {
+            descriptor.vertex.shader_defs.push("PLANT_TAG".into());
+        }
         Ok(())
     }
 }

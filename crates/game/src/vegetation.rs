@@ -305,7 +305,13 @@ pub fn spawn(
     let atlas = images.add(materials::foliage_atlas());
     let state = images.add(state_image(&[]));
     let material = materials.add(FoliageMaterial::new(state.clone(), atlas));
+    // two texels per plant: its fire state ([`Texel`]) and, for an instance,
+    // its tint ([`tint_texel`])
     let mut texels: Vec<Texel> = Vec::new();
+    let instanced = instanced();
+    let mut variety_meshes: std::collections::HashMap<&'static str, Handle<Mesh>> = Default::default();
+    let mut inst_tris_per: std::collections::HashMap<&'static str, usize> = Default::default();
+    let (mut inst_count, mut inst_tris) = (0usize, 0usize);
 
     let (rows, cols) = (scn.world.fire_rows, scn.world.fire_cols);
     let chunks_y = rows.div_ceil(CHUNK_CELLS);
@@ -316,9 +322,10 @@ pub fn spawn(
 
     for cy in 0..chunks_y {
         for cx in 0..chunks_x {
-            let mut builder = Lods::default();
+            let mut builder = Lods { instanced, ..Default::default() };
             builder.low.want_far = true;
             let mut plants = Vec::new();
+            let mut chunk_insts: Vec<Option<Inst>> = Vec::new();
 
             for r in cy * CHUNK_CELLS..((cy + 1) * CHUNK_CELLS).min(rows) {
                 for c in cx * CHUNK_CELLS..((cx + 1) * CHUNK_CELLS).min(cols) {
@@ -336,6 +343,7 @@ pub fn spawn(
                         let start = builder.full.positions.len() as u32;
                         let low_start = builder.low.positions.len() as u32;
                         let remains_before = builder.remains.len();
+                        let inst_before = builder.inst.len();
                         let Some(pos) = scatter_plant(scn, cell, species, &mut rng, &mut builder)
                         else {
                             continue;
@@ -350,25 +358,77 @@ pub fn spawn(
                             remains: builder.remains.get(remains_before).cloned(),
                             texel: 0,
                         });
+                        chunk_insts.push(builder.inst.get(inst_before).cloned());
                     }
                 }
             }
 
-            if builder.full.positions.is_empty() {
+            if plants.is_empty() {
                 continue;
             }
             plant_count += plants.len();
             tri_count += builder.full.indices.len() / 3;
             low_tri_count += builder.low.indices.len() / 3;
 
-            let bounds = builder.full.positions.iter().fold(
-                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                |(lo, hi), p| (lo.min(Vec3::from(*p)), hi.max(Vec3::from(*p))),
-            );
-            let first = texels.len() as u32;
-            for p in &mut plants {
+            let bounds = builder.full.positions.iter().copied()
+                .chain(chunk_insts.iter().flatten().map(|i| i.base.to_array()))
+                .fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), p| (lo.min(Vec3::from(p)), hi.max(Vec3::from(p))),
+                );
+            let first = (texels.len() / 2) as u32;
+            for (p, inst) in plants.iter_mut().zip(&chunk_insts) {
                 p.texel = texel(None, p.remains.is_some(), false);
                 texels.push(p.texel);
+                texels.push(inst.as_ref().map_or(NO_TINT, tint_texel));
+            }
+            // the plants as instances of their variety's mesh
+            for (i, inst) in chunk_insts.iter().enumerate() {
+                let Some(inst) = inst else { continue };
+                let mesh = variety_meshes
+                    .entry(inst.name)
+                    .or_insert_with(|| {
+                        let mesh = variety_proxy(inst.name);
+                        inst_tris_per.insert(inst.name, mesh.indices().map_or(0, |i| i.len() / 3));
+                        meshes.add(mesh)
+                    })
+                    .clone();
+                inst_tris += inst_tris_per[inst.name];
+                commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_translation(inst.base)
+                        .with_rotation(Quat::from_rotation_y(inst.yaw))
+                        .with_scale(inst.scale),
+                    bevy::mesh::MeshTag::new(first + i as u32),
+                    TransmittedShadowReceiver,
+                ));
+                inst_count += 1;
+            }
+            if builder.low.positions.is_empty() {
+                // every plant an instance: no chunk meshes
+                chunks.push(Chunk {
+                    first,
+                    far_low: None,
+                    far: false,
+                    full: Entity::PLACEHOLDER,
+                    low: Entity::PLACEHOLDER,
+                    near: false,
+                    full_casts: false,
+                    shadow: None,
+                    bounds,
+                    cells: (
+                        cy * CHUNK_CELLS,
+                        ((cy + 1) * CHUNK_CELLS).min(rows),
+                        cx * CHUNK_CELLS,
+                        ((cx + 1) * CHUNK_CELLS).min(cols),
+                    ),
+                    plants,
+                    char: None,
+                    lit: 0,
+                    burnt: 0,
+                });
+                continue;
             }
             let (verts, low_verts) = (builder.full.positions.len(), builder.low.positions.len());
             low_verts_count += low_verts;
@@ -460,6 +520,13 @@ pub fn spawn(
         low_verts_count as f32 / 1e6,
         far_verts as f32 / 1e6
     );
+    if instanced {
+        info!(
+            "vegetation: {inst_count} plants as instances of {} variety meshes, {:.2} M triangles",
+            variety_meshes.len(),
+            inst_tris as f32 / 1e6
+        );
+    }
     // the state image, now that every plant has its index
     let _ = images.insert(&state, state_image(&texels));
     commands.insert_resource(Vegetation { material, state, thin_dirty: gfx.veg_keep < 1.0, chunks, lod_m: gfx.lod_m, drawn_at: None, drawn_cleared: 0 });
@@ -817,6 +884,32 @@ struct Lods {
     low: Builder,
     /// One entry per plant drawn from an archetype, in order.
     remains: Vec<Remains>,
+    /// Plants are entities of their own ([`instanced`]): they are not built
+    /// into the chunk meshes, `inst` records them instead, in order.
+    instanced: bool,
+    inst: Vec<Inst>,
+}
+
+/// A plant drawn as an instance of its variety's mesh ([`instanced`]).
+#[derive(Clone)]
+struct Inst {
+    name: &'static str,
+    base: Vec3,
+    scale: Vec3,
+    yaw: f32,
+    /// Linear multipliers of the atlas colours, as `Builder::model` bakes them.
+    leaf: [f32; 3],
+    wood: f32,
+}
+
+/// The browser draws every plant as an entity of its own, an instance of one
+/// mesh per variety (Bevy batches them), instead of merged chunk meshes
+/// (2026-10-31, the iPhone page dying with the plants drawn). `?istanze=0`
+/// brings the merged meshes back. The desktop keeps them: some 100 k plants
+/// as entities would cost the CPU every frame (visibility, extraction,
+/// uniforms) what the merged chunks cost once, and it was never measured.
+fn instanced() -> bool {
+    cfg!(target_arch = "wasm32") && !crate::quality::web_off("istanze")
 }
 
 impl Lods {
@@ -826,6 +919,10 @@ impl Lods {
     fn model(&mut self, species: &'static str, base: Vec3, scale: Vec3, yaw: f32,
         foliage: [f32; 3], wood: [f32; 3]) {
         let name = crate::models::pick_variety(species, yaw / std::f32::consts::TAU);
+        if self.instanced {
+            self.inst.push(Inst { name, base, scale, yaw, leaf: foliage, wood: wood[1] });
+            return;
+        }
         // Do not allocate the detailed tree on web.
         // Merely hiding that mesh with LOD still retained all its CPU/GPU data.
         if cfg!(target_arch = "wasm32") {
@@ -1263,7 +1360,8 @@ pub fn burn(
         let scan_cleared = line_cells > 0 && any_cleared((r0.saturating_sub(1), (r1 + 1).min(rows), c0.saturating_sub(1), (c1 + 1).min(cols)));
         let before = writes.len();
         plan(&mut chunk.plants, chunk.first, &mut chunk.lit, &mut chunk.burnt, &field, now, scan_cleared, restarted, &mut writes);
-        if chunk.char.is_none() && chunk.lit > 0 && writes.len() > before {
+        // (instances have no remains: the browser never built them)
+        if chunk.char.is_none() && chunk.lit > 0 && writes.len() > before && chunk.full != Entity::PLACEHOLDER {
             chunk.char = Some(build_char_layer(&mut commands, &mut meshes, &*chunk, &material));
         }
     }
@@ -1275,7 +1373,8 @@ pub fn burn(
     if let Some(mut image) = images.get_mut(&state) {
         let data = image.data.as_mut().expect("the state image keeps its CPU copy");
         for (i, texel) in writes {
-            let at = i as usize * 4;
+            // two texels a plant: the state, then the tint
+            let at = i as usize * 8;
             data[at..at + 4].copy_from_slice(&texel.to_le_bytes());
         }
     }
@@ -1503,16 +1602,43 @@ fn tag_plants(mesh: &mut Mesh, verts: usize, first: u32, ranges: impl Iterator<I
     mesh.insert_attribute(materials::ATTRIBUTE_PLANT, ids);
 }
 
+/// The second texel of a plant: the tint of an instance ([`Inst`]), which
+/// the merged meshes bake into their vertex colours. Red, green, blue: the
+/// leaf tint / 2; alpha: the wood's. Read when the plant index comes from
+/// the mesh tag (`PLANT_TAG` in `veg_state.wgsl`).
+fn tint_texel(i: &Inst) -> Texel {
+    let b = |t: f32| ((t * 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    b(i.leaf[0]) | b(i.leaf[1]) << 8 | b(i.leaf[2]) << 16 | b(i.wood) << 24
+}
+
+/// The tint texel of a plant of the merged meshes: unused (1, as built).
+const NO_TINT: Texel = 0x8080_8080;
+
+/// A variety's distant proxy as a mesh of its own, standing at the origin
+/// unrotated and untinted: the browser's plants are instances of it, placed
+/// by their transform, tinted and burnt from the state image by their mesh
+/// tag. No plant attribute: the material reads the tag instead.
+fn variety_proxy(name: &str) -> Mesh {
+    let mut b = Builder::default();
+    b.proxy(name, Vec3::ZERO, Vec3::ONE, 0.0, [1.0; 3], [1.0; 3]);
+    let mut mesh = b.finish();
+    mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
+    mesh.compress_indices();
+    pack(&mut mesh);
+    mesh
+}
+
 /// Plant attribute of a vertex of no plant (`NO_PLANT` in `veg_state.wgsl`).
 const NO_PLANT: f32 = -1.0;
 
 /// Width of the state image in texels (`ROW` in `veg_state.wgsl`): rows of
-/// 1024, so even the desktop's ~100 k plants are some hundred rows, far
-/// within WebGL2's guaranteed 2048 (the browser's 4–17 k plants: 5–17 rows).
+/// 1024, two texels a plant, so even the desktop's ~100 k plants are some
+/// two hundred rows, far within WebGL2's guaranteed 2048 (the browser's
+/// 4–17 k plants: 9–33 rows).
 const STATE_ROW: usize = 1024;
 
-/// The island's state image: one texel per plant ([`Texel`]), every plant
-/// not caught and shown.
+/// The island's state image: two texels per plant (state [`Texel`], tint),
+/// every plant not caught and shown.
 fn state_image(texels: &[Texel]) -> Image {
     let rows = texels.len().div_ceil(STATE_ROW).max(1);
     let mut data = vec![0u8; STATE_ROW * rows * 4];
@@ -1566,6 +1692,10 @@ pub fn lod(
     let lod_m = veg.lod_m;
     let far_m = (lod_m * FAR_TIER).max(FAR_TIER_MIN_M);
     for chunk in &mut veg.chunks {
+        // all instances: no chunk meshes to choose between
+        if chunk.full == Entity::PLACEHOLDER {
+            continue;
+        }
         let (lo, hi) = chunk.bounds;
         let d = eye.distance(eye.clamp(lo, hi));
         let near = if chunk.near { d < lod_m * 1.1 } else { d < lod_m };

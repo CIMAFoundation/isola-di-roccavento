@@ -19,6 +19,7 @@ struct VegVertex {
     @location(3) normal: vec3<f32>,
     @if(VERTEX_COLORS)
     @location(7) color: vec4<f32>,
+    @if(!PLANT_TAG)
     @location(14) plant: f32,
 }
 
@@ -27,7 +28,13 @@ fn vertex(vertex: VegVertex) -> VertexOutput {
     var out: VertexOutput;
     var position = vertex.position;
     @if(VERTEX_COLORS) {
-        let planted = plant_apply(vertex.plant, vertex.position, vertex.color);
+        // the plant: from the vertex (merged chunk meshes) or the mesh
+        // tag (instances, `vegetation::instanced`)
+        @if(PLANT_TAG)
+        let plant = f32(mesh_functions::get_tag(vertex.instance_index));
+        @else
+        let plant = vertex.plant;
+        let planted = plant_apply(plant, vertex.position, vertex.color);
         position = planted.position;
         out.color = planted.color;
     }

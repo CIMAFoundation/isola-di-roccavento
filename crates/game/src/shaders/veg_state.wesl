@@ -76,7 +76,9 @@ fn plant_apply(plant: f32, position: vec3<f32>, color: vec4<f32>) -> Planted {
     }
     let remains_layer = plant < -1.5;
     let idx = u32(select(plant, -plant - 2.0, remains_layer) + 0.5);
-    let px = textureLoad(veg_state, vec2<i32>(i32(idx % ROW), i32(idx / ROW)), 0);
+    // two texels a plant: the state, then (instances) the tint
+    let at = idx * 2u;
+    let px = textureLoad(veg_state, vec2<i32>(i32(at % ROW), i32(at / ROW)), 0);
     let b = vec4<u32>(round(px * 255.0));
     let ticks = b.r | (b.g << 8u) | (b.b << 16u);
     let t0 = f32(ticks) * TICK_S;
@@ -92,6 +94,13 @@ fn plant_apply(plant: f32, position: vec3<f32>, color: vec4<f32>) -> Planted {
         }
     }
     let flag = color.a > 0.5;
+    @if(PLANT_TAG) {
+        // an instance of its variety's mesh: its tint is in the image, not
+        // in the vertex colours (`vegetation::tint_texel`, halved)
+        let tint = textureLoad(veg_state, vec2<i32>(i32((at + 1u) % ROW), i32((at + 1u) / ROW)), 0) * 2.0;
+        out.color = vec4<f32>(color.rgb * select(vec3<f32>(tint.a), tint.rgb, flag), color.a);
+    }
+    let tinted = out.color;
     // collapsed to one point (the origin): its triangles have no area and
     // draw nothing
     let gone = vec3<f32>(0.0);
@@ -104,7 +113,7 @@ fn plant_apply(plant: f32, position: vec3<f32>, color: vec4<f32>) -> Planted {
         }
         if flag {
             // ash is soot: the model's pale grey reads as a platform under the trees
-            out.color = vec4<f32>(color.r * 0.2, color.g * 0.17, color.b * 0.15, color.a);
+            out.color = vec4<f32>(tinted.r * 0.2, tinted.g * 0.17, tinted.b * 0.15, tinted.a);
         }
         out.color.a = select(0.0, -(1.0 + REMAINS_OFFSET + select(0.0, DEBRIS_OFFSET, flag) + t0), mode == BURNING);
         return out;
@@ -119,10 +128,10 @@ fn plant_apply(plant: f32, position: vec3<f32>, color: vec4<f32>) -> Planted {
         if flag {
             out.position = gone;
         } else {
-            out.color = charcoal(color);
+            out.color = charcoal(tinted);
         }
     } else if mode == BURNT {
-        out.color = charcoal(color);
+        out.color = charcoal(tinted);
     }
     return out;
 }
