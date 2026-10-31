@@ -32,6 +32,7 @@ sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?
 cp -R web/img "$out"/img
 # The landing page's texts (tools/i18n/landing.py)
 cp web/i18n.js "$out"/i18n.js
+cp web/prova.html "$out"/prova.html
 # Apache hosts (games.cimafoundation.org) serve .wasm without its type unless told
 # and compressed on the way when the server can (mod_deflate): the wasm is
 # about a quarter of its size gzipped

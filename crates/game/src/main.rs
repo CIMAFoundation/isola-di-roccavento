@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
     .add_plugins(tape::TapePlugin)
     .add_plugins(tactical::TacticalPlugin)
     // sun, sky and ambient light from the game's clock; the sea and its wind; the boats
-    .add_plugins((sky::SkyPlugin, sea::SeaPlugin, boats::BoatsPlugin, landmarks::LandmarksPlugin, coast::CoastPlugin, horizon::HorizonPlugin, godrays::GodRaysPlugin))
+    .add_plugins((sky::SkyPlugin, sea::SeaPlugin, boats::BoatsPlugin, landmarks::LandmarksPlugin, coast::CoastPlugin))
     .init_state::<AppState>()
     .init_resource::<units::Glide>()
     .init_resource::<kiosk::snap::SnapView>()
@@ -218,7 +218,19 @@ fn main() -> anyhow::Result<()> {
     }
     app.add_plugins(mario::MarioPlugin);
     app.add_plugins(pad::PadPlugin);
-    app.add_plugins(sound::SoundPlugin);
+    // `?audio=0`, `?orizzonte=0`, `?raggi=0` in the browser switch these off
+    // (the sound's output stays: Mario's plugin registers a source of its own)
+    if quality::web_off("audio") {
+        app.init_resource::<sound::AudioPrefs>();
+    } else {
+        app.add_plugins(sound::SoundPlugin);
+    }
+    if !quality::web_off("orizzonte") {
+        app.add_plugins(horizon::HorizonPlugin);
+    }
+    if !quality::web_off("raggi") {
+        app.add_plugins(godrays::GodRaysPlugin);
+    }
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);
     app.add_systems(PostUpdate, kiosk::snap::redirect_camera);

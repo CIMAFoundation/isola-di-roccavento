@@ -167,11 +167,16 @@ impl Graphics {
     /// In the browser the page decides (`window.roccaProfile`, see `web/index.html`).
     pub fn from_env() -> Graphics {
         if cfg!(target_arch = "wasm32") {
-            return match web_profile().as_deref() {
+            let mut g = match web_profile().as_deref() {
                 Some("media") if Graphics::auto_wanted() => Graphics::WEB_TOP,
                 Some("media") => Graphics::WEB_MEDIA,
                 _ => Graphics::WEB,
             };
+            // `?gfx=` as `KIOSK_GFX`, e.g. `veg=0,terrain_stride=8`
+            if let Some(spec) = web_param("gfx") {
+                g.apply(&spec);
+            }
+            return g;
         }
         let name = std::env::var("KIOSK_QUALITY").ok().or_else(saved);
         let mut g = match name.as_deref() {
@@ -329,6 +334,27 @@ fn web_profile() -> Option<String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn web_profile() -> Option<String> {
     None
+}
+
+/// A parameter of the page's address (`?audio=0&gfx=veg=0`), to switch parts
+/// of the game off on a device that cannot be inspected (2026-10-31, an iPhone
+/// whose page dies as the game starts). Always `None` on the desktop.
+#[cfg(target_arch = "wasm32")]
+pub fn web_param(name: &str) -> Option<String> {
+    let location = js_sys::Reflect::get(&js_sys::global(), &"location".into()).ok()?;
+    let search = js_sys::Reflect::get(&location, &"search".into()).ok()?.as_string()?;
+    let search = js_sys::decode_uri_component(&search).ok()?.as_string()?;
+    search.trim_start_matches('?').split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| v.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn web_param(_: &str) -> Option<String> {
+    None
+}
+
+/// `web_param(name)` is `0`: that part is switched off.
+pub fn web_off(name: &str) -> bool {
+    web_param(name).as_deref() == Some("0")
 }
 
 /// The page forced a profile with `?q=`.
