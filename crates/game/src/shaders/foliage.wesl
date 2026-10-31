@@ -35,6 +35,10 @@ const WOOD_REFLECTANCE: f32 = 0.08;
 // Two value-noise taps, faded out once a pixel spans more than ~2 m, so
 // the far forest costs next to nothing and never shimmers.
 fn foliage_albedo(base: vec4<f32>, p: vec3<f32>, normal: vec3<f32>, alive: f32) -> vec4<f32> {
+    // `?trama=0` in the browser: the flat vertex colour (`materials/foliage.rs`)
+    @if(PLAIN_FOLIAGE) {
+        return base;
+    }
     let px_m = max(length(dpdx(p)), length(dpdy(p)));
     let fine = 1.0 - smoothstep(1.0, 3.5, px_m);
     let mid = 1.0 - smoothstep(2.0, 7.0, px_m);
