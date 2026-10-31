@@ -41,7 +41,9 @@
 //! trunk) that stands in for it beyond [`crate::quality::Graphics::lod_m`].
 //! A plant there covers a few pixels, and the GPU — which is what limits the
 //! frame rate — draws every vegetation triangle once per pass, shadow
-//! cascades included. Both meshes burn together.
+//! cascades included. Both meshes burn together. Far off the proxies have a
+//! cheaper tier ([`FAR_TIER`]), a third mesh. The level of detail only shows
+//! and hides entities: no mesh is rewritten after it is built (2026-10-31).
 
 use bevy::light::{NotShadowCaster, TransmittedShadowReceiver};
 use bevy::prelude::*;
@@ -237,10 +239,13 @@ struct Chunk {
     /// Authored models and distant proxies (see the module doc).
     mesh: Handle<Mesh>,
     low_mesh: Handle<Mesh>,
-    /// Index list the proxies' mesh swaps with when the chunk crosses
-    /// [`FAR_TIER`]: the farthest tier's, or the nearer one's once swapped.
-    far_idx: Vec<u32>,
-    /// The proxies' mesh is on its farthest tier.
+    /// The proxies' farthest tier (see [`FAR_TIER`]): a mesh of its own,
+    /// built once, shown instead of `low` beyond the tier's distance. Never a
+    /// rewrite of `low_mesh`: swapping its indices as the camera moved
+    /// re-uploaded the whole mesh (suspected of killing the iPhone page,
+    /// 2026-10-31). `None` on the CPU path, which rewrites `low_mesh` only.
+    far_low: Option<Entity>,
+    /// `far_low` is on show rather than `low`.
     far: bool,
     full: Entity,
     low: Entity,
@@ -333,6 +338,7 @@ pub fn spawn(
     let chunks_x = cols.div_ceil(CHUNK_CELLS);
     let mut chunks = Vec::with_capacity(chunks_x * chunks_y);
     let (mut plant_count, mut tri_count, mut low_tri_count) = (0usize, 0usize, 0usize);
+    let (mut low_verts_count, mut far_verts) = (0usize, 0usize);
 
     for cy in 0..chunks_y {
         for cx in 0..chunks_x {
@@ -391,8 +397,22 @@ pub fn spawn(
             let pos_base = if GPU { Vec::new() } else { builder.full.positions.clone() };
             let low_pos_base = if GPU { Vec::new() } else { builder.low.positions.clone() };
             let (verts, low_verts) = (builder.full.positions.len(), builder.low.positions.len());
+            low_verts_count += low_verts;
             let (mut low, far_idx) = builder.low.finish_with_far();
             tag_plants(&mut low, low_verts, plants.iter().map(|p| (p.low_start, p.low_end)), 0);
+            // Static on the GPU from here: the burning goes through the state
+            // image, the LOD through which entity is on show.
+            let far_mesh = (GPU && !far_idx.is_empty()).then(|| {
+                let mut far = compact(&low, &far_idx);
+                far.asset_usage = RenderAssetUsages::RENDER_WORLD;
+                far.compress_indices();
+                far_verts += far.count_vertices();
+                meshes.add(far)
+            });
+            if GPU {
+                low.asset_usage = RenderAssetUsages::RENDER_WORLD;
+                low.compress_indices();
+            }
             let image = images.add(state_image(plants.len()));
             let material = materials.add(FoliageMaterial::new(image.clone()));
             let state = Some(image);
@@ -422,6 +442,11 @@ pub fn spawn(
                 MeshMaterial3d(material.clone()),
                 Visibility::Hidden,
             ), TransmittedShadowReceiver)).id();
+            let far_low = far_mesh.map(|m| commands.spawn(((
+                Mesh3d(m),
+                MeshMaterial3d(material.clone()),
+                Visibility::Hidden,
+            ), TransmittedShadowReceiver)).id());
             // Same mesh handle as `low`: the burn edits reach it for free.
             let shadow = gfx.shadows.then(|| {
                 commands.spawn((
@@ -438,7 +463,7 @@ pub fn spawn(
                 state,
                 mesh,
                 low_mesh,
-                far_idx,
+                far_low,
                 far: false,
                 full,
                 low,
@@ -466,10 +491,12 @@ pub fn spawn(
     }
 
     info!(
-        "vegetation: {plant_count} plants in {} chunks, {:.2} M triangles ({:.2} M as distant proxies)",
+        "vegetation: {plant_count} plants in {} chunks, {:.2} M triangles ({:.2} M as distant proxies; proxy vertices {:.2} M, far tier {:.2} M)",
         chunks.len(),
         tri_count as f32 / 1e6,
-        low_tri_count as f32 / 1e6
+        low_tri_count as f32 / 1e6,
+        low_verts_count as f32 / 1e6,
+        far_verts as f32 / 1e6
     );
     commands.insert_resource(Vegetation { thin_dirty: gfx.veg_keep < 1.0, chunks, lod_m: gfx.lod_m, drawn_at: None, drawn_cleared: 0 });
 }
@@ -1231,6 +1258,36 @@ pub fn burn(
     }
 }
 
+/// The vertices of `mesh` that `indices` uses, every attribute with them, in
+/// their order (a plant's vertex range stays a range), under `indices`
+/// renumbered: the proxies' farthest tier as a mesh of its own.
+fn compact(mesh: &Mesh, indices: &[u32]) -> Mesh {
+    use bevy::mesh::VertexAttributeValues as V;
+    let mut map = vec![u32::MAX; mesh.count_vertices()];
+    for &i in indices {
+        map[i as usize] = 0;
+    }
+    let mut kept = Vec::new();
+    for (i, m) in map.iter_mut().enumerate() {
+        if *m == 0 {
+            *m = kept.len() as u32;
+            kept.push(i);
+        }
+    }
+    let mut out = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    for (attribute, values) in mesh.attributes() {
+        let values = match values {
+            V::Float32x3(v) => V::Float32x3(kept.iter().map(|&i| v[i]).collect()),
+            V::Float32x4(v) => V::Float32x4(kept.iter().map(|&i| v[i]).collect()),
+            V::Uint32(v) => V::Uint32(kept.iter().map(|&i| v[i]).collect()),
+            _ => panic!("vegetation: proxy attribute {} of an unexpected format", attribute.name),
+        };
+        out.insert_attribute(attribute.clone(), values);
+    }
+    out.insert_indices(Indices::U32(indices.iter().map(|&i| map[i as usize]).collect()));
+    out
+}
+
 /// Run `f` on a mesh's position and colour attributes, in place. The
 /// attributes are moved out and back rather than cloned.
 fn edit_mesh(meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>, f: impl FnOnce(&mut [[f32; 3]], &mut [[f32; 4]])) {
@@ -1591,34 +1648,28 @@ impl Vegetation {
     }
 }
 
+/// Only which entity of a chunk is on show changes: every mesh stays as built
+/// on the GPU (2026-10-31).
 pub fn lod(
     mut commands: Commands,
     mut veg: ResMut<Vegetation>,
     camera: Query<&Transform, (With<Camera3d>, Without<crate::camera::AuxiliaryCamera>)>,
     mut visibility: Query<&mut Visibility>,
-    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Ok(eye) = camera.single().map(|t: &Transform| t.translation) else { return };
     let lod_m = veg.lod_m;
     let far_m = (lod_m * FAR_TIER).max(FAR_TIER_MIN_M);
-        for chunk in &mut veg.chunks {
+    for chunk in &mut veg.chunks {
         let (lo, hi) = chunk.bounds;
         let d = eye.distance(eye.clamp(lo, hi));
         let near = if chunk.near { d < lod_m * 1.1 } else { d < lod_m };
-        // the proxies' own two tiers: the same vertices, fewer triangles
-        let far = !near && if chunk.far { d > far_m / 1.1 } else { d > far_m };
-        if far != chunk.far {
-            if let Some(mut m) = meshes.get_mut(&chunk.low_mesh) {
-                if let Some(Indices::U32(idx)) = m.indices_mut() {
-                    std::mem::swap(idx, &mut chunk.far_idx);
-                    chunk.far = far;
-                }
-            }
-        }
+        // the proxies' own two tiers, two static meshes
+        let far = chunk.far_low.is_some() && !near && if chunk.far { d > far_m / 1.1 } else { d > far_m };
         let full_casts = near && if chunk.full_casts { d < FULL_SHADOW_M * 1.1 } else { d < FULL_SHADOW_M };
-        if near == chunk.near && full_casts == chunk.full_casts {
+        if near == chunk.near && far == chunk.far && full_casts == chunk.full_casts {
             continue;
         }
+        chunk.far = far;
         let (near_char, far_char) = match &chunk.char {
             Some(l) => (Some(l.near.entity), Some(l.far.entity)),
             None => (None, None),
@@ -1633,7 +1684,8 @@ pub fn lod(
         }
         for (e, on) in [
             (Some(chunk.full), near),
-            (Some(chunk.low), !near),
+            (Some(chunk.low), !near && !far),
+            (chunk.far_low, !near && far),
             (near_char, near),
             (far_char, !near),
             (chunk.shadow, near && !full_casts),
