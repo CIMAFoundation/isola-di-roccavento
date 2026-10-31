@@ -28,6 +28,13 @@ pub struct Model {
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub wood: Vec<bool>,
+    /// The plants (`vegetation.json`): normals as authored (a leaf card
+    /// lights as part of its crown) and uvs into the foliage atlas. Empty in
+    /// `meshes.json`: normals come from the faces, uvs from the atlas grey.
+    #[serde(default)]
+    pub normals: Vec<[f32; 3]>,
+    #[serde(default)]
+    pub uvs: Vec<[f32; 2]>,
 }
 
 pub fn model(name: &str) -> &'static Model {
@@ -136,22 +143,78 @@ pub struct Piece {
 }
 
 /// One variety of a plant (`scripts/build_vegetation_models.py`): the live
-/// model, what the fire adds near the camera, and the same far away.
+/// model, what the fire adds near the camera, and the same far away;
+/// `canopy` and `bark` are the atlas rects (u0, v0, u1, v1) its distant
+/// proxy is textured with.
 #[derive(serde::Deserialize)]
 pub struct Variety {
     pub live: Model,
     pub remains: Piece,
     pub low: Piece,
+    pub canopy: [f32; 4],
+    pub bark: [f32; 4],
 }
 
+/// The foliage atlas the plants' uvs point into (`assets/models/foliage_atlas.png`).
+#[derive(serde::Deserialize)]
+pub struct Atlas {
+    /// A texel of flat linear grey 0.5: the vertex colour unchanged (remains,
+    /// grass, the single models of `meshes.json`).
+    pub grey: [f32; 2],
+}
+
+#[derive(serde::Deserialize)]
+struct VegetationBake {
+    atlas: Atlas,
+    varieties: HashMap<String, Variety>,
+}
+
+fn vegetation_bake() -> &'static VegetationBake {
+    static BAKE: OnceLock<VegetationBake> = OnceLock::new();
+    BAKE.get_or_init(|| serde_json::from_str(&bake!("vegetation")).expect("valid vegetation bake"))
+}
+
+pub fn atlas() -> &'static Atlas {
+    &vegetation_bake().atlas
+}
+
+/// The atlas image file: compiled into the desktop binary, from the page's
+/// data in the browser.
+pub fn atlas_png() -> std::borrow::Cow<'static, [u8]> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes: std::borrow::Cow<'static, [u8]> = include_bytes!("../../../assets/models/foliage_atlas.png").as_slice().into();
+    #[cfg(target_arch = "wasm32")]
+    let bytes: std::borrow::Cow<'static, [u8]> = datafs::take("assets/models/foliage_atlas.png")
+        .expect("assets/models/foliage_atlas.png is not in the page's data")
+        .into();
+    bytes
+}
+
+/// Every species with varieties, as `vegetation.rs` places them.
+pub const SPECIES: [&str; 14] = [
+    "pine", "aleppo", "cypress", "holm", "cork", "carob", "olive",
+    "lentisk", "myrtle", "arbutus", "broom", "heather", "rosemary", "cistus",
+];
+
 /// The varieties of each species, in the order of the bake. All of one
-/// species share a silhouette family: the fuel is read from the silhouette.
+/// species share a silhouette family; the species of a fuel group share
+/// its outline (conifer, broadleaf, macchia), so the fuel still reads.
 pub fn variety_names(species: &str) -> &'static [&'static str] {
     match species {
         "pine" => &["pine_1", "pine_2", "pine_3", "pine_4"],
-        "chestnut" => &["chestnut_1", "chestnut_2", "chestnut_3", "chestnut_4"],
-        "bush" => &["bush_1", "bush_2", "bush_3", "bush_4"],
+        "aleppo" => &["aleppo_1", "aleppo_2", "aleppo_3"],
+        "cypress" => &["cypress_1", "cypress_2"],
+        "holm" => &["holm_1", "holm_2", "holm_3"],
+        "cork" => &["cork_1", "cork_2"],
+        "carob" => &["carob_1", "carob_2"],
         "olive" => &["olive_1", "olive_2", "olive_3"],
+        "lentisk" => &["lentisk_1", "lentisk_2"],
+        "myrtle" => &["myrtle_1", "myrtle_2"],
+        "arbutus" => &["arbutus_1", "arbutus_2"],
+        "broom" => &["broom_1", "broom_2"],
+        "heather" => &["heather_1", "heather_2"],
+        "rosemary" => &["rosemary_1", "rosemary_2"],
+        "cistus" => &["cistus_1", "cistus_2"],
         _ => panic!("no varieties of `{species}`"),
     }
 }
@@ -164,12 +227,8 @@ pub fn pick_variety(species: &str, u: f32) -> &'static str {
 }
 
 pub fn variety(name: &str) -> &'static Variety {
-    static VARIETIES: OnceLock<HashMap<String, Variety>> = OnceLock::new();
-    VARIETIES
-        .get_or_init(|| {
-            serde_json::from_str(&bake!("vegetation"))
-                .expect("valid vegetation bake")
-        })
+    vegetation_bake()
+        .varieties
         .get(name)
         .unwrap_or_else(|| panic!("vegetation has no variety `{name}`"))
 }
@@ -241,13 +300,17 @@ mod tests {
     /// taller than the live plant.
     #[test]
     fn the_vegetation_varieties_are_within_budget() {
-        for species in ["pine", "chestnut", "bush", "olive"] {
-            assert!(variety_names(species).len() >= 3, "{species}: varieties");
+        for species in SPECIES {
+            assert!(variety_names(species).len() >= 2, "{species}: varieties");
             for name in variety_names(species) {
                 let v = variety(name);
                 let hi = v.live.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
                 assert!(v.live.indices.len() / 3 <= 120, "{name}: {} live triangles", v.live.indices.len() / 3);
-                assert!(v.live.positions.len() <= 80, "{name}: {} live vertices", v.live.positions.len());
+                assert!(v.live.positions.len() <= 96, "{name}: {} live vertices", v.live.positions.len());
+                let n = v.live.positions.len();
+                assert!(v.live.normals.len() == n && v.live.uvs.len() == n, "{name}: normals and uvs per vertex");
+                assert!(v.live.uvs.iter().flatten().all(|c| (0.0..=1.0).contains(c)), "{name}: uv outside the atlas");
+                assert!(v.canopy.iter().chain(&v.bark).all(|c| (0.0..=1.0).contains(c)), "{name}: proxy rects");
                 for (piece, tris, verts) in [(&v.remains, 120, 160), (&v.low, 16, 20)] {
                     assert!(!piece.indices.is_empty() && piece.indices.len() % 3 == 0, "{name}");
                     assert!(piece.indices.iter().all(|&i| (i as usize) < piece.positions.len()), "{name}");

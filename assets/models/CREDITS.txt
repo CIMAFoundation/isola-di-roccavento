@@ -1,0 +1,17 @@
+Modelli e texture di assets/models: originali, generati dagli script Blender in scripts/ (nessun materiale esterno nei file).
+
+foliage_atlas.png (2026-10-31): generato da scripts/build_vegetation_models.py. Foglie, aghi, fiori e bacche sono geometria costruita dallo script e resa con Workbench di Blender; le cortecce sono il rumore procedurale di Blender (mathutils.noise) campionato per texel. Nessuna fotografia è usata come texture.
+
+Riferimenti visivi (solo guardati, per sagome, densità della chioma, colori e corteccia; nessun pixel copiato). Wikimedia Commons, licenze CC BY-SA:
+- Pinus pinea and ruins on Palatine Hill.jpg (CC BY-SA 4.0); Pinus pinea Borghese.jpg (CC BY-SA 2.5)
+- Pinus halepensis, Sète, Hérault 01.jpg (CC BY-SA 3.0)
+- Cupressus sempervirens, Saint-Rémy-de-Provence cf01.jpg (CC BY-SA 4.0); Mediterranean cypress (Cupressus sempervirens) bark (CC BY-SA 4.0)
+- Montes de Vitoria - Quercus ilex 01.jpg, 02.jpg (CC BY-SA 4.0)
+- Sierra de Aracena - Quercus suber 01.jpg (CC BY-SA 4.0)
+- Ceratonia siliqua Keciboynuzu 1370984 Nevit.jpg (CC BY-SA 3.0)
+- Lun olive tree 1600 years.jpg, Lun Olive-Gardens (2).jpg (CC BY-SA 4.0)
+- Pistacia lentiscus 001.jpg, 002.jpg (CC BY-SA 3.0)
+- Myrtus communis (MHNT, CC BY-SA 3.0/4.0)
+- Arbouse.jpg (Arbutus unedo, CC BY-SA 4.0)
+- Spartium junceum, Erica arborea, Rosmarinus officinalis, Cistus monspeliensis: prime immagini della ricerca su Commons con questi nomi (CC BY-SA)
+Per usare in futuro una foto come texture servono CC0 o pubblico dominio (per esempio Poly Haven, ambientCG), da annotare qui.

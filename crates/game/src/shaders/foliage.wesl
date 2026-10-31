@@ -1,10 +1,16 @@
-// The vegetation (`materials/foliage.rs`): leaf clumps and bark over the
-// vertex colours, and the burning crown eaten against the simulated clock.
+// The vegetation (`materials/foliage.rs`): leaves, bark and canopy from the
+// foliage atlas (`scripts/build_vegetation_models.py`) tinted by the vertex
+// colour, and the burning crown eaten against the simulated clock.
 // The vertex stage (`veg_vertex.wgsl`, `veg_prepass.wgsl`) applies each
 // plant's fire state from the chunk's state image (`veg_state.wgsl`) and hands
 // it over in the vertex colour's alpha: 1 on living leaves, 0 on wood, rock,
 // grass and anything burnt; below -0.5 the vertex is burning and the alpha
-// holds its ignition time (offsets below).
+// holds its ignition time (offsets below); 0.5 is a charred vertex.
+//
+// Albedo = atlas x vertex colour x 2: on a textured plant the vertex is its
+// tint (halved), on what has no texture (remains, grass) the uv points at the
+// atlas' grey (linear 0.5) and the vertex colour is the colour. Leaf cards
+// are cut out where the atlas' alpha is below `ALPHA_CUT`.
 // A material of its own, lit by Bevy's PBR (`apply_pbr_lighting`): an
 // extension of StandardMaterial would bring textures it never reads, and on
 // WebGL2 every texture of the layout takes one of the 16 units.
@@ -21,7 +27,7 @@ import bevy_pbr::render::mesh_view_bindings::{globals, view};
 import bevy_pbr::render::{pbr_functions, pbr_types};
 import game::shaders::noise::{hash21, value_noise};
 import game::shaders::scenery::tactical_grey;
-import game::shaders::veg_state::foliage;
+import game::shaders::veg_state::{foliage, atlas, atlas_sampler, ALPHA_CUT, CHARRED};
 
 const LEAF_ROUGHNESS: f32 = 0.78;
 const LEAF_REFLECTANCE: f32 = 0.18;
@@ -29,43 +35,6 @@ const LEAF_TRANSMISSION: f32 = 0.38;
 const LEAF_THICKNESS: f32 = 0.08;
 const WOOD_ROUGHNESS: f32 = 0.9;
 const WOOD_REFLECTANCE: f32 = 0.08;
-
-// Breaks the flat vertex colour into
-// leaf clumps and a fine speckle, plus a warm sunlit / cool shaded lean.
-// Two value-noise taps, faded out once a pixel spans more than ~2 m, so
-// the far forest costs next to nothing and never shimmers.
-fn foliage_albedo(base: vec4<f32>, p: vec3<f32>, normal: vec3<f32>, alive: f32) -> vec4<f32> {
-    // `?trama=0` in the browser: the flat vertex colour (`materials/foliage.rs`)
-    @if(PLAIN_FOLIAGE) {
-        return base;
-    }
-    let px_m = max(length(dpdx(p)), length(dpdy(p)));
-    let fine = 1.0 - smoothstep(1.0, 3.5, px_m);
-    let mid = 1.0 - smoothstep(2.0, 7.0, px_m);
-    // Per-patch tint on a ~3.5 m lattice: about one macchia shrub each, so
-    // neighbouring bushes differ in tone; it outlives the fine detail.
-    let patch_tone = hash21(floor(p.xz / 3.5)) - 0.5;
-    let clump = value_noise(p.xz * 0.9 + vec2<f32>(p.y * 0.6, p.y * 0.35));
-    // Posterised clumps: distinct light and dark leaf masses with soft
-    // steps between them, rather than a smooth gradient.
-    let steps = floor(clump * 3.0) / 3.0 + smoothstep(0.0, 0.18, fract(clump * 3.0)) / 3.0;
-    var tone = patch_tone * 0.45 * mid + (mix(clump, steps, 0.7) - 0.5) * 0.75 * mid;
-    if fine > 0.0 {
-        let speck = value_noise(p.xz * 3.2 + vec2<f32>(p.y * 3.3, -p.y * 2.1));
-        // Sharp leaf dots: bright tips, dark gaps between them.
-        let leaves = smoothstep(0.38, 0.62, speck);
-        tone += (leaves - 0.5) * 0.60 * fine - (1.0 - leaves) * 0.10 * fine;
-    }
-    let up = clamp(normalize(normal).y * 0.5 + 0.5, 0.0, 1.0);
-    let warm = vec3<f32>(1.14, 1.06, 0.76);
-    let cool = vec3<f32>(0.80, 0.96, 1.08);
-    let lean = mix(cool, warm, up * (0.5 + clump * 0.5));
-    let c = base.rgb;
-    let k = mid * alive;
-    let rgb = c * (1.0 + tone * alive) * mix(vec3<f32>(1.0), lean, k);
-    return vec4<f32>(rgb, base.a);
-}
-
 
 // Burning vegetation (`vegetation.rs`, `paint`): a burning vertex keeps its
 // colour and carries its ignition time in a negative alpha. Here the plant is
@@ -133,6 +102,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let p = in.world_position.xyz;
     var burn_glow = vec3<f32>(0.0);
 
+    // first, in uniform control flow: the atlas texel (`?trama=0` in the
+    // browser leaves it out: the vertex colours alone)
+    var tex = vec4<f32>(0.5, 0.5, 0.5, 1.0);
+    @if(VERTEX_UVS_A && !PLAIN_FOLIAGE) {
+        tex = textureSample(atlas, atlas_sampler, in.uv);
+    }
+    if tex.a < ALPHA_CUT {
+        discard;
+    }
+
     // Foliage is thin: lit from both sides, or a forest reads as a flat dark
     // mass from the shaded quarter.
     var pbr = pbr_types::pbr_input_new();
@@ -141,14 +120,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr.V = pbr_functions::calculate_view(in.world_position, pbr.is_orthographic);
     pbr.frag_coord = in.position;
     pbr.world_position = in.world_position;
-    pbr.world_normal = pbr_functions::prepare_world_normal(in.world_normal, true, is_front);
+    // not flipped on back faces: a leaf card's normal is its crown's, the
+    // same seen from either side
+    pbr.world_normal = pbr_functions::prepare_world_normal(in.world_normal, false, is_front);
     pbr.N = normalize(pbr.world_normal);
     pbr.material.metallic = 0.0;
     pbr.material.thickness = LEAF_THICKNESS;
     pbr.material.flags |= pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT
         | pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
     @if(VERTEX_COLORS)
-    pbr.material.base_color = vec4<f32>(in.color.rgb, 1.0);
+    pbr.material.base_color = vec4<f32>(in.color.rgb * tex.rgb * 2.0, 1.0);
     @if(VERTEX_COLORS)
     let a = in.color.a;
     @else
@@ -163,8 +144,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let b1 = b - select(0.0, DEBRIS_OFFSET, debris);
     let remains = burning && b1 > REMAINS_OFFSET * 0.75;
     let leaf = burning && !remains && b1 > LEAF_OFFSET * 0.5;
-    let alive = select(clamp(a, 0.0, 1.0), select(0.0, 1.0, leaf), burning);
-    pbr.material.base_color = foliage_albedo(pbr.material.base_color, p, in.world_normal, alive);
+    let alive = select(step(0.75, a), select(0.0, 1.0, leaf), burning);
+    @if(VERTEX_COLORS) {
+        if abs(a - CHARRED) < 0.25 {
+            // charcoal keeps the bark's light and dark, not its colour
+            let luma = dot(tex.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            pbr.material.base_color = vec4<f32>(in.color.rgb * clamp(luma * 6.0, 0.4, 1.6), 1.0);
+        }
+    }
     pbr.material.perceptual_roughness = mix(WOOD_ROUGHNESS, LEAF_ROUGHNESS, alive);
     pbr.material.reflectance = vec3<f32>(mix(WOOD_REFLECTANCE, LEAF_REFLECTANCE, alive));
     pbr.material.diffuse_transmission = LEAF_TRANSMISSION * alive;
@@ -213,23 +200,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             burn_glow = r.glow;
         }
     }
-    // Bark: wood is the brown (or charred, near-black) vertices that are
-    // not leaves. Vertical, irregular ridges and fissures from the world
-    // position, so every trunk and bough gets its own grain with no UVs
-    // or texture; the fine layer fades with distance.
-    let wc = pbr.material.base_color.rgb;
-    let woody = !leaf && alive < 0.5 && wc.r >= wc.g && wc.g >= wc.b && max(wc.r, wc.g) < 0.55;
-    if woody {
-        let mid_b = 1.0 - smoothstep(2.0, 7.0, px_m);
-        let fine_b = 1.0 - smoothstep(0.6, 2.5, px_m);
-        let across = p.x * 5.0 + p.z * 3.7;
-        let ridge = value_noise(vec2<f32>(across, p.y * 0.9));
-        let grain = value_noise(vec2<f32>(across * 2.7 + 3.0, p.y * 3.2));
-        let fissure = 1.0 - smoothstep(0.22, 0.46, ridge);
-        let tone = (ridge - 0.5) * 1.1 * mid_b + (grain - 0.5) * 0.7 * fine_b - fissure * 0.6 * mid_b;
-        pbr.material.base_color = vec4<f32>(wc * (1.0 + tone), pbr.material.base_color.a);
-    }
-
     var out: FragmentOutput;
     out.color = pbr_functions::apply_pbr_lighting(pbr);
     // Fire is light, not a lit surface: added after lighting so a burning

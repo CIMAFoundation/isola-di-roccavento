@@ -1,39 +1,20 @@
 <!doctype html>
 <html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vegetazione: varietà e bruciatura</title>
+<title>Vegetazione: specie e varietà</title>
 <style>
 :root{--bg:#14171c;--fg:#e8eaed;--mut:#9aa3ad;--line:#2a2f37}
 @media (prefers-color-scheme:light){:root{--bg:#f4f1ea;--fg:#1d2024;--mut:#5e6670;--line:#d9d3c6}}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
 main{max-width:1240px;margin:0 auto;padding:24px 16px 64px}
-h1{font-size:1.6rem;margin:.2em 0} h2{margin:2em 0 .4em;font-size:1.25rem} h2 small{color:var(--mut);font-weight:400;font-size:.8em}
-p{color:var(--mut);max-width:70ch}
-img{width:100%;height:auto;display:block;border-radius:8px;border:1px solid var(--line)}
-figure{margin:0 0 18px} figcaption{padding:6px 2px;color:var(--mut)} figcaption b{color:var(--fg)}
-.stages{display:grid;grid-template-columns:repeat(6,1fr);text-align:center;color:var(--mut);font-size:.8rem;margin:0 0 4px;position:sticky;top:0;background:var(--bg);padding:6px 0;z-index:2;border-bottom:1px solid var(--line)}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-@media (max-width:760px){.two{grid-template-columns:1fr} .stages{font-size:.62rem}}
+h1{font-size:1.6rem;margin:.2em 0} h2{margin:1.4em 0 .3em;font-size:1.15rem} h2 small{color:var(--mut);font-weight:400;font-size:.8em}
+p,li{color:var(--mut);max-width:80ch} li b{color:var(--fg)}
+img{width:100%;height:auto;display:block;border-radius:8px;border:1px solid var(--line);image-rendering:auto}
+figure{margin:0 0 18px} figcaption{padding:6px 2px;color:var(--mut)}
 </style></head><body><main>
-<h1>Vegetazione: varietà e bruciatura</h1>
-<p>Ogni varietà ha due metà che non si sovrappongono: la pianta viva (tronco, rami, chioma) e quello che l&rsquo;incendio aggiunge o scopre (scheletro dei rametti, cenere, legna caduta). Il legno della pianta viva si carbonizza sul posto: nessuno scambio di modelli. Le immagini mostrano sei fasi dell&rsquo;incendio, seguendo le regole dello shader.</p>
-<div class="two"><figure><img src="overview_vivo.png" alt="Tutte le varietà, vive"><figcaption>Le 15 varietà, vive.</figcaption></figure>
-<figure><img src="overview_bruciato.png" alt="Tutte le varietà, bruciate"><figcaption>Le stesse, a incendio finito.</figcaption></figure></div>
-<div class="stages"><span>Vivo</span><span>Scottatura</span><span>Fiamme</span><span>Chioma consumata</span><span>Scheletro</span><span>Bruciato</span></div>
-<section><h2>Pino marittimo <small>conifere</small></h2><figure><img src="pine_1.png" alt="pine_1" loading="lazy">
-<figcaption><b>pine_1</b> &mdash; Classico: tronco inclinato e ombrello a tre cuscini.</figcaption></figure><figure><img src="pine_2.png" alt="pine_2" loading="lazy">
-<figcaption><b>pine_2</b> &mdash; Gemello: due fusti che partono dalla stessa base.</figcaption></figure><figure><img src="pine_3.png" alt="pine_3" loading="lazy">
-<figcaption><b>pine_3</b> &mdash; Slanciato: fusto alto e ombrello stretto, un ramo basso.</figcaption></figure><figure><img src="pine_4.png" alt="pine_4" loading="lazy">
-<figcaption><b>pine_4</b> &mdash; Piegato dal vento: fusto curvo e chioma spostata sottovento.</figcaption></figure></section><section><h2>Castagno <small>latifoglie</small></h2><figure><img src="chestnut_1.png" alt="chestnut_1" loading="lazy">
-<figcaption><b>chestnut_1</b> &mdash; Classico: tronco tozzo e chioma tonda a lobi.</figcaption></figure><figure><img src="chestnut_2.png" alt="chestnut_2" loading="lazy">
-<figcaption><b>chestnut_2</b> &mdash; Alto: tronco lungo e chioma raccolta.</figcaption></figure><figure><img src="chestnut_3.png" alt="chestnut_3" loading="lazy">
-<figcaption><b>chestnut_3</b> &mdash; Largo e basso: chioma ampia su un fusto corto.</figcaption></figure><figure><img src="chestnut_4.png" alt="chestnut_4" loading="lazy">
-<figcaption><b>chestnut_4</b> &mdash; Ceduo: tre polloni che si aprono dalla ceppaia.</figcaption></figure></section><section><h2>Macchia <small>arbusti</small></h2><figure><img src="bush_1.png" alt="bush_1" loading="lazy">
-<figcaption><b>bush_1</b> &mdash; Classico: cuore tondo e due lobi.</figcaption></figure><figure><img src="bush_2.png" alt="bush_2" loading="lazy">
-<figcaption><b>bush_2</b> &mdash; Alto (lentisco): un mazzo compatto e più slanciato.</figcaption></figure><figure><img src="bush_3.png" alt="bush_3" loading="lazy">
-<figcaption><b>bush_3</b> &mdash; Tappeto basso (cisto): largo e piatto, quattro lobi.</figcaption></figure><figure><img src="bush_4.png" alt="bush_4" loading="lazy">
-<figcaption><b>bush_4</b> &mdash; Rado: tre ciuffi staccati con spazi tra uno e l'altro.</figcaption></figure></section><section><h2>Ulivo <small>alberi isolati nei prati</small></h2><figure><img src="olive_1.png" alt="olive_1" loading="lazy">
-<figcaption><b>olive_1</b> &mdash; Classico: tronco nodoso e tre cime argentate.</figcaption></figure><figure><img src="olive_2.png" alt="olive_2" loading="lazy">
-<figcaption><b>olive_2</b> &mdash; Contorto: tronco a S con un grosso ramo laterale.</figcaption></figure><figure><img src="olive_3.png" alt="olive_3" loading="lazy">
-<figcaption><b>olive_3</b> &mdash; Vecchio a due fusti: ceppaia divisa in due.</figcaption></figure></section>
-<p>Generato da <code>scripts/build_vegetation_models.py</code> (Blender). Le immagini sono un&rsquo;anteprima dell&rsquo;idea, non il rendering del gioco.</p>
+<h1>Vegetazione: specie e varietà</h1>
+<p>Specie mediterranee per gruppo di combustibile: ciò che si vede è ciò che brucia. Ogni pianta ha un corpo della chioma, carte di foglie ritagliate dall&rsquo;atlante e la corteccia sul tronco; lo scheletro dei rametti e i detriti compaiono quando brucia (shader del gioco).</p>
+<figure><img src="overview_vivo.png" alt="Tutte le varietà"><figcaption>Le varietà, vive (Cycles, con l&rsquo;atlante del gioco). Righe da sinistra a destra nell&rsquo;ordine dell&rsquo;elenco.</figcaption></figure>
+<figure><img src="../foliage_atlas.png" alt="Atlante" style="background:#444"><figcaption>L&rsquo;atlante (1024 &times; 512): rametti con le foglie, tessere delle chiome lontane, strisce di corteccia.</figcaption></figure>
+<section><h2>Pino domestico <small>conifere (classi 10-12)</small></h2><ul><li><b>pine_1</b>: Pino domestico: tronco inclinato e ombrello a tre cuscini.</li><li><b>pine_2</b>: Pino domestico gemello: due fusti dalla stessa base.</li><li><b>pine_3</b>: Pino domestico slanciato: fusto alto e ombrello stretto.</li><li><b>pine_4</b>: Pino domestico piegato dal vento: chioma sottovento.</li></ul></section><section><h2>Pino d'Aleppo e marittimo <small>conifere</small></h2><ul><li><b>aleppo_1</b>: Pino d'Aleppo: fusto inclinato e chioma irregolare a ciuffi.</li><li><b>aleppo_2</b>: Pino d'Aleppo biforcato: due cime aperte.</li><li><b>aleppo_3</b>: Pino marittimo giovane: chioma conica e rada.</li></ul></section><section><h2>Cipresso <small>conifere</small></h2><ul><li><b>cypress_1</b>: Cipresso: colonna stretta e scura.</li><li><b>cypress_2</b>: Cipresso a fiamma larga: rami aperti in basso.</li></ul></section><section><h2>Leccio <small>latifoglie (classi 4-6)</small></h2><ul><li><b>holm_1</b>: Leccio: tronco tozzo e chioma densa e tonda.</li><li><b>holm_2</b>: Leccio alto: tronco lungo e chioma raccolta.</li><li><b>holm_3</b>: Leccio a ceppaia: tre polloni sotto una chioma larga.</li></ul></section><section><h2>Sughera <small>latifoglie</small></h2><ul><li><b>cork_1</b>: Sughera: tronco grosso, chioma aperta su rami larghi.</li><li><b>cork_2</b>: Sughera inclinata: un grosso ramo laterale.</li></ul></section><section><h2>Carrubo <small>latifoglie</small></h2><ul><li><b>carob_1</b>: Carrubo: cupola larga e bassa, verde scuro lucido.</li><li><b>carob_2</b>: Carrubo a due fusti: chioma asimmetrica.</li></ul></section><section><h2>Ulivo <small>latifoglie, e alberi isolati nei prati</small></h2><ul><li><b>olive_1</b>: Ulivo: tronco nodoso e tre cime argentate.</li><li><b>olive_2</b>: Ulivo contorto: tronco a S con un grosso ramo laterale.</li><li><b>olive_3</b>: Ulivo vecchio a due fusti.</li></ul></section><section><h2>Lentisco <small>macchia (classi 7-9)</small></h2><ul><li><b>lentisk_1</b>: Lentisco: cuscino largo e denso, verde scuro.</li><li><b>lentisk_2</b>: Lentisco basso: tappeto a quattro lobi.</li></ul></section><section><h2>Mirto <small>macchia</small></h2><ul><li><b>myrtle_1</b>: Mirto: mazzo compatto e tondo, verde vivo.</li><li><b>myrtle_2</b>: Mirto rado: tre ciuffi staccati.</li></ul></section><section><h2>Corbezzolo <small>macchia alta</small></h2><ul><li><b>arbutus_1</b>: Corbezzolo: alberello a più fusti, chioma tonda.</li><li><b>arbutus_2</b>: Corbezzolo largo: due cime sopra i polloni.</li></ul></section><section><h2>Ginestra <small>macchia e gariga</small></h2><ul><li><b>broom_1</b>: Ginestra: ciuffo di verghe diritte, fiori gialli.</li><li><b>broom_2</b>: Ginestra doppia: due ciuffi accostati.</li></ul></section><section><h2>Erica arborea <small>macchia</small></h2><ul><li><b>heather_1</b>: Erica arborea: fusti diritti e fitti, chioma fine.</li><li><b>heather_2</b>: Erica bassa: cespuglio largo.</li></ul></section><section><h2>Rosmarino <small>gariga</small></h2><ul><li><b>rosemary_1</b>: Rosmarino: cuscino basso grigio-verde.</li><li><b>rosemary_2</b>: Rosmarino sparso: tre cuscini.</li></ul></section><section><h2>Cisto <small>gariga</small></h2><ul><li><b>cistus_1</b>: Cisto: cupola bassa grigio-verde, fiori bianchi e rosa.</li><li><b>cistus_2</b>: Cisto largo: tappeto a tre lobi.</li></ul></section>
+<p>Generato da <code>scripts/build_vegetation_models.py</code> (Blender). Riferimenti fotografici e licenze: <code>assets/models/CREDITS.txt</code>.</p>
 </main></body></html>
