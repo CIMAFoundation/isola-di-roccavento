@@ -1,4 +1,8 @@
 [target.wasm32-unknown-unknown]
 # getrandom 0.3 (pulled in by Bevy's web event stack) requires an explicit
 # opt-in to the browser Web Crypto backend.
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+# The memory starts at 320 MiB (2026-10-31, iPhone pages dying as the scene
+# was built): the game needs ~260-280 MiB, and grown a little at a time from
+# 1 MiB, Safari on iOS may copy the whole memory at each step, twice the
+# memory at the peak. Untouched pages cost nothing.
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '-C', 'link-arg=--initial-memory=335544320']
