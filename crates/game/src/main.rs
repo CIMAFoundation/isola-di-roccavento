@@ -64,7 +64,7 @@ mod ui;
 mod near_cover;
 mod units;
 mod vegetation;
-mod veg_material_switch;
+mod veg_instancing;
 mod visual_scale;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_state;
@@ -232,7 +232,7 @@ fn main() -> anyhow::Result<()> {
     if !quality::web_off("raggi") {
         app.add_plugins(godrays::GodRaysPlugin);
     }
-    app.add_plugins(veg_material_switch::VegMaterialSwitchPlugin);
+    app.add_plugins(veg_instancing::VegInstancingPlugin);
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);
     app.add_systems(PostUpdate, kiosk::snap::redirect_camera);

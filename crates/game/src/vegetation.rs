@@ -16,35 +16,27 @@
 //! width and overlap rather than from stem count, because a hundred wide
 //! crowns close a canopy that a thousand narrow ones would not.
 //!
-//! Geometry is merged into per-chunk meshes rather than spawned per plant: one
-//! entity each would cost more in transform propagation and draw calls than
-//! the triangles themselves, while merged chunks give the renderer a couple of
-//! hundred draws for the entire landscape and still allow frustum culling.
+//! The plants are not entities and have no state (2026-10-31). Each variety
+//! has one mesh per level of detail (authored model, distant proxy and its
+//! cheaper tier, burnt remains near and far), built once, and every plant is
+//! an instance of it: a static per-instance vertex buffer (where it stands,
+//! its yaw, scale and tint) written when the scene is built
+//! (`veg_instancing.rs`). An entity is a tile × variety × tier, with the
+//! tile's bounds for frustum culling: 1280 m tiles on the desktop, whose level
+//! of detail [`lod`] picks by showing and hiding entities, and the whole
+//! island as one tile in the browser (a few dozen draws, no culling: its
+//! 0.1 M plant vertices are nothing for a GPU).
 //!
-//! The plants respond to the fire: each one remembers which fire cell it
-//! stands in, and when that cell's state changes the plant is redrawn —
-//! foliage flares, then goes to charcoal. Only chunks whose cells actually
-//! changed are touched, so the cost tracks the front.
-//!
-//! The meshes are never modified for that: every vertex carries its plant's
-//! global index (`materials::ATTRIBUTE_PLANT`, a float), one RGBA8 image for
-//! the whole island holds each plant's ignition instant and two flags
-//! ([`Texel`]), and the vertex stage (`shaders/veg_state.wgsl`) works out from
-//! the simulated clock whether the plant stands, burns, is charcoal or gone,
-//! and collapses, recolours and flags it. A chunk is ~80 k triangles and Bevy
-//! clones and uploads a modified mesh whole: rewriting two or three of them
-//! every 0.15 s was a frame hitch of tens of milliseconds. [`shown`] is the
-//! CPU's copy of the shader's decision (2026-10-31: the per-chunk float
-//! images, the integer plant attribute and the CPU redraw path are gone).
-//!
-//! Every chunk is built twice: with the authored models, and with a proxy of
-//! a couple of dozen faces per plant (a faceted crown on a three-sided
-//! trunk) that stands in for it beyond [`crate::quality::Graphics::lod_m`].
-//! A plant there covers a few pixels, and the GPU — which is what limits the
-//! frame rate — draws every vegetation triangle once per pass, shadow
-//! cascades included. Both meshes burn together. Far off the proxies have a
-//! cheaper tier ([`FAR_TIER`]), a third mesh. The level of detail only shows
-//! and hides entities: no mesh is rewritten after it is built (2026-10-31).
+//! The fire reaches the plants like the terrain: through a texture on the
+//! fire grid ([`FireGrid`]: one RGBA8 texel per cell, the arrival time and
+//! the cleared flag), written when a cell changes, never per plant. In the
+//! vertex stage (`shaders/veg_state.wgsl`) each plant interpolates the
+//! arrival at its foot (as `field::FireField::arrival` does, so a stand
+//! catches as a wave crossing it rather than as a 20 m block), adds its own
+//! lag (a hash of its position, [`plant_lag`]), and from the simulated clock
+//! works out whether it stands, burns, is charcoal or gone (thinned by the
+//! share kept, cut by a crew). [`plant_look`] is the CPU's copy of that rule,
+//! for the tests.
 
 use bevy::light::{NotShadowCaster, TransmittedShadowReceiver};
 use bevy::prelude::*;
@@ -57,6 +49,11 @@ use scenario::{Cell, CoverClass, Pos, Scenario};
 use crate::field::{noise, FireField};
 use crate::materials::{self, FoliageMaterial};
 use crate::sim::Sim;
+use crate::veg_instancing::{PlantInstance, VegInstances};
+use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::NoAutoAabb;
+use bevy::render::batching::NoAutomaticBatching;
+use std::sync::Arc;
 
 /// Chunk edge in fire cells. 32 cells = 640 m, matching the terrain chunking,
 /// so a burning front dirties a similar number of both.
@@ -162,29 +159,8 @@ impl Species {
     }
 }
 
-/// One scattered plant, remembered so it can react to the fire.
-struct Plant {
-    /// Where it stands, in world metres. The plant burns on the *interpolated*
-    /// arrival time at this point rather than on its cell's, so a stand
-    /// catches progressively in the direction the fire is running instead of
-    /// flipping as a 20 m block.
-    pos: Pos,
-    /// Seconds this plant lags the interpolated front, hashed per plant: even
-    /// two shrubs a metre apart do not catch at the same instant.
-    lag_s: f32,
-    vert_start: u32,
-    vert_end: u32,
-    /// The same plant in the distant proxy mesh.
-    low_start: u32,
-    low_end: u32,
-    /// What its burnt remains are made of, if it has any (grass leaves none).
-    remains: Option<Remains>,
-    /// Its texel in the state image as last written ([`Texel`]).
-    texel: Texel,
-}
-
-/// Enough of a plant to build its burnt model later: the archetype, where and
-/// how big it stood.
+/// Enough of a plant to build its burnt model: the archetype, where and how
+/// big it stood (its yaw also shades it).
 #[derive(Clone)]
 struct Remains {
     name: &'static str,
@@ -193,53 +169,45 @@ struct Remains {
     yaw: f32,
 }
 
-/// What fire adds to a chunk's plants (`scripts/build_vegetation_models.py`),
-/// built when the fire first burns a plant of the chunk, so the forest the
-/// fire never reaches does not pay for them. Every plant's remains are there
-/// from then on, collapsed to a point until the plant is burnt, the way a
-/// cleared plant is (see [`CLEARED`]).
-struct CharLayer {
-    /// Shown within the LOD distance, and beyond it (the `_low` models).
-    near: CharMesh,
-    far: CharMesh,
+/// The levels of detail of a variety, each one mesh drawn as instances.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Tier {
+    /// The authored model, within [`crate::quality::Graphics::lod_m`].
+    Full,
+    /// The distant proxy beyond it, and its cheaper tier beyond [`FAR_TIER`].
+    Proxy,
+    Far,
+    /// What fire adds (twig skeleton, debris), near and far.
+    RemainsNear,
+    RemainsFar,
 }
 
-struct CharMesh {
-    entity: Entity,
-}
-
-struct Chunk {
-    /// Global index of its first plant in the state image.
-    first: u32,
-    /// The proxies' farthest tier (see [`FAR_TIER`]): a mesh of its own,
-    /// built once, shown instead of `low` beyond the tier's distance. Never a
-    /// rewrite of `low_mesh`: swapping its indices as the camera moved
-    /// re-uploaded the whole mesh (suspected of killing the iPhone page,
-    /// 2026-10-31). `None` when no proxy has a cheaper tier.
-    far_low: Option<Entity>,
+/// A tile of the island (640 m on the desktop, the whole island in the
+/// browser): per variety present and per tier, one entity drawing that
+/// variety's mesh once per plant of the tile (`veg_instancing.rs`), with the
+/// tile's bounds for culling. The level of detail shows and hides these.
+struct Tile {
+    full: Vec<Entity>,
+    low: Vec<Entity>,
+    far_low: Vec<Entity>,
+    /// The proxies again, on the sun's layer only: the shadow of a
+    /// full-model tile too far for its crowns to show in the shadow map.
+    shadow: Vec<Entity>,
+    /// The burnt remains, spawned when the fire first reaches the tile.
+    char_near: Vec<Entity>,
+    char_far: Vec<Entity>,
+    /// The tile's plants, by variety, to spawn the remains from.
+    plants: Vec<(&'static str, Arc<Vec<PlantInstance>>, Aabb)>,
     /// `far_low` is on show rather than `low`.
     far: bool,
-    full: Entity,
-    low: Entity,
-    /// Which of the two is on show.
+    /// The full models are on show rather than the proxies.
     near: bool,
-    /// The full models cast the sun's shadow (within [`FULL_SHADOW_M`]); beyond
-    /// it `shadow` casts it for them.
+    /// The full models cast the sun's shadow (within [`FULL_SHADOW_M`]).
     full_casts: bool,
-    /// The proxies again, on the sun's layer only: the shadow of a full-model
-    /// chunk too far for its crowns to show in the shadow map.
-    shadow: Option<Entity>,
     /// World-space bounds (Bevy frame) of the plants, for the LOD distance.
     bounds: (Vec3, Vec3),
-    /// Fire cells the chunk covers, `(row0, row1, col0, col1)`, end exclusive.
+    /// Fire cells the tile covers, `(row0, row1, col0, col1)`, end exclusive.
     cells: (usize, usize, usize, usize),
-    plants: Vec<Plant>,
-    /// The burnt remains, once a plant here has caught.
-    char: Option<CharLayer>,
-    /// How many plants have caught, and how many are burnt (a burnt plant is
-    /// final, until a restart).
-    lit: usize,
-    burnt: usize,
 }
 
 /// Share of the built plants that are shown (bits of an `f32`; see
@@ -250,39 +218,120 @@ fn keep() -> f32 {
     f32::from_bits(KEEP.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// A plant's fixed place in the order in which the thinning takes plants
-/// away (0..1, from its position: the same plants go on every redraw).
-fn rank(plant: &Plant) -> f32 {
-    let h = plant.pos.x.to_bits().wrapping_mul(0x9E37_79B1) ^ plant.pos.y.to_bits().wrapping_mul(0x85EB_CA6B);
-    (h ^ (h >> 15)).wrapping_mul(0x2C1B_3C6D) as f32 / u32::MAX as f32
+/// A number in `[0, 1)` from the bits of a position, the same in the shader
+/// (`hash01` in `veg_state.wgsl`): a plant's own fixed random numbers.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
+fn hash01(x: f32, y: f32, salt: u32) -> f32 {
+    let mut h = x.to_bits().wrapping_mul(0x9E37_79B1) ^ y.to_bits().wrapping_mul(0x85EB_CA6B) ^ salt;
+    h = (h ^ (h >> 15)).wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 13;
+    (h >> 8) as f32 / (1u32 << 24) as f32
 }
+
+/// A plant's fixed place in the order in which the thinning takes plants
+/// away (0..1): it is shown while this is below the share kept.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
+fn plant_rank(p: Pos) -> f32 {
+    hash01(p.x, p.y, 0)
+}
+
+/// Seconds a plant lags the interpolated front: even two shrubs a metre apart
+/// do not catch at the same instant.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
+fn plant_lag(p: Pos) -> f32 {
+    hash01(p.x, p.y, 0x51ED) * LAG_S
+}
+
+/// The longest [`plant_lag`].
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
+const LAG_S: f32 = 45.0;
 
 #[derive(Resource)]
 pub struct Vegetation {
-    /// The one material of every plant mesh, and the state image it reads:
-    /// one texel per plant of the island (2026-10-31: was one material and
-    /// one float image per chunk).
+    /// The plants' material, and the remains' (`FoliageMaterial::layer`).
     material: Handle<FoliageMaterial>,
-    state: Handle<Image>,
-    /// The thinning changed: every chunk is looked at once.
-    thin_dirty: bool,
-    chunks: Vec<Chunk>,
-    /// Beyond this distance from the camera a chunk shows its proxies.
+    remains_material: Option<Handle<FoliageMaterial>>,
+    /// The fire grid the plants read (see [`FireGrid`]).
+    grid: FireGrid,
+    /// The variety meshes, by variety and tier.
+    meshes: std::collections::HashMap<(&'static str, Tier), Handle<Mesh>>,
+    tiles: Vec<Tile>,
+    /// Beyond this distance from the camera a tile shows its proxies.
     lod_m: f32,
-    /// Simulated time the plants were last drawn at: the plants are a
-    /// function of the fire and the clock, so an unchanged clock (a paused
-    /// world, the planning phase) costs nothing.
+    /// Simulated time the grid was last written at.
     drawn_at: Option<f32>,
-    /// Cells cleared by crews when the plants were last drawn.
+    /// Cells cleared by crews when the grid was last written.
     drawn_cleared: usize,
 }
 
+/// The fire as the plants see it: one RGBA8 texel per fire cell (row 0 to
+/// the north), red, green and blue the 24 bits of the arrival time in whole
+/// seconds ([`NEVER`] until the fire arrives), alpha the [`CLEARED_BIT`].
+/// Written whole when a cell changes, not per plant.
+struct FireGrid {
+    image: Handle<Image>,
+    /// What the image holds, to write it only when something changed.
+    data: Vec<u8>,
+}
+
+/// Arrival time of a cell the fire has not reached.
+const NEVER: u32 = 0x00FF_FFFF;
+/// Alpha bit of a cell a crew has cleared.
+const CLEARED_BIT: u8 = 1;
+
+/// The grid's bytes for the fire's cells.
+fn grid_bytes(arrival: &[i32], cleared: &[bool]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(arrival.len() * 4);
+    for (&t, &c) in arrival.iter().zip(cleared) {
+        let t = if t == i32::MIN { NEVER } else { (t.max(0) as u32).min(NEVER - 1) };
+        data.extend_from_slice(&[t as u8, (t >> 8) as u8, (t >> 16) as u8, if c { CLEARED_BIT } else { 0 }]);
+    }
+    data
+}
+
 /// Shown state of a plant gone from ground a crew has cleared, or thinned
-/// away ([`GONE`]): bare earth (the ground itself is tinted by
-/// `fire_view`). Above the `CellFire` values.
+/// away: bare earth (the ground itself is tinted by `fire_view`). Above the
+/// `CellFire` values.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
 const CLEARED: u8 = 10;
 /// Share of the plants inside a cleared line that are taken away.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
 const CLEARED_SHARE: f32 = 0.85;
+
+/// The browser draws the whole island as one tile: a few dozen draws, every
+/// plant's vertices processed (0.1 M of them, nothing for a GPU); the desktop
+/// culls and picks the level of detail per tile of 2 × 2 chunks (1280 m):
+/// each tile is one draw per variety and tier, so smaller tiles would be
+/// hundreds more draws.
+fn tile_chunks() -> usize {
+    if cfg!(target_arch = "wasm32") { usize::MAX } else { 2 }
+}
+
+/// The plants of the fire cells `(row0, row1, col0, col1)`, end exclusive.
+fn scatter_tile(scn: &Scenario, density: f32, (r0, r1, c0, c1): (usize, usize, usize, usize)) -> Lods {
+    let mut builder = Lods::default();
+    for r in r0..r1 {
+        for c in c0..c1 {
+            let cell = Cell { row: r, col: c };
+            let Some(species) = Species::of_fuel(scn.fuel_at(cell)) else {
+                continue;
+            };
+            let mut rng = Rng::seeded(r as u64 * 65_536 + c as u64);
+            let centre = scn.world.centre_of(cell);
+            let stand_density = DENSITY[species as usize] * class_density(scn.fuel_at(cell));
+            let expected = stand_density * density * patchiness(centre);
+            let n = expected.floor() as u32 + u32::from(rng.unit() < expected.fract());
+            for _ in 0..n {
+                if scatter_plant(scn, cell, species, &mut rng, &mut builder).is_some() {
+                    // (the old per-plant lag: drawn still, so the forest
+                    // stays where it was)
+                    let _ = rng.unit();
+                }
+            }
+        }
+    }
+    builder
+}
 
 pub fn spawn(
     mut commands: Commands,
@@ -299,237 +348,156 @@ pub fn spawn(
     // a saved adaptive level may start thinned
     KEEP.store(gfx.veg_keep.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
-
-    // One material for every plant mesh: the atlas (`materials::foliage_atlas`)
-    // and the island's state image, filled in once every plant is known.
+    let w = scn.world;
+    let (rows, cols) = (w.fire_rows, w.fire_cols);
+    let data = grid_bytes(sim.fire.arrival_times(), sim.fire.cleared());
+    let image = images.add(Image::new(
+        Extent3d { width: cols as u32, height: rows as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data.clone(),
+        // plain bytes, not sRGB: decoded to exact integers in the shader
+        TextureFormat::Rgba8Unorm,
+        // the CPU copy stays: it is written to again
+        RenderAssetUsages::default(),
+    ));
     let atlas = images.add(materials::foliage_atlas());
-    let state = images.add(state_image(&[]));
-    let material = materials.add(FoliageMaterial::new(state.clone(), atlas));
-    // two texels per plant: its fire state ([`Texel`]) and, for an instance,
-    // its tint ([`tint_texel`])
-    let mut texels: Vec<Texel> = Vec::new();
-    let instanced = instanced();
-    let mut variety_meshes: std::collections::HashMap<&'static str, Handle<Mesh>> = Default::default();
-    let mut inst_tris_per: std::collections::HashMap<&'static str, usize> = Default::default();
-    let (mut inst_count, mut inst_tris) = (0usize, 0usize);
+    let grid = Vec4::new(w.cellsize, w.height_m, cols as f32, rows as f32);
+    // The browser never had the remains (memory): there a burnt plant turns
+    // all charcoal.
+    let remains = !cfg!(target_arch = "wasm32");
+    let mut plant_material = FoliageMaterial::new(image.clone(), atlas.clone(), grid, false);
+    plant_material.layer.y = if remains { 1.0 } else { 0.0 };
+    let material = materials.add(plant_material);
+    let remains_material = remains.then(|| {
+        let mut m = FoliageMaterial::new(image.clone(), atlas, grid, true);
+        m.layer.y = 1.0;
+        materials.add(m)
+    });
 
-    let (rows, cols) = (scn.world.fire_rows, scn.world.fire_cols);
+    let tc = tile_chunks();
     let chunks_y = rows.div_ceil(CHUNK_CELLS);
     let chunks_x = cols.div_ceil(CHUNK_CELLS);
-    let mut chunks = Vec::with_capacity(chunks_x * chunks_y);
-    let (mut plant_count, mut tri_count, mut low_tri_count) = (0usize, 0usize, 0usize);
-    let (mut low_verts_count, mut far_verts) = (0usize, 0usize);
+    let tiles_y = chunks_y.div_ceil(tc.min(chunks_y));
+    let tiles_x = chunks_x.div_ceil(tc.min(chunks_x));
+    let tile_cells = CHUNK_CELLS * tc.min(chunks_y.max(chunks_x));
+    let mut variety_meshes: std::collections::HashMap<(&'static str, Tier), Handle<Mesh>> = Default::default();
+    let mut tiles = Vec::new();
+    let (mut plant_count, mut entity_count, mut instanced_tris) = (0usize, 0usize, 0usize);
+    let mut tris_of: std::collections::HashMap<(&'static str, Tier), usize> = Default::default();
+    let near_lod = gfx.lod_m > 0.0;
 
-    for cy in 0..chunks_y {
-        for cx in 0..chunks_x {
-            let mut builder = Lods { instanced, ..Default::default() };
-            builder.low.want_far = true;
-            let mut plants = Vec::new();
-            let mut chunk_insts: Vec<Option<Inst>> = Vec::new();
-
-            for r in cy * CHUNK_CELLS..((cy + 1) * CHUNK_CELLS).min(rows) {
-                for c in cx * CHUNK_CELLS..((cx + 1) * CHUNK_CELLS).min(cols) {
-                    let cell = Cell { row: r, col: c };
-                    let Some(species) = Species::of_fuel(scn.fuel_at(cell)) else {
-                        continue;
-                    };
-                    let mut rng = Rng::seeded(r as u64 * 65_536 + c as u64);
-                    let centre = scn.world.centre_of(cell);
-                    let stand_density = DENSITY[species as usize] * class_density(scn.fuel_at(cell));
-                    let expected = stand_density * density * patchiness(centre);
-                    let n = expected.floor() as u32 + u32::from(rng.unit() < expected.fract());
-
-                    for _ in 0..n {
-                        let start = builder.full.positions.len() as u32;
-                        let low_start = builder.low.positions.len() as u32;
-                        let remains_before = builder.remains.len();
-                        let inst_before = builder.inst.len();
-                        let Some(pos) = scatter_plant(scn, cell, species, &mut rng, &mut builder)
-                        else {
-                            continue;
-                        };
-                        plants.push(Plant {
-                            pos,
-                            lag_s: rng.unit() * 45.0,
-                            vert_start: start,
-                            vert_end: builder.full.positions.len() as u32,
-                            low_start,
-                            low_end: builder.low.positions.len() as u32,
-                            remains: builder.remains.get(remains_before).cloned(),
-                            texel: 0,
-                        });
-                        chunk_insts.push(builder.inst.get(inst_before).cloned());
-                    }
-                }
-            }
-
-            if plants.is_empty() {
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let (r0, r1) = (ty * tile_cells, ((ty + 1) * tile_cells).min(rows));
+            let (c0, c1) = (tx * tile_cells, ((tx + 1) * tile_cells).min(cols));
+            let builder = scatter_tile(scn, density, (r0, r1, c0, c1));
+            if builder.inst.is_empty() {
                 continue;
             }
-            plant_count += plants.len();
-            tri_count += builder.full.indices.len() / 3;
-            low_tri_count += builder.low.indices.len() / 3;
+            plant_count += builder.inst.len();
 
-            let bounds = builder.full.positions.iter().copied()
-                .chain(chunk_insts.iter().flatten().map(|i| i.base.to_array()))
-                .fold(
-                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                    |(lo, hi), p| (lo.min(Vec3::from(p)), hi.max(Vec3::from(p))),
-                );
-            let first = (texels.len() / 2) as u32;
-            for (p, inst) in plants.iter_mut().zip(&chunk_insts) {
-                p.texel = texel(None, p.remains.is_some(), false);
-                texels.push(p.texel);
-                texels.push(inst.as_ref().map_or(NO_TINT, tint_texel));
-            }
-            // the plants as instances of their variety's mesh
-            for (i, inst) in chunk_insts.iter().enumerate() {
-                let Some(inst) = inst else { continue };
-                let mesh = variety_meshes
-                    .entry(inst.name)
-                    .or_insert_with(|| {
-                        let mesh = variety_proxy(inst.name);
-                        inst_tris_per.insert(inst.name, mesh.indices().map_or(0, |i| i.len() / 3));
-                        meshes.add(mesh)
-                    })
-                    .clone();
-                inst_tris += inst_tris_per[inst.name];
-                commands.spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_translation(inst.base)
-                        .with_rotation(Quat::from_rotation_y(inst.yaw))
-                        .with_scale(inst.scale),
-                    bevy::mesh::MeshTag::new(first + i as u32),
-                    TransmittedShadowReceiver,
-                ));
-                inst_count += 1;
-            }
-            if builder.low.positions.is_empty() {
-                // every plant an instance: no chunk meshes
-                chunks.push(Chunk {
-                    first,
-                    far_low: None,
-                    far: false,
-                    full: Entity::PLACEHOLDER,
-                    low: Entity::PLACEHOLDER,
-                    near: false,
-                    full_casts: false,
-                    shadow: None,
-                    bounds,
-                    cells: (
-                        cy * CHUNK_CELLS,
-                        ((cy + 1) * CHUNK_CELLS).min(rows),
-                        cx * CHUNK_CELLS,
-                        ((cx + 1) * CHUNK_CELLS).min(cols),
-                    ),
-                    plants,
-                    char: None,
-                    lit: 0,
-                    burnt: 0,
+            // by variety, in a fixed order
+            let mut by_variety: std::collections::BTreeMap<&'static str, Vec<PlantInstance>> = Default::default();
+            let mut bounds = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            let mut boxes: std::collections::HashMap<&'static str, (Vec3, Vec3)> = Default::default();
+            for i in &builder.inst {
+                // a generous box: the models stand within about a unit of
+                // their foot, a little more in height
+                let lo = i.base - Vec3::new(i.scale.x, 0.0, i.scale.z);
+                let hi = i.base + Vec3::new(i.scale.x, i.scale.y * 1.3, i.scale.z);
+                bounds = (bounds.0.min(lo), bounds.1.max(hi));
+                let b = boxes.entry(i.name).or_insert((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)));
+                *b = (b.0.min(lo), b.1.max(hi));
+                by_variety.entry(i.name).or_default().push(PlantInstance {
+                    pos: i.base.to_array(),
+                    yaw: i.yaw,
+                    scale: i.scale.to_array(),
+                    tint: tint_bytes(i),
                 });
-                continue;
             }
-            let (verts, low_verts) = (builder.full.positions.len(), builder.low.positions.len());
-            low_verts_count += low_verts;
-            let (mut low, far_idx) = builder.low.finish_with_far();
-            tag_plants(&mut low, low_verts, first, plants.iter().map(|p| (p.low_start, p.low_end)), false);
-            // Static on the GPU from here: the burning goes through the state
-            // image, the LOD through which entity is on show.
-            let far_mesh = (!far_idx.is_empty()).then(|| {
-                let mut far = compact(&low, &far_idx);
-                far.asset_usage = RenderAssetUsages::RENDER_WORLD;
-                far.compress_indices();
-                pack(&mut far);
-                far_verts += far.count_vertices();
-                meshes.add(far)
-            });
-            low.asset_usage = RenderAssetUsages::RENDER_WORLD;
-            low.compress_indices();
-            pack(&mut low);
-            let low_mesh = meshes.add(low);
-            // The browser only draws proxies (lod_m = 0). Share their handle
-            // with the hidden near entity instead of uploading a second copy.
-            let mesh = if cfg!(target_arch = "wasm32") {
-                low_mesh.clone()
-            } else {
-                let mut full_mesh = builder.full.finish();
-                tag_plants(&mut full_mesh, verts, first, plants.iter().map(|p| (p.vert_start, p.vert_end)), false);
-                full_mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
-                full_mesh.compress_indices();
-                pack(&mut full_mesh);
-                meshes.add(full_mesh)
-            };
-
-            // Vegetation is visual only: Mario can run through trunks and
-            // canopies, and the follow camera is not clipped by the forest.
-            // The full models start on show, until the LOD system picks.
-            // The light through the leaves is shadowed too: a crown in the
-            // shade of another does not glow as if the sun were behind it.
-            let full = commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())), TransmittedShadowReceiver)).id();
-            let low = commands.spawn(((
-                Mesh3d(low_mesh.clone()),
-                MeshMaterial3d(material.clone()),
-                Visibility::Hidden,
-            ), TransmittedShadowReceiver)).id();
-            let far_low = far_mesh.map(|m| commands.spawn(((
-                Mesh3d(m),
-                MeshMaterial3d(material.clone()),
-                Visibility::Hidden,
-            ), TransmittedShadowReceiver)).id());
-            // Same mesh handle as `low`: the burn edits reach it for free.
-            let shadow = gfx.shadows.then(|| {
-                commands.spawn((
-                    (
-                        Mesh3d(low_mesh.clone()),
-                        MeshMaterial3d(material.clone()),
-                        Visibility::Hidden,
-                    ),
-                    bevy::camera::visibility::RenderLayers::layer(crate::terrain_mesh::SHADOW_LAYER),
-                )).id()
-            });
-            chunks.push(Chunk {
-                first,
-                far_low,
+            let mut tile = Tile {
+                full: Vec::new(),
+                low: Vec::new(),
+                far_low: Vec::new(),
+                shadow: Vec::new(),
+                char_near: Vec::new(),
+                char_far: Vec::new(),
+                plants: Vec::new(),
                 far: false,
-                full,
-                low,
-                near: true,
-                full_casts: true,
-                shadow,
+                near: near_lod,
+                full_casts: near_lod,
                 bounds,
-                cells: (
-                    cy * CHUNK_CELLS,
-                    ((cy + 1) * CHUNK_CELLS).min(rows),
-                    cx * CHUNK_CELLS,
-                    ((cx + 1) * CHUNK_CELLS).min(cols),
-                ),
-                plants,
-                char: None,
-                lit: 0,
-                burnt: 0,
-            });
+                cells: (r0, r1, c0, c1),
+            };
+            for (name, list) in by_variety {
+                let n = list.len();
+                let list = Arc::new(list);
+                let (lo, hi) = boxes[name];
+                let aabb = Aabb::from_min_max(lo, hi);
+                let mut spawn_tier = |tier: Tier, on: bool, shadow_layer: bool, mat: &Handle<FoliageMaterial>| {
+                    let mesh = variety_meshes
+                        .entry((name, tier))
+                        .or_insert_with(|| {
+                            let m = variety_mesh(name, tier);
+                            tris_of.insert((name, tier), m.indices().map_or(0, |i| i.len() / 3));
+                            meshes.add(m)
+                        })
+                        .clone();
+                    let mut e = commands.spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(mat.clone()),
+                        Transform::IDENTITY,
+                        VegInstances(list.clone()),
+                        aabb,
+                        NoAutoAabb,
+                        NoAutomaticBatching,
+                        if on { Visibility::Inherited } else { Visibility::Hidden },
+                    ));
+                    if shadow_layer {
+                        e.insert(bevy::camera::visibility::RenderLayers::layer(crate::terrain_mesh::SHADOW_LAYER));
+                    } else {
+                        // the light through the leaves is shadowed too
+                        e.insert(TransmittedShadowReceiver);
+                    }
+                    if on && !shadow_layer {
+                        instanced_tris += tris_of[&(name, tier)] * n;
+                    }
+                    e.id()
+                };
+                if near_lod {
+                    tile.full.push(spawn_tier(Tier::Full, true, false, &material));
+                }
+                tile.low.push(spawn_tier(Tier::Proxy, !near_lod, false, &material));
+                // the browser's one tile is never far from the camera
+                if tc < usize::MAX {
+                    tile.far_low.push(spawn_tier(Tier::Far, false, false, &material));
+                }
+                if gfx.shadows && near_lod {
+                    tile.shadow.push(spawn_tier(Tier::Proxy, false, true, &material));
+                }
+                tile.plants.push((name, list, aabb));
+            }
+            entity_count += tile.full.len() + tile.low.len() + tile.far_low.len() + tile.shadow.len();
+            tiles.push(tile);
         }
     }
 
     info!(
-        "vegetation: {plant_count} plants in {} chunks, {:.2} M triangles ({:.2} M as distant proxies; proxy vertices {:.2} M, far tier {:.2} M)",
-        chunks.len(),
-        tri_count as f32 / 1e6,
-        low_tri_count as f32 / 1e6,
-        low_verts_count as f32 / 1e6,
-        far_verts as f32 / 1e6
+        "vegetation: {plant_count} plants in {} tiles as instances of {} variety meshes, {entity_count} entities (no per-plant entity), {:.2} M triangles on show at the start",
+        tiles.len(),
+        variety_meshes.len(),
+        instanced_tris as f32 / 1e6,
     );
-    if instanced {
-        info!(
-            "vegetation: {inst_count} plants as instances of {} variety meshes, {:.2} M triangles",
-            variety_meshes.len(),
-            inst_tris as f32 / 1e6
-        );
-    }
-    // the state image, now that every plant has its index
-    let _ = images.insert(&state, state_image(&texels));
-    commands.insert_resource(Vegetation { material, state, thin_dirty: gfx.veg_keep < 1.0, chunks, lod_m: gfx.lod_m, drawn_at: None, drawn_cleared: 0 });
+    commands.insert_resource(Vegetation {
+        material,
+        remains_material,
+        grid: FireGrid { image, data },
+        meshes: variety_meshes,
+        tiles,
+        lod_m: gfx.lod_m,
+        drawn_at: None,
+        drawn_cleared: 0,
+    });
 }
 
 /// Whether `p` is within `margin` metres of a pitch, car park, assembly area,
@@ -763,10 +731,8 @@ fn scatter_plant(
             let height = (7.0 + rng.unit() * 5.0) * scale * crate::visual_scale::TREE;
             out.model("olive", base, Vec3::splat(height), yaw, wood_tint, wood_tint);
         }
-        // Meadow tufts are drawn by the terrain shader (`shaders/terrain.wgsl`)
-        // unless `ROCCA_GRASS_MESH` asks for the old geometry.
-        Species::Grass if crate::ground_mask::shader_grass() => return None,
-        Species::Grass => grass(out, base, scale, yaw, foliage, rng),
+        // Meadow tufts are drawn by the terrain shader (`shaders/terrain.wgsl`).
+        Species::Grass => return None,
     }
     Some(p)
 }
@@ -850,89 +816,78 @@ fn shrub(out: &mut Lods, name: &'static str, base: Vec3, scale: f32, yaw: f32,
     out.model(name, base, Vec3::new(r, r * 0.8, r), yaw, leaf, wood);
 }
 
-fn grass(out: &mut Lods, base: Vec3, scale: f32, yaw: f32, foliage: [f32; 3], rng: &mut Rng) {
-    // A tussock, not a blade: the unit of grassland at this scale is a clump
-    // half a metre high and a couple of metres across. Drawn as a low fan plus
-    // a few upright blades, so it holds a silhouette from a low camera angle
-    // and still covers ground when seen from above.
-    let spread = (1.5 + rng.unit() * 1.4) * scale;
-    let h = (0.5 + rng.unit() * 0.6) * scale;
-
-    // Ground fan: what actually closes the cover from altitude. It is also
-    // the whole distant proxy: the blades are under a pixel there.
-    out.full.dome(base, spread, h * 0.55, yaw, mul(foliage, 0.9));
-    out.low.dome(base, spread, h * 0.55, yaw, mul(foliage, 0.9));
-
-    for i in 0..2 {
-        let a = yaw + i as f32 * (std::f32::consts::TAU / 3.0) + rng.unit() * 0.5;
-        out.full.blade(
-            base + Vec3::new(a.cos() * spread * 0.3, 0.0, a.sin() * spread * 0.3),
-            spread * 0.45,
-            h * (1.2 + rng.unit() * 1.0),
-            a,
-            mul(foliage, 1.0 + rng.unit() * 0.2),
-        );
-    }
-}
 
 // --- mesh building ---------------------------------------------------------
 
-/// The two meshes of a chunk, built side by side.
+/// The plants of a tile as the scatter places them.
 #[derive(Default)]
 struct Lods {
-    full: Builder,
-    low: Builder,
-    /// One entry per plant drawn from an archetype, in order.
-    remains: Vec<Remains>,
-    /// Plants are entities of their own ([`instanced`]): they are not built
-    /// into the chunk meshes, `inst` records them instead, in order.
-    instanced: bool,
     inst: Vec<Inst>,
 }
 
-/// A plant drawn as an instance of its variety's mesh ([`instanced`]).
+/// A plant: its variety, where and how it stands, its tint.
 #[derive(Clone)]
 struct Inst {
     name: &'static str,
     base: Vec3,
     scale: Vec3,
     yaw: f32,
-    /// Linear multipliers of the atlas colours, as `Builder::model` bakes them.
+    /// Linear multipliers of the atlas colours (1 = as painted).
     leaf: [f32; 3],
     wood: f32,
 }
 
-/// The browser draws every plant as an entity of its own, an instance of one
-/// mesh per variety (Bevy batches them), instead of merged chunk meshes
-/// (2026-10-31, the iPhone page dying with the plants drawn). `?istanze=0`
-/// brings the merged meshes back. The desktop keeps them: some 100 k plants
-/// as entities would cost the CPU every frame (visibility, extraction,
-/// uniforms) what the merged chunks cost once, and it was never measured.
-fn instanced() -> bool {
-    cfg!(target_arch = "wasm32") && !crate::quality::web_off("istanze")
-}
-
 impl Lods {
     /// `species` is one of `models::SPECIES`; which of its varieties this
-    /// plant is follows from its yaw, so it is the same on every run. The
-    /// tints are linear multipliers of the atlas colours (1 = as painted).
+    /// plant is follows from its yaw, so it is the same on every run.
     fn model(&mut self, species: &'static str, base: Vec3, scale: Vec3, yaw: f32,
         foliage: [f32; 3], wood: [f32; 3]) {
         let name = crate::models::pick_variety(species, yaw / std::f32::consts::TAU);
-        if self.instanced {
-            self.inst.push(Inst { name, base, scale, yaw, leaf: foliage, wood: wood[1] });
-            return;
+        self.inst.push(Inst { name, base, scale, yaw, leaf: foliage, wood: wood[1] });
+    }
+}
+
+/// A plant's tint as the instance carries it: leaf red, green, blue and the
+/// wood, each multiplier / 2 as a byte (the shader doubles them).
+fn tint_bytes(i: &Inst) -> [u8; 4] {
+    let b = |t: f32| ((t * 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    [b(i.leaf[0]), b(i.leaf[1]), b(i.leaf[2]), b(i.wood)]
+}
+
+/// One variety's mesh for a tier, at the origin, unrotated, untinted (the
+/// instances place and tint it), only on the GPU.
+fn variety_mesh(name: &'static str, tier: Tier) -> Mesh {
+    let mut b = Builder::default();
+    let remains = |low| Remains { name, base: Vec3::ZERO, scale: Vec3::ONE, yaw: 0.0 }.build(low);
+    let mut mesh = match tier {
+        Tier::Full => {
+            b.model(crate::models::live(name), Vec3::ZERO, Vec3::ONE, 0.0, [1.0; 3], [1.0; 3]);
+            b.finish()
         }
-        // Do not allocate the detailed tree on web.
-        // Merely hiding that mesh with LOD still retained all its CPU/GPU data.
-        if cfg!(target_arch = "wasm32") {
-            self.full.proxy(name, base, scale, yaw, foliage, wood);
-            self.low.proxy(name, base, scale, yaw, foliage, wood);
-            return;
+        Tier::Proxy => {
+            b.proxy(name, Vec3::ZERO, Vec3::ONE, 0.0, [1.0; 3], [1.0; 3]);
+            b.finish()
         }
-        self.remains.push(Remains { name, base, scale, yaw });
-        self.full.model(crate::models::live(name), base, scale, yaw, foliage, wood);
-        self.low.proxy(name, base, scale, yaw, foliage, wood);
+        Tier::Far => {
+            b.want_far = true;
+            b.proxy(name, Vec3::ZERO, Vec3::ONE, 0.0, [1.0; 3], [1.0; 3]);
+            let (mesh, far) = b.finish_with_far();
+            compact(&mesh, &far)
+        }
+        Tier::RemainsNear => remains(false),
+        Tier::RemainsFar => remains(true),
+    };
+    mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
+    mesh.compress_indices();
+    pack(&mut mesh);
+    mesh
+}
+
+impl Remains {
+    fn build(&self, low: bool) -> Mesh {
+        let mut b = Builder::default();
+        b.remains(self, low);
+        b.finish()
     }
 }
 
@@ -1155,9 +1110,6 @@ impl Builder {
         self.far_synced = self.indices.len();
     }
 
-    fn vertex(&mut self, p: Vec3, c: [f32; 3]) -> u32 {
-        self.vertex_a(p, c, 0.0)
-    }
 
     /// `leaf` goes in the colour's alpha (the material is opaque, so nothing
     /// else reads it): 1 for living foliage, which the shader textures; 0 for
@@ -1180,47 +1132,7 @@ impl Builder {
         i
     }
 
-    /// Low, irregular dome for the remaining procedural grass tussocks.
-    fn dome(&mut self, base: Vec3, radius: f32, height: f32, yaw: f32, color: [f32; 3]) {
-        const SEGMENTS: usize = 5;
-        // The tip leans, so a clump of domes does not read as a row of cones.
-        let (ls, lc) = yaw.sin_cos();
-        let apex = self.vertex(
-            base + Vec3::new(lc * radius * 0.18, height, ls * radius * 0.18),
-            color,
-        );
-        let ring = self.positions.len() as u32;
-        for i in 0..SEGMENTS {
-            let a = yaw + i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-            let (s, c) = a.sin_cos();
-            // Deterministic rim wobble, and a darker skirt where the lobe
-            // meets the ground.
-            let r = radius * (0.78 + 0.44 * ((a * 2.7).sin() * 0.5 + 0.5));
-            let skirt = [color[0] * 0.72, color[1] * 0.72, color[2] * 0.72];
-            self.vertex(base + Vec3::new(c * r, height * 0.06, s * r), skirt);
-        }
-        for i in 0..SEGMENTS {
-            let a = ring + i as u32;
-            let b = ring + ((i + 1) % SEGMENTS) as u32;
-            self.indices.extend_from_slice(&[apex, a, b]);
-        }
-    }
 
-    /// Single upright quad, leaning slightly: one blade of a grass tuft.
-    fn blade(&mut self, base: Vec3, width: f32, height: f32, yaw: f32, color: [f32; 3]) {
-        let (s, c) = yaw.sin_cos();
-        let across = Vec3::new(c, 0.0, s) * width * 0.5;
-        let lean = Vec3::new(-s, 0.0, c) * height * 0.25;
-        let start = self.positions.len() as u32;
-        // Root colour is darker: a lit blade should not read as a flat card.
-        let root = mul(color, 0.65);
-        self.vertex(base - across, root);
-        self.vertex(base + across, root);
-        self.vertex(base + across * 0.35 + lean + Vec3::Y * height, color);
-        self.vertex(base - across * 0.35 + lean + Vec3::Y * height, color);
-        self.indices
-            .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
-    }
 
     /// Area-weighted vertex normals from the faces, then the mesh.
     fn finish(self) -> Mesh {
@@ -1280,102 +1192,78 @@ impl Builder {
 
 // --- burning ---------------------------------------------------------------
 
-/// Burn the plants the fire has reached.
-///
-/// Each plant is tested against the *interpolated* arrival time at its own
-/// position plus its own hashed lag, so a stand ignites as a wave crossing it
-/// rather than as a cell-shaped block, and a burning cell contains flaring,
-/// charred and untouched plants at once — which is what a fire edge looks like.
-///
-/// What is written is one texel per plant of the island's state image
-/// ([`Texel`]): the instant it caught, and whether it is cleared. The vertex
-/// stage (`veg_state.wgsl`) works out the rest from the simulated clock: the
-/// flames, the charcoal, the remains, the collapse. So a texel is written
-/// when a plant ignites, is cleared or comes back, and never again while it
-/// burns. A chunk the fire has not reached (no arrival time in its cells or
-/// their neighbours, whose times its plants interpolate) is not even looked
-/// at, and the plants are looked at at most every [`BURN_REDRAW_S`] of real
-/// time.
-#[allow(clippy::too_many_arguments)]
+/// Hand the fire to the plants: the fire grid (arrival time and cleared flag
+/// per cell, [`FireGrid`]) is written when a cell changes, at most every
+/// [`BURN_REDRAW_S`] of real time; each plant works out the rest in the vertex
+/// stage. A tile the fire first reaches gets its burnt remains (desktop).
 pub fn burn(
     mut commands: Commands,
     sim: Res<Sim>,
     time: Res<Time>,
     mut veg: ResMut<Vegetation>,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut restarted: MessageReader<crate::sim::SimRestarted>,
     mut since: Local<f32>,
 ) {
-    // `?brucia=0` in the browser: the plants never burn on screen and no
-    // remains are built (a switch to find what kills an iPhone's page)
+    // `?brucia=0` in the browser: the plants never burn on screen (a switch
+    // to find what kills an iPhone's page)
     if crate::quality::web_off("brucia") {
         return;
     }
     let restarted = restarted.read().count() > 0;
-    let thin = std::mem::take(&mut veg.thin_dirty);
     *since += time.delta_secs();
-    if !restarted && !thin && *since < BURN_REDRAW_S {
+    if !restarted && *since < BURN_REDRAW_S {
         return;
     }
     let now = sim.time_s() as f32;
     let line_cells = sim.fire.line_cells;
-    if veg.drawn_at == Some(now) && veg.drawn_cleared == line_cells && !restarted && !thin {
+    if veg.drawn_at == Some(now) && veg.drawn_cleared == line_cells && !restarted {
         return;
     }
     *since = 0.0;
     veg.drawn_at = Some(now);
     veg.drawn_cleared = line_cells;
-    let field = FireField {
-        state: sim.fire.state(),
-        arrival: sim.fire.arrival_times(),
-        intensity: sim.fire.intensity(),
-        cleared: sim.fire.cleared(),
-        world: sim.scn.world,
-    };
-    let (rows, cols) = (sim.scn.world.fire_rows, sim.scn.world.fire_cols);
-    let reached = |(r0, r1, c0, c1): (usize, usize, usize, usize)| {
-        (r0.saturating_sub(1)..(r1 + 1).min(rows)).any(|r| {
-            field.arrival[r * cols + c0.saturating_sub(1)..r * cols + (c1 + 1).min(cols)]
-                .iter()
-                .any(|&t| t != i32::MIN)
-        })
-    };
-    let cleared = sim.fire.cleared();
-    let any_cleared = |(r0, r1, c0, c1): (usize, usize, usize, usize)| {
-        line_cells > 0 && (r0..r1).any(|r| cleared[r * cols + c0..r * cols + c1].iter().any(|&b| b))
-    };
-
-    let (state, material) = (veg.state.clone(), veg.material.clone());
-    let mut writes: Vec<(u32, u32)> = Vec::new();
-    for chunk in &mut veg.chunks {
-        // every plant burnt: nothing here can change until a restart
-        if chunk.burnt == chunk.plants.len() && !restarted {
+    let arrival = sim.fire.arrival_times();
+    let data = grid_bytes(arrival, sim.fire.cleared());
+    if data != veg.grid.data {
+        if let Some(mut image) = images.get_mut(&veg.grid.image) {
+            image.data = Some(data.clone());
+        }
+        veg.grid.data = data;
+    }
+    // the remains, where the fire has reached: they stand hidden until their
+    // plant catches, and stay for good (a restart hides them again)
+    let Some(remains_material) = veg.remains_material.clone() else { return };
+    let cols = sim.scn.world.fire_cols;
+    let veg = &mut *veg;
+    for tile in &mut veg.tiles {
+        if !tile.char_near.is_empty() || tile.plants.is_empty() {
             continue;
         }
-        if chunk.lit == 0 && !reached(chunk.cells) && !any_cleared(chunk.cells) && !thin && !restarted {
+        let (r0, r1, c0, c1) = tile.cells;
+        if !(r0..r1).any(|r| arrival[r * cols + c0..r * cols + c1].iter().any(|&t| t != i32::MIN)) {
             continue;
         }
-        let (r0, r1, c0, c1) = chunk.cells;
-        let scan_cleared = line_cells > 0 && any_cleared((r0.saturating_sub(1), (r1 + 1).min(rows), c0.saturating_sub(1), (c1 + 1).min(cols)));
-        let before = writes.len();
-        plan(&mut chunk.plants, chunk.first, &mut chunk.lit, &mut chunk.burnt, &field, now, scan_cleared, restarted, &mut writes);
-        // (instances have no remains: the browser never built them)
-        if chunk.char.is_none() && chunk.lit > 0 && writes.len() > before && chunk.full != Entity::PLACEHOLDER {
-            chunk.char = Some(build_char_layer(&mut commands, &mut meshes, &*chunk, &material));
-        }
-    }
-    if writes.is_empty() {
-        return;
-    }
-    // Only the changed texels; the image is small (four bytes a plant) and
-    // goes to the GPU into the same texture.
-    if let Some(mut image) = images.get_mut(&state) {
-        let data = image.data.as_mut().expect("the state image keeps its CPU copy");
-        for (i, texel) in writes {
-            // two texels a plant: the state, then the tint
-            let at = i as usize * 8;
-            data[at..at + 4].copy_from_slice(&texel.to_le_bytes());
+        for (name, list, aabb) in &tile.plants {
+            for (tier, on) in [(Tier::RemainsNear, tile.near), (Tier::RemainsFar, !tile.near)] {
+                let Some(mesh) = veg.meshes.get(&(*name, tier)) else { continue };
+                let e = commands
+                    .spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(remains_material.clone()),
+                        Transform::IDENTITY,
+                        VegInstances(list.clone()),
+                        *aabb,
+                        NoAutoAabb,
+                        NoAutomaticBatching,
+                        if on { Visibility::Inherited } else { Visibility::Hidden },
+                    ))
+                    .id();
+                if on && !tile.full_casts {
+                    commands.entity(e).insert(NotShadowCaster);
+                }
+                if tier == Tier::RemainsNear { tile.char_near.push(e) } else { tile.char_far.push(e) }
+            }
         }
     }
 }
@@ -1426,262 +1314,78 @@ fn pack(mesh: &mut Mesh) {
     }
 }
 
-/// Seconds of simulated time at which a plant catches (its own lag included).
-fn ignition(field: &FireField, plant: &Plant) -> f32 {
-    field.arrival(plant.pos).map_or(0.0, |a| a + plant.lag_s)
-}
-
-/// A plant's texel in the state image (`veg_state.wgsl`), Rgba8Unorm read
-/// with `textureLoad` and decoded to exact integers: red, green and blue are
-/// the 24 bits of its ignition instant in ticks of [`TICK_S`] ([`NEVER`]
-/// until it catches), alpha its flags ([`HAS_REMAINS`], [`GONE`]).
-type Texel = u32;
-
-/// Resolution of the ignition instant: 2^24 ticks of a quarter second are
-/// 48 days of simulated time, far beyond any game (hours), and every tick is
-/// an exact `f32` in the shader.
-const TICK_S: f32 = 0.25;
-/// Ignition instant of a plant that has not caught.
-const NEVER: u32 = 0x00FF_FFFF;
-/// Flag: the plant has burnt remains (a twig skeleton): burnt, it loses its
-/// crown and keeps its wood charred; without, it is all charcoal.
-const HAS_REMAINS: u32 = 1 << 24;
-/// Flag: the plant is not drawn (cut by a crew, or thinned for the machine's
-/// sake, [`Vegetation::set_keep`]); its remains neither.
-const GONE: u32 = 1 << 25;
-
-fn texel(t0: Option<f32>, remains: bool, gone: bool) -> Texel {
-    let ticks = t0.map_or(NEVER, |t| ((t.max(0.0) / TICK_S).round() as u32).min(NEVER - 1));
-    ticks | if remains { HAS_REMAINS } else { 0 } | if gone { GONE } else { 0 }
-}
-
-fn texel_t0(t: Texel) -> Option<f32> {
-    let ticks = t & NEVER;
-    (ticks != NEVER).then(|| ticks as f32 * TICK_S)
-}
-
-/// What the vertex stage shows for a texel at `now`, as `plant_apply` in
-/// `veg_state.wgsl` decides it: the CPU's reference for the shader and its
-/// bookkeeping (which plants are alight, which are burnt for good).
-fn shown(t: Texel, now: f32) -> u8 {
-    if t & GONE != 0 {
-        return CLEARED;
-    }
-    match texel_t0(t) {
-        None => CellFire::Unburnt as u8,
-        Some(t0) if now < t0 => CellFire::Unburnt as u8,
-        Some(t0) if now - t0 < PLANT_FLAMING_S => CellFire::Burning as u8,
-        Some(_) => CellFire::Burnt as u8,
-    }
-}
-
-/// The texels of a chunk's plants that change at `now` go to `writes`
-/// (global plant index, texel); `lit` (plants caught) and `burnt` (burnt for
-/// good) are updated. A plant's ignition instant is written once, when it
-/// catches, and kept: the shader burns it on from there. Cleared (a cut
-/// line) only while unburnt; thinned only while not burnt, and a burnt plant
-/// is final until a restart.
-#[allow(clippy::too_many_arguments)]
-fn plan(
-    plants: &mut [Plant],
-    first: u32,
-    lit: &mut usize,
-    burnt: &mut usize,
-    field: &FireField,
-    now: f32,
-    scan_cleared: bool,
-    restarted: bool,
-    writes: &mut Vec<(u32, Texel)>,
-) {
-    const BURNT: u8 = CellFire::Burnt as u8;
-    const UNBURNT: u8 = CellFire::Unburnt as u8;
-    let (mut l, mut b) = (0, 0);
-    for (i, plant) in plants.iter_mut().enumerate() {
-        let old = if restarted { texel(None, plant.remains.is_some(), false) } else { plant.texel };
-        let t0 = texel_t0(old).or_else(|| (plant_state(field, plant, now) != UNBURNT).then(|| ignition(field, plant)));
-        let fire = shown(texel(t0, false, false), now);
-        let gone = fire != BURNT && rank(plant) >= keep()
-            || fire == UNBURNT && scan_cleared && {
-                // Thinned, not razed: the closer the plant is to the middle
-                // of the cut, the likelier it is gone, decided by its own
-                // fixed random number, so the same plants fall on every
-                // redraw and a few survive inside the line. The edge is sharp
-                // (a narrow ramp around the half-way point).
-                let inside = ((field.cleared_fraction(plant.pos) - 0.45) / 0.15).clamp(0.0, 1.0);
-                plant.lag_s / 45.0 < CLEARED_SHARE * inside
-            };
-        let new = texel(t0, plant.remains.is_some(), gone);
-        if new != plant.texel || restarted {
-            plant.texel = new;
-            writes.push((first + i as u32, new));
-        }
-        l += usize::from(t0.is_some());
-        b += usize::from(fire == BURNT);
-    }
-    (*lit, *burnt) = (l, b);
-}
-
-/// Build the burnt remains of every plant of `chunk` that has any: standing
-/// for good, the vertex stage shows each plant's from its ignition on.
-fn build_char_layer(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    chunk: &Chunk,
-    material: &Handle<FoliageMaterial>,
-) -> CharLayer {
-    let mut make = |low: bool| {
-        let mut builder = Builder::default();
-        let mut ranges = Vec::with_capacity(chunk.plants.len());
-        for plant in &chunk.plants {
-            let start = builder.positions.len() as u32;
-            if let Some(r) = &plant.remains {
-                builder.remains(r, low);
-            }
-            ranges.push((start, builder.positions.len() as u32));
-        }
-        // No plant here leaves remains (common with the browser's few
-        // plants): one triangle of no area, belonging to no plant, so the mesh
-        // is never empty. An empty one, spawned as the first plant of the chunk
-        // caught fire, killed the page on an iPhone (2026-10-31).
-        if builder.positions.is_empty() {
-            for _ in 0..3 {
-                builder.vertex(chunk.bounds.0, [0.0; 3]);
-            }
-            builder.indices.extend_from_slice(&[0, 1, 2]);
-        }
-        let verts = builder.positions.len();
-        let mut mesh = builder.finish();
-        tag_plants(&mut mesh, verts, chunk.first, ranges.iter().copied(), true);
-        mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
-        mesh.compress_indices();
-        pack(&mut mesh);
-        let on = chunk.near != low;
-        let entity = commands
-            .spawn((
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(material.clone()),
-                if on { Visibility::Inherited } else { Visibility::Hidden },
-            ))
-            .id();
-        if on && !chunk.full_casts { commands.entity(entity).insert(NotShadowCaster); }
-        CharMesh { entity }
-    };
-    CharLayer { near: make(false), far: make(true) }
-}
-
-/// Real seconds between two looks at the plants (see [`burn`]).
+/// Real seconds between two looks at the fire (see [`burn`]).
 const BURN_REDRAW_S: f32 = 0.15;
 
-/// Hand the simulated clock to the vegetation's material (`fire.y`, with the
-/// flaming time in `fire.z`): every plant's fire state is a function of it
-/// and of its ignition instant, so the fire keeps eating the canopy between
-/// state updates and stands still while the world is paused. One material
-/// for the island: one bind group made again when the clock moves.
+/// Hand the simulated clock and the share of plants kept to the vegetation's
+/// materials (`fire.y`, `fire.z` the flaming time, `fire.w` the share): every
+/// plant's look is a function of them and of the fire grid, so the fire keeps
+/// eating the canopy between grid updates and stands still while the world
+/// is paused.
 pub fn fire_clock(sim: Res<Sim>, veg: Res<Vegetation>, mut materials: ResMut<Assets<FoliageMaterial>>) {
     let now = sim.time_s() as f32;
-    let Some(m) = materials.get(&veg.material) else { return };
-    if m.fire.y == now && m.fire.z == PLANT_FLAMING_S {
-        return;
+    let want = Vec3::new(now, PLANT_FLAMING_S, keep());
+    for handle in std::iter::once(&veg.material).chain(veg.remains_material.as_ref()) {
+        let Some(m) = materials.get(handle) else { continue };
+        if m.fire.yzw() == want {
+            continue;
+        }
+        if let Some(mut m) = materials.get_mut(handle) {
+            (m.fire.y, m.fire.z, m.fire.w) = (want.x, want.y, want.z);
+        }
     }
-    if let Some(mut m) = materials.get_mut(&veg.material) {
-        m.fire.y = now;
-        m.fire.z = PLANT_FLAMING_S;
+}
+
+/// What a plant at `p` shows at `now`, as the vertex stage decides it
+/// (`look` in `veg_state.wgsl`) from the fire grid: the reference for the
+/// shader, for the tests. Returns the look and the plant's ignition instant.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
+fn plant_look(field: &FireField, p: Pos, now: f32, remains: bool, keep: f32) -> (u8, f32) {
+    let lag = plant_lag(p);
+    let mut look = CellFire::Unburnt as u8;
+    let mut t0 = 0.0;
+    if let Some(arrival) = field.arrival(p) {
+        t0 = arrival + lag;
+        let age = now - t0;
+        if age >= PLANT_FLAMING_S {
+            look = if remains { BURNT_REMAINS } else { CellFire::Burnt as u8 };
+        } else if age >= 0.0 {
+            look = CellFire::Burning as u8;
+        }
     }
-}
-
-/// The plants' vertex ranges into the mesh's plant attribute, as `f32`
-/// (exact up to 2^24; no integer vertex attribute, 2026-10-31): the global
-/// index of the plant ([`Chunk::first`] + its place in the chunk), or for
-/// the remains layer `-(index + 2)`; -1 on vertices of no plant.
-fn tag_plants(mesh: &mut Mesh, verts: usize, first: u32, ranges: impl Iterator<Item = (u32, u32)>, remains: bool) {
-    let mut ids = vec![NO_PLANT; verts];
-    for (i, (a, b)) in ranges.enumerate() {
-        let g = (first + i as u32) as f32;
-        ids[a as usize..b as usize].fill(if remains { -(g + 2.0) } else { g });
+    let burnt = look == CellFire::Burnt as u8 || look == BURNT_REMAINS;
+    if !burnt && plant_rank(p) >= keep {
+        return (CLEARED, t0);
     }
-    mesh.insert_attribute(materials::ATTRIBUTE_PLANT, ids);
-}
-
-/// The second texel of a plant: the tint of an instance ([`Inst`]), which
-/// the merged meshes bake into their vertex colours. Red, green, blue: the
-/// leaf tint / 2; alpha: the wood's. Read when the plant index comes from
-/// the mesh tag (`PLANT_TAG` in `veg_state.wgsl`).
-fn tint_texel(i: &Inst) -> Texel {
-    let b = |t: f32| ((t * 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-    b(i.leaf[0]) | b(i.leaf[1]) << 8 | b(i.leaf[2]) << 16 | b(i.wood) << 24
-}
-
-/// The tint texel of a plant of the merged meshes: unused (1, as built).
-const NO_TINT: Texel = 0x8080_8080;
-
-/// A variety's distant proxy as a mesh of its own, standing at the origin
-/// unrotated and untinted: the browser's plants are instances of it, placed
-/// by their transform, tinted and burnt from the state image by their mesh
-/// tag. No plant attribute: the material reads the tag instead.
-fn variety_proxy(name: &str) -> Mesh {
-    let mut b = Builder::default();
-    b.proxy(name, Vec3::ZERO, Vec3::ONE, 0.0, [1.0; 3], [1.0; 3]);
-    let mut mesh = b.finish();
-    mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
-    mesh.compress_indices();
-    pack(&mut mesh);
-    mesh
-}
-
-/// Plant attribute of a vertex of no plant (`NO_PLANT` in `veg_state.wgsl`).
-const NO_PLANT: f32 = -1.0;
-
-/// Width of the state image in texels (`ROW` in `veg_state.wgsl`): rows of
-/// 1024, two texels a plant, so even the desktop's ~100 k plants are some
-/// two hundred rows, far within WebGL2's guaranteed 2048 (the browser's
-/// 4–17 k plants: 9–33 rows).
-const STATE_ROW: usize = 1024;
-
-/// The island's state image: two texels per plant (state [`Texel`], tint),
-/// every plant not caught and shown.
-fn state_image(texels: &[Texel]) -> Image {
-    let rows = texels.len().div_ceil(STATE_ROW).max(1);
-    let mut data = vec![0u8; STATE_ROW * rows * 4];
-    for (i, t) in texels.iter().enumerate() {
-        data[i * 4..i * 4 + 4].copy_from_slice(&t.to_le_bytes());
+    let inside = ((field.cleared_fraction(p) - 0.45) / 0.15).clamp(0.0, 1.0);
+    if look == CellFire::Unburnt as u8 && lag / LAG_S < CLEARED_SHARE * inside {
+        return (CLEARED, t0);
     }
-    Image::new(
-        Extent3d { width: STATE_ROW as u32, height: rows as u32, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        data,
-        // plain bytes, not sRGB: decoded to exact integers in the shader
-        TextureFormat::Rgba8Unorm,
-        // the CPU copy stays: it is written to again
-        RenderAssetUsages::default(),
-    )
+    (look, t0)
 }
 
-/// Show each chunk's full models near the camera and its proxies beyond
-/// [`Vegetation::lod_m`], with a 10 % band so a chunk on the edge does not
-/// flicker while the camera drifts.
+/// Look of a burnt plant that keeps its wood under its remains.
+#[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
+const BURNT_REMAINS: u8 = 11;
+
 impl Vegetation {
     /// Show only this share of the plants built, whatever the fire does to
-    /// them: the rest are drawn as [`CLEARED`] (gone), so a weak machine
-    /// sheds fill rate without a rebuild. Vertices and memory stay.
+    /// them (a hash per plant against the share, in the shader): a weak
+    /// machine sheds fill rate without a rebuild.
     pub fn set_keep(&mut self, k: f32) {
-        let k = k.clamp(0.0, 1.0);
-        if keep() != k {
-            KEEP.store(k.to_bits(), std::sync::atomic::Ordering::Relaxed);
-            self.thin_dirty = true;
-        }
+        KEEP.store(k.clamp(0.0, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_lod_m(&mut self, m: f32) {
         if self.lod_m != m {
             self.lod_m = m;
-            // the next `lod` pass looks at every chunk again
-            self.drawn_at = None;
         }
     }
 }
 
-/// Only which entity of a chunk is on show changes: every mesh stays as built
-/// on the GPU (2026-10-31).
+/// Show each tile's full models near the camera and its proxies beyond
+/// [`Vegetation::lod_m`], with a 10 % band so a tile on the edge does not
+/// flicker while the camera drifts. Only which entities are on show changes.
 pub fn lod(
     mut commands: Commands,
     mut veg: ResMut<Vegetation>,
@@ -1691,43 +1395,35 @@ pub fn lod(
     let Ok(eye) = camera.single().map(|t: &Transform| t.translation) else { return };
     let lod_m = veg.lod_m;
     let far_m = (lod_m * FAR_TIER).max(FAR_TIER_MIN_M);
-    for chunk in &mut veg.chunks {
-        // all instances: no chunk meshes to choose between
-        if chunk.full == Entity::PLACEHOLDER {
-            continue;
-        }
-        let (lo, hi) = chunk.bounds;
+    for tile in &mut veg.tiles {
+        let (lo, hi) = tile.bounds;
         let d = eye.distance(eye.clamp(lo, hi));
-        let near = if chunk.near { d < lod_m * 1.1 } else { d < lod_m };
-        // the proxies' own two tiers, two static meshes
-        let far = chunk.far_low.is_some() && !near && if chunk.far { d > far_m / 1.1 } else { d > far_m };
-        let full_casts = near && if chunk.full_casts { d < FULL_SHADOW_M * 1.1 } else { d < FULL_SHADOW_M };
-        if near == chunk.near && far == chunk.far && full_casts == chunk.full_casts {
+        let near = !tile.full.is_empty() && if tile.near { d < lod_m * 1.1 } else { d < lod_m };
+        // the proxies' own two tiers
+        let far = !tile.far_low.is_empty() && !near && if tile.far { d > far_m / 1.1 } else { d > far_m };
+        let full_casts = near && if tile.full_casts { d < FULL_SHADOW_M * 1.1 } else { d < FULL_SHADOW_M };
+        if near == tile.near && far == tile.far && full_casts == tile.full_casts {
             continue;
         }
-        chunk.far = far;
-        let (near_char, far_char) = match &chunk.char {
-            Some(l) => (Some(l.near.entity), Some(l.far.entity)),
-            None => (None, None),
-        };
-        chunk.near = near;
-        chunk.full_casts = full_casts;
+        (tile.near, tile.far, tile.full_casts) = (near, far, full_casts);
         // the full models draw the shadow only close up; beyond that the
         // proxies do, from the sun's layer
-        for e in [Some(chunk.full), near_char].into_iter().flatten() {
+        for &e in tile.full.iter().chain(&tile.char_near) {
             if full_casts { commands.entity(e).remove::<NotShadowCaster>(); }
             else { commands.entity(e).insert(NotShadowCaster); }
         }
-        for (e, on) in [
-            (Some(chunk.full), near),
-            (Some(chunk.low), !near && !far),
-            (chunk.far_low, !near && far),
-            (near_char, near),
-            (far_char, !near),
-            (chunk.shadow, near && !full_casts),
+        for (list, on) in [
+            (&tile.full, near),
+            (&tile.low, !near && !far),
+            (&tile.far_low, !near && far),
+            (&tile.char_near, near),
+            (&tile.char_far, !near),
+            (&tile.shadow, near && !full_casts),
         ] {
-            if let Some(Ok(mut v)) = e.map(|e| visibility.get_mut(e)) {
-                *v = if on { Visibility::Inherited } else { Visibility::Hidden };
+            for &e in list {
+                if let Ok(mut v) = visibility.get_mut(e) {
+                    *v = if on { Visibility::Inherited } else { Visibility::Hidden };
+                }
             }
         }
     }
@@ -1739,26 +1435,10 @@ pub fn lod(
 /// shadow map, and its outline is the proxy's.
 const FULL_SHADOW_M: f32 = 250.0;
 
-/// Beyond this many times [`Vegetation::lod_m`] (and at least
-/// [`FAR_TIER_MIN_M`]) the proxies drop to 12 triangles a crown and a
-/// three-sided trunk: a plant there is a few pixels.
+/// Beyond this multiple of the LOD distance (and at least
+/// [`FAR_TIER_MIN_M`]) the proxies draw their cheaper tier.
 const FAR_TIER: f32 = 2.0;
 const FAR_TIER_MIN_M: f32 = 2000.0;
-
-/// Fire state of a single plant, from the interpolated front.
-fn plant_state(field: &FireField, plant: &Plant, now: f32) -> u8 {
-    let Some(arrival) = field.arrival(plant.pos) else {
-        return CellFire::Unburnt as u8;
-    };
-    let age = now - (arrival + plant.lag_s);
-    if age < 0.0 {
-        CellFire::Unburnt as u8
-    } else if age < PLANT_FLAMING_S {
-        CellFire::Burning as u8
-    } else {
-        CellFire::Burnt as u8
-    }
-}
 
 /// Small deterministic PRNG (SplitMix64), seeded per cell so the same forest
 /// grows on every run.
@@ -1787,14 +1467,18 @@ impl Rng {
 mod tests {
     #[test]
     fn the_thinning_rank_is_spread_evenly_and_fixed() {
-        let plant = |x: f32, y: f32| Plant { pos: Pos { x, y }, lag_s: 0.0, vert_start: 0, vert_end: 0, low_start: 0, low_end: 0, texel: 0, remains: None };
-        let ranks: Vec<f32> = (0..4000).map(|i| rank(&plant((i % 80) as f32 * 7.3 + 0.37, (i / 80) as f32 * 11.1 + 0.91))).collect();
+        let plant = |x: f32, y: f32| Pos { x, y };
+        let ranks: Vec<f32> = (0..4000).map(|i| plant_rank(plant((i % 80) as f32 * 7.3 + 0.37, (i / 80) as f32 * 11.1 + 0.91))).collect();
         assert!(ranks.iter().all(|r| (0.0..=1.0).contains(r)));
         for keep in [0.2f32, 0.35, 0.6] {
             let shown = ranks.iter().filter(|&&r| r < keep).count() as f32 / ranks.len() as f32;
             assert!((shown - keep).abs() < 0.05, "keep {keep}: {shown}");
         }
-        assert_eq!(rank(&plant(10.0, 20.0)), rank(&plant(10.0, 20.0)));
+        assert_eq!(plant_rank(plant(10.0, 20.0)), plant_rank(plant(10.0, 20.0)));
+        // the lags spread over their range too, and differ from the ranks
+        let lags: Vec<f32> = (0..4000).map(|i| plant_lag(plant((i % 80) as f32 * 7.3 + 0.37, (i / 80) as f32 * 11.1 + 0.91))).collect();
+        let mean = lags.iter().sum::<f32>() / lags.len() as f32;
+        assert!((mean - LAG_S / 2.0).abs() < 2.0, "{mean}");
     }
 
     use super::*;
@@ -1845,90 +1529,106 @@ mod tests {
         }
     }
 
-    /// A texel holds its ignition instant to the tick and its flags, and the
-    /// sentinel stays apart from every real instant.
+    /// The fire grid holds each cell's arrival to the second and its cleared
+    /// flag, and decoded the way the shader does (`cell` and `ground` in
+    /// `veg_state.wgsl`) gives back `FireField::arrival` and
+    /// `cleared_fraction`; through a real `medium` fire the plants' looks
+    /// (`plant_look`, the shader's rule) burn every plant the front passes
+    /// and never bring a burnt one back while the front stays put.
     #[test]
-    fn texels_keep_the_instant_and_the_flags() {
-        for (t0, remains, gone) in [(None, false, false), (Some(0.0), true, false), (Some(1234.25), false, true), (Some(4.0e6), true, true)] {
-            let t = texel(t0, remains, gone);
-            assert_eq!(texel_t0(t), t0, "{t0:?}");
-            assert_eq!(t & HAS_REMAINS != 0, remains);
-            assert_eq!(t & GONE != 0, gone);
-        }
-        assert_eq!(texel_t0(texel(Some(1e12), false, false)), Some((NEVER - 1) as f32 * TICK_S));
-        assert_eq!(shown(texel(Some(100.0), false, false), 99.0), CellFire::Unburnt as u8);
-        assert_eq!(shown(texel(Some(100.0), false, false), 100.0 + PLANT_FLAMING_S - 1.0), CellFire::Burning as u8);
-        assert_eq!(shown(texel(Some(100.0), true, false), 100.0 + PLANT_FLAMING_S), CellFire::Burnt as u8);
-        assert_eq!(shown(texel(Some(100.0), true, true), 0.0), CLEARED);
-    }
-
-    /// Through a real `medium` fire: what the texels show is what the front
-    /// says (a plant catches when the interpolated front and its lag reach
-    /// it), a burnt plant never flares up again, a texel is written only when
-    /// a plant catches or is cleared, and a restart brings everything back.
-    #[test]
-    fn the_texels_follow_the_fire() {
+    fn the_fire_grid_carries_the_fire_to_the_plants() {
         let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
         let mut sim = Sim::new(&data, "medium", 2).unwrap();
         let w = sim.scn.world;
-        let mut rng = Rng::seeded(7);
-        let mut plants = Vec::new();
-        let mut y = 5.0;
-        while y < w.height_m {
-            let mut x = 5.0;
-            while x < w.width_m {
-                let remains = (rng.unit() < 0.6).then(|| Remains { name: "pine_1", base: Vec3::ZERO, scale: Vec3::ONE, yaw: 0.0 });
-                let texel = texel(None, remains.is_some(), false);
-                plants.push(Plant { pos: Pos { x, y }, lag_s: rng.unit() * 45.0, vert_start: 0, vert_end: 0, low_start: 0, low_end: 0, remains, texel });
-                x += 37.0;
-            }
-            y += 37.0;
-        }
-        let n = plants.len();
-        let (mut lit, mut burnt) = (0, 0);
-        let mut seen_burnt = vec![false; n];
-        let (mut total_writes, mut mismatches, mut checks) = (0usize, 0usize, 0usize);
-        fn field_of(sim: &Sim) -> FireField<'_> { FireField {
-            state: sim.fire.state(),
-            arrival: sim.fire.arrival_times(),
-            intensity: sim.fire.intensity(),
-            cleared: sim.fire.cleared(),
-            world: sim.scn.world,
-        } }
         for _ in 0..40 {
             for _ in 0..(300.0 / rocca::STEP_S as f32).max(1.0) as usize {
                 if sim.is_over() { break; }
                 sim.game.step().unwrap();
             }
-            let now = sim.time_s() as f32;
-            let field = field_of(&sim);
-            let mut writes = Vec::new();
-            plan(&mut plants, 0, &mut lit, &mut burnt, &field, now, sim.fire.line_cells > 0, false, &mut writes);
-            total_writes += writes.len();
-            for (i, p) in plants.iter().enumerate() {
-                let s = shown(p.texel, now);
-                if seen_burnt[i] {
-                    assert_eq!(s, CellFire::Burnt as u8, "plant {i} flared up again at {now}");
-                }
-                seen_burnt[i] = s == CellFire::Burnt as u8;
-                if s != CLEARED {
-                    checks += 1;
-                    // the front may drift a little after a plant caught (its
-                    // instant is kept); anything else is a mismatch
-                    mismatches += usize::from(s != plant_state(&field, p, now) && texel_t0(p.texel).is_none());
+        }
+        let field = FireField {
+            state: sim.fire.state(),
+            arrival: sim.fire.arrival_times(),
+            intensity: sim.fire.intensity(),
+            cleared: sim.fire.cleared(),
+            world: w,
+        };
+        let bytes = grid_bytes(field.arrival, field.cleared);
+        let (cols, rows) = (w.fire_cols, w.fire_rows);
+        // the shader's decode, in Rust
+        let cell = |c: usize, r: usize| {
+            let i = (r * cols + c) * 4;
+            let t = bytes[i] as u32 | (bytes[i + 1] as u32) << 8 | (bytes[i + 2] as u32) << 16;
+            ((t != NEVER).then_some(t as f32), (bytes[i + 3] & CLEARED_BIT) as f32)
+        };
+        let ground = |p: Pos| {
+            let fx = (p.x / w.cellsize - 0.5).clamp(0.0, (cols - 1) as f32);
+            let fy = ((w.height_m - p.y) / w.cellsize - 0.5).clamp(0.0, (rows - 1) as f32);
+            let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+            let (x1, y1) = ((x0 + 1).min(cols - 1), (y0 + 1).min(rows - 1));
+            let (tx, ty) = (fx.fract(), fy.fract());
+            let cs = [cell(x0, y0), cell(x1, y0), cell(x0, y1), cell(x1, y1)];
+            let ws = [(1.0 - tx) * (1.0 - ty), tx * (1.0 - ty), (1.0 - tx) * ty, tx * ty];
+            let (mut sum, mut total, mut cleared) = (0.0, 0.0, 0.0);
+            for (c, wt) in cs.iter().zip(ws) {
+                cleared += c.1 * wt;
+                if let Some(t) = c.0.filter(|_| wt > 0.0) {
+                    sum += t * wt;
+                    total += wt;
                 }
             }
-            assert_eq!(lit, plants.iter().filter(|p| texel_t0(p.texel).is_some()).count());
+            ((total > 0.0).then(|| sum / total + (1.0 - total) * 90.0), cleared)
+        };
+        let now = sim.time_s() as f32;
+        let (mut burnt, mut checked) = (0, 0);
+        let mut rng = Rng::seeded(3);
+        for _ in 0..20_000 {
+            let p = Pos { x: rng.unit() * w.width_m, y: rng.unit() * w.height_m };
+            let (a, c) = ground(p);
+            let (fa, fc) = (field.arrival(p), field.cleared_fraction(p));
+            assert_eq!(a.is_some(), fa.is_some(), "{p:?}");
+            if let (Some(a), Some(fa)) = (a, fa) {
+                assert!((a - fa).abs() < 1e-2 * fa.abs().max(1.0), "{p:?}: {a} {fa}");
+            }
+            assert!((c - fc).abs() < 1e-5, "{p:?}");
+            let (look, t0) = plant_look(&field, p, now, true, 1.0);
+            if fa.is_some_and(|a| now >= a + LAG_S + PLANT_FLAMING_S) {
+                checked += 1;
+                // every plant the front passed long enough ago is burnt
+                // (or was cut before the fire came)
+                assert!(look == BURNT_REMAINS || look == CLEARED, "{p:?}: {look} at {now}, t0 {t0}");
+                burnt += usize::from(look == BURNT_REMAINS);
+            }
+            // keeping nothing hides every plant that is not burnt
+            let (thin, _) = plant_look(&field, p, now, true, 0.0);
+            assert!(thin == CLEARED || thin == BURNT_REMAINS);
         }
-        assert!(burnt > 0, "the fire never burnt anything");
-        assert_eq!(mismatches, 0, "{mismatches} of {checks} plants not shown as the front says");
-        // one write when a plant catches, give or take the cut lines
-        assert!(total_writes <= lit + lit / 10 + 50, "{total_writes} writes for {lit} plants caught");
-        // a fresh game: every plant back, the ignition patch alight
-        let fresh = Sim::new(&data, "medium", 2).unwrap();
-        let mut writes = Vec::new();
-        plan(&mut plants, 0, &mut lit, &mut burnt, &field_of(&fresh), fresh.time_s() as f32, false, true, &mut writes);
-        assert_eq!(writes.len(), n);
-        assert!(burnt < 100 && lit < 200, "{lit} {burnt}");
+        assert!(burnt > 100 && checked > 100, "{burnt} of {checked}");
+    }
+
+    /// How many entities and draws the instancing makes on the desktop
+    /// (`alta`: vegetation 0.5, 1280 m tiles) and in the browser (0.025,
+    /// one tile): printed, run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn instancing_counts() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let sim = Sim::new(&data, "medium", 2).unwrap();
+        let w = sim.scn.world;
+        for (label, density, tile) in [("desktop alta", 0.5, 64usize), ("browser", 0.025, usize::MAX / 4)] {
+            let tile = tile.min(w.fire_rows.max(w.fire_cols));
+            let (mut plants, mut groups, mut tiles) = (0, 0, 0);
+            for r0 in (0..w.fire_rows).step_by(tile) {
+                for c0 in (0..w.fire_cols).step_by(tile) {
+                    let lods = scatter_tile(&sim.scn, density, (r0, (r0 + tile).min(w.fire_rows), c0, (c0 + tile).min(w.fire_cols)));
+                    if lods.inst.is_empty() { continue; }
+                    tiles += 1;
+                    plants += lods.inst.len();
+                    let names: std::collections::BTreeSet<_> = lods.inst.iter().map(|i| i.name).collect();
+                    groups += names.len();
+                }
+            }
+            eprintln!("{label}: {plants} plants, {tiles} tiles, {groups} tile x variety groups");
+        }
     }
 }

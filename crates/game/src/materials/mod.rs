@@ -19,7 +19,7 @@ mod foliage;
 mod structure;
 mod terrain;
 
-pub use foliage::{foliage_atlas, FoliageMaterial, ATTRIBUTE_PLANT};
+pub use foliage::{foliage_atlas, FoliageMaterial};
 pub use structure::{structure, surface_alpha, Finish, StructureMaterial};
 pub use terrain::TerrainMaterial;
 

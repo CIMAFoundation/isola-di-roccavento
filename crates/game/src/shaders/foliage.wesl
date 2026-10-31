@@ -22,7 +22,7 @@
 // Wood: rough bark, no sheen, opaque.
 
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
-import bevy_pbr::render::mesh_bindings::mesh;
+import bevy_pbr::render::mesh_types;
 import bevy_pbr::render::mesh_view_bindings::{globals, view};
 import bevy_pbr::render::{pbr_functions, pbr_types};
 import game::shaders::noise::{hash21, value_noise};
@@ -115,7 +115,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Foliage is thin: lit from both sides, or a forest reads as a flat dark
     // mass from the shaded quarter.
     var pbr = pbr_types::pbr_input_new();
-    pbr.flags = mesh[in.instance_index].flags;
+    // the instances have no mesh uniform of their own (`veg_instancing.rs`):
+    // every plant receives the sun's shadow, and its light through leaves
+    pbr.flags = mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT | mesh_types::MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT;
     pbr.is_orthographic = view.clip_from_view[3].w == 1.0;
     pbr.V = pbr_functions::calculate_view(in.world_position, pbr.is_orthographic);
     pbr.frag_coord = in.position;

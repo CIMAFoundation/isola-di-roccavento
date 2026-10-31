@@ -1,52 +1,57 @@
 //! The vegetation's material (`shaders/foliage.wgsl`) and its vertex stages,
-//! which apply each plant's fire state from a small per-chunk image
-//! (`shaders/veg_state.wgsl`, `vegetation.rs`), and the foliage atlas every
-//! plant is painted from (`scripts/build_vegetation_models.py`).
+//! which draw each plant as an instance (`veg_instancing.rs`) and work out its
+//! fire state from the fire grid at its foot (`shaders/veg_state.wgsl`,
+//! `vegetation.rs`), and the foliage atlas every plant is painted from
+//! (`scripts/build_vegetation_models.py`).
 
 use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::asset::uuid_handle;
 use bevy::prelude::*;
 use bevy::shader::ShaderRef;
-use bevy::mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef};
-use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError, VertexFormat,
-};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::render::render_resource::{AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError};
 
 const SHADER_HANDLE: Handle<Shader> = uuid_handle!("91a744d2-6b0e-4c71-aa90-220188c42f15");
 const STATE_SHADER_HANDLE: Handle<Shader> = uuid_handle!("91a744d2-6b0e-4c71-aa90-220188c42f11");
 const VERTEX_SHADER_HANDLE: Handle<Shader> = uuid_handle!("91a744d2-6b0e-4c71-aa90-220188c42f12");
 const PREPASS_SHADER_HANDLE: Handle<Shader> = uuid_handle!("91a744d2-6b0e-4c71-aa90-220188c42f13");
 
-/// Which plant of the island a vertex belongs to, so the vertex stage finds
-/// its texel in the state image: its global index, `-(index + 2)` in the
-/// burnt-remains layer, -1 for none. A float, exact up to 2^24 plants: no
-/// integer vertex attribute (suspected on the iPhone, 2026-10-31).
-pub const ATTRIBUTE_PLANT: MeshVertexAttribute = MeshVertexAttribute::new("Plant", 0x91A7_4403, VertexFormat::Float32);
-/// Vertex input location of [`ATTRIBUTE_PLANT`] (`shaders/veg_*.wgsl`).
-const PLANT_LOCATION: u32 = 14;
-
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 pub struct FoliageMaterial {
     /// x: tactical desaturation (`tactical.rs`); y: the simulated clock, s;
-    /// z: how long a plant flames, s (`vegetation::fire_clock`). One vec4:
-    /// WebGL2 wants uniform bindings in multiples of 16 bytes.
+    /// z: how long a plant flames, s; w: the share of plants shown
+    /// (`vegetation::fire_clock`, `Vegetation::set_keep`). One vec4: WebGL2
+    /// wants uniform bindings in multiples of 16 bytes.
     #[uniform(0)]
     pub fire: Vec4,
-    /// One RGBA8 texel per plant of the island (`vegetation::Texel`: 24-bit
-    /// ignition instant, 8 bits of flags), read with `textureLoad` in the
-    /// vertex stage. The plants burn by writing a texel when one catches,
-    /// never their meshes. One material, one image for every chunk.
+    /// The fire grid (`vegetation::FireGrid`): one RGBA8 texel per fire cell,
+    /// 24-bit arrival time and the cleared flag, read with `textureLoad` in
+    /// the vertex stage at each plant's foot.
     #[texture(1, sample_type = "float", filterable = false)]
-    pub plant_state: Handle<Image>,
+    pub fire_grid: Handle<Image>,
     /// The foliage atlas ([`foliage_atlas`]).
     #[texture(2)]
     #[sampler(3)]
     pub atlas: Handle<Image>,
+    /// The fire grid's frame: cell size (m), the world's north edge (m),
+    /// columns, rows.
+    #[uniform(4)]
+    pub grid: Vec4,
+    /// x = 1 on the burnt remains' material (twig skeletons and debris,
+    /// hidden until their plant catches), 0 on the plants'.
+    #[uniform(5)]
+    pub layer: Vec4,
 }
 
 impl FoliageMaterial {
-    pub fn new(plant_state: Handle<Image>, atlas: Handle<Image>) -> Self {
-        FoliageMaterial { fire: Vec4::ZERO, plant_state, atlas }
+    pub fn new(fire_grid: Handle<Image>, atlas: Handle<Image>, grid: Vec4, remains: bool) -> Self {
+        FoliageMaterial {
+            fire: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            fire_grid,
+            atlas,
+            grid,
+            layer: Vec4::new(if remains { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        }
     }
 
     pub fn tactical(&self) -> f32 {
@@ -210,7 +215,7 @@ impl Material for FoliageMaterial {
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
+        _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
@@ -229,14 +234,8 @@ impl Material for FoliageMaterial {
                 fragment.shader_defs.push("PLAIN_FOLIAGE".into());
             }
         }
-        // the plant index: a vertex attribute in the merged chunk meshes, the
-        // mesh tag of an instance (`vegetation::instanced`)
-        if layout.0.contains(ATTRIBUTE_PLANT) {
-            let plant = layout.0.get_layout(&[ATTRIBUTE_PLANT.at_shader_location(PLANT_LOCATION)])?;
-            descriptor.vertex.buffers[0].attributes.extend(plant.attributes);
-        } else {
-            descriptor.vertex.shader_defs.push("PLANT_TAG".into());
-        }
+        // every plant mesh is drawn once per plant (`veg_instancing.rs`)
+        descriptor.vertex.buffers.push(crate::veg_instancing::instance_layout());
         Ok(())
     }
 }
