@@ -1121,6 +1121,11 @@ pub fn burn(
     mut restarted: MessageReader<crate::sim::SimRestarted>,
     mut since: Local<f32>,
 ) {
+    // `?brucia=0` in the browser: the plants never burn on screen and no
+    // remains are built (a switch to find what kills an iPhone's page)
+    if crate::quality::web_off("brucia") {
+        return;
+    }
     let restarted = restarted.read().count() > 0;
     let thin = std::mem::take(&mut veg.thin_dirty);
     *since += time.delta_secs();
@@ -1411,6 +1416,16 @@ fn build_char_layer(
                 builder.remains(r, low);
             }
             ranges.push((start, builder.positions.len() as u32));
+        }
+        // No plant here leaves remains (common with the browser's few
+        // plants): one triangle of no area, belonging to no plant, so the mesh
+        // is never empty. An empty one, spawned as the first plant of the chunk
+        // caught fire, killed the page on an iPhone (2026-10-31).
+        if builder.positions.is_empty() {
+            for _ in 0..3 {
+                builder.vertex(chunk.bounds.0, [0.0; 3]);
+            }
+            builder.indices.extend_from_slice(&[0, 1, 2]);
         }
         let verts = builder.positions.len();
         let (mut colors, mut shown, mut hidden) = (Vec::new(), Vec::new(), Vec::new());
