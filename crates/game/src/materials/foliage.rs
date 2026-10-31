@@ -75,7 +75,12 @@ impl Material for FoliageMaterial {
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
         // leaves let the sun through: lit from behind, a crown glows
-        if let Some(fragment) = descriptor.fragment.as_mut() {
+        // (`?trasmissione=0` in the browser leaves it out, `?stato=0` the
+        // plants' fire state: switches to find what kills an iPhone's page)
+        if crate::quality::web_off("stato") {
+            descriptor.vertex.shader_defs.push("NO_PLANT_STATE".into());
+        }
+        if let Some(fragment) = descriptor.fragment.as_mut().filter(|_| !crate::quality::web_off("trasmissione")) {
             fragment.shader_defs.push("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into());
         }
         let plant = layout.0.get_layout(&[ATTRIBUTE_PLANT.at_shader_location(PLANT_LOCATION)])?;

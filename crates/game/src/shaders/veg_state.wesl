@@ -55,6 +55,9 @@ fn plant_apply(plant: u32, position: vec3<f32>, color: vec4<f32>) -> Planted {
     var out: Planted;
     out.position = position;
     out.color = color;
+    @if(NO_PLANT_STATE) {
+        return out;
+    }
     let idx = plant & NO_PLANT;
     if idx == NO_PLANT {
         return out;
