@@ -57,6 +57,12 @@ const LEAF_OFFSET: f32 = 1.0e5;
 const REMAINS_OFFSET: f32 = 2.0e5;
 const DEBRIS_OFFSET: f32 = 4.0e5;
 
+// Seconds the fire takes to climb a metre of the plant (2026-11-01): it
+// catches at the foot and climbs, so a pine's crown lights some forty seconds
+// after its trunk, a shrub's within a few. Per vertex, on top of the plant's
+// ignition instant; the plant's state (`look`) is still the plant's.
+const CLIMB_S_PER_M: f32 = 2.8;
+
 struct Planted {
     position: vec3<f32>,
     color: vec4<f32>,
@@ -176,6 +182,8 @@ fn plant_apply(foot: vec3<f32>, position: vec3<f32>, color: vec4<f32>, tint: vec
     }
     var t0 = 0.0;
     let mode = look(foot, &t0);
+    // this vertex catches when the climb reaches it
+    let t0v = t0 + CLIMB_S_PER_M * max(position.y - foot.y, 0.0);
     // collapsed to one point: its triangles have no area and draw nothing
     let gone = vec3<f32>(0.0);
 
@@ -189,14 +197,14 @@ fn plant_apply(foot: vec3<f32>, position: vec3<f32>, color: vec4<f32>, tint: vec
             // ash is soot: the model's pale grey reads as a platform under the trees
             out.color = vec4<f32>(c.r * 0.2, c.g * 0.17, c.b * 0.15, c.a);
         }
-        out.color.a = select(0.0, -(1.0 + REMAINS_OFFSET + select(0.0, DEBRIS_OFFSET, flag) + t0), mode == BURNING);
+        out.color.a = select(0.0, -(1.0 + REMAINS_OFFSET + select(0.0, DEBRIS_OFFSET, flag) + t0v), mode == BURNING);
         return out;
     }
 
     if mode == CLEARED {
         out.position = gone;
     } else if mode == BURNING {
-        out.color.a = -(1.0 + select(0.0, LEAF_OFFSET, flag) + t0);
+        out.color.a = -(1.0 + select(0.0, LEAF_OFFSET, flag) + t0v);
     } else if mode == BURNT_REMAINS {
         // the crown is gone; trunk and boughs stay, charred
         if flag {

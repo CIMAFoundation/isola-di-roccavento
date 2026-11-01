@@ -25,7 +25,9 @@ const DEFAULT_AMOUNT: f32 = 0.55;
 /// Saturation gain of the game's own signs in the pause (zones, routes, tape).
 const SIGN_GAIN: f32 = 0.75;
 /// Extra saturation while time runs (0.15 = 15 % more). `KIOSK_BOOST` overrides.
-const DEFAULT_BOOST: f32 = 0.15;
+/// 0 since 2026-11-01: it made up for TonyMcMapface's washed colours, and
+/// the tone mapper is now AcesFitted (see `grading` in `main.rs`).
+const DEFAULT_BOOST: f32 = 0.0;
 /// Real seconds to ease fully in or out.
 const EASE_S: f32 = 0.4;
 

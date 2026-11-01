@@ -12,7 +12,7 @@
 //! so *all* of the land cover a player sees is geometry: grass tussocks and
 //! macchia as much as trees. That raises the plant count into the hundreds of
 //! thousands, which sets the budget for everything below — each archetype is
-//! built to at most 120 vertices, and the visual density comes from crown
+//! built to at most 128 vertices, and the visual density comes from crown
 //! width and overlap rather than from stem count, because a hundred wide
 //! crowns close a canopy that a thousand narrow ones would not.
 //!
@@ -103,7 +103,7 @@ fn patchiness(p: Pos) -> f32 {
 /// How long a plant flames after the fire reaches it, in simulated seconds.
 /// Well short of the cell's 20-minute burn-out: the crown goes fast, the
 /// ground under it keeps smouldering.
-const PLANT_FLAMING_S: f32 = 240.0;
+pub(crate) const PLANT_FLAMING_S: f32 = 240.0;
 
 /// Vegetation archetypes, one per `eu_fuel12` group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +171,7 @@ struct Remains {
 
 /// The levels of detail of a variety, each one mesh drawn as instances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Tier {
+pub(crate) enum Tier {
     /// The authored model, within [`crate::quality::Graphics::lod_m`].
     Full,
     /// The distant proxy beyond it, and its cheaper tier beyond [`FAR_TIER`].
@@ -238,7 +238,7 @@ fn plant_rank(p: Pos) -> f32 {
 /// Seconds a plant lags the interpolated front: even two shrubs a metre apart
 /// do not catch at the same instant.
 #[cfg_attr(not(test), allow(dead_code))] // the shader's rule (`veg_state.wgsl`), for the tests
-fn plant_lag(p: Pos) -> f32 {
+pub(crate) fn plant_lag(p: Pos) -> f32 {
     hash01(p.x, p.y, 0x51ED) * LAG_S
 }
 
@@ -856,7 +856,7 @@ fn tint_bytes(i: &Inst) -> [u8; 4] {
 
 /// One variety's mesh for a tier, at the origin, unrotated, untinted (the
 /// instances place and tint it), only on the GPU.
-fn variety_mesh(name: &'static str, tier: Tier) -> Mesh {
+pub(crate) fn variety_mesh(name: &'static str, tier: Tier) -> Mesh {
     let mut b = Builder::default();
     let remains = |low| Remains { name, base: Vec3::ZERO, scale: Vec3::ONE, yaw: 0.0 }.build(low);
     let mut mesh = match tier {

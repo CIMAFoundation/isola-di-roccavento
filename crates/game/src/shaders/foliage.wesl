@@ -44,11 +44,21 @@ const WOOD_REFLECTANCE: f32 = 0.08;
 // boughs are the plant's own wood and char in place; what the fire adds (the
 // twig skeleton inside the crown, `remains`, and the ash and fallen wood at
 // its foot, `debris`) is shown where the front has passed, so the leaves open
-// onto it and nothing is ever swapped. `prog` is 0 at ignition and 1 when the
-// crown is gone.
+// onto it and nothing is ever swapped. `prog` is 0 when the fire reaches a
+// point (it climbs from the foot: `veg_state.wesl`) and 1 when the leaves
+// there are gone, [`CROWN_SHARE`] of the flaming time later; the embers in
+// the wood last until the plant turns to charcoal.
+//
+// 2026-11-01, the middle of the fire reviewed (`KIOSK_PIANTE`): the glow
+// used to sit on a crown still lit by the sun and turned it pastel
+// salmon, and a broad hot band lit half the crown at once. Now the leaves
+// darken under the flames, the flames are a narrow band in tongues that
+// rise and flicker, and behind them the char keeps red veins.
 const LEAF_OFFSET: f32 = 1.0e5;
 const REMAINS_OFFSET: f32 = 2.0e5;
 const DEBRIS_OFFSET: f32 = 4.0e5;
+// share of the flaming time a point of the crown takes to burn away
+const CROWN_SHARE: f32 = 0.5;
 
 struct Burnt {
     rgb: vec3<f32>,
@@ -68,31 +78,36 @@ fn burn_front(p: vec3<f32>, prog: f32) -> f32 {
     return prog * 1.6 - n * 0.9;
 }
 
-fn burn_plant(base: vec3<f32>, p: vec3<f32>, prog: f32, t: f32) -> Burnt {
+fn burn_plant(base: vec3<f32>, p: vec3<f32>, prog: f32, after: f32, t: f32) -> Burnt {
     let l = burn_front(p, prog);
 
-    let scorch = smoothstep(-0.35, 0.0, l);
-    let hot = smoothstep(0.0, 0.07, l) * (1.0 - smoothstep(0.10, 0.36, l));
-    let smoulder = smoothstep(0.08, 0.20, l) * (1.0 - smoothstep(0.30, 0.70, l));
-    // Charred leaves do not hang around as a black crown: they go soon after.
-    let charred = smoothstep(0.10, 0.30, l);
+    // ahead of the front the leaves dry and brown (not orange: that is light)
+    let scorch = smoothstep(-0.30, 0.0, l);
+    // the flames: a narrow band, cut into tongues that rise and flicker
+    let band = smoothstep(-0.02, 0.04, l) * (1.0 - smoothstep(0.08, 0.20, l));
+    let tongue = value_noise(vec2<f32>(p.x * 1.3 + p.z * 0.7, p.y * 0.45 - t * 2.6))
+               * 0.6 + 0.4 * value_noise(vec2<f32>(p.z * 2.9 - p.x * 0.4, p.y * 1.1 - t * 4.1));
+    let hot = band * smoothstep(0.30, 0.62, tongue);
+    let flick = 0.55 + 0.9 * value_noise(p.xz * 3.1 + vec2<f32>(t * 6.0, t * 8.3 + p.y));
+    // behind the flames: char with red veins, dimming
+    let smoulder = smoothstep(0.06, 0.14, l) * (1.0 - smoothstep(0.22, 0.45, l));
+    let charred = smoothstep(0.02, 0.16, l);
     let gone = smoothstep(0.20, 0.48, l);
+    // embers are lines and dots in the char, never a coat of paint on a leaf
+    let vein = smoothstep(0.66, 0.80, value_noise(p.xz * 4.8 + vec2<f32>(p.y * 3.4, 11.0)));
+    let speck = smoothstep(0.80, 0.96, value_noise(p.xz * 9.0 + vec2<f32>(t * 0.6, p.y * 5.0)));
 
-    let flick = 0.70 + 0.55 * value_noise(p.xz * 2.4 + vec2<f32>(t * 5.0, t * 7.3 + p.y));
-    // Embers show in veins and flecks of the char, not as a flat wash.
-    let vein = smoothstep(0.50, 0.72, value_noise(p.xz * 3.6 + vec2<f32>(p.y * 2.7, 11.0)));
-    let speck = smoothstep(0.78, 0.95, value_noise(p.xz * 9.0 + vec2<f32>(t * 0.6, p.y * 5.0)));
+    var rgb = mix(base, base * vec3<f32>(0.50, 0.38, 0.20), scorch * 0.85);
+    // warm soot, not neutral grey; under the flames too, so they burn on dark
+    let ash = vec3<f32>(0.035, 0.024, 0.018) * (0.7 + 0.8 * value_noise(p.xz * 1.7 + p.y));
+    rgb = mix(rgb, ash, max(charred, band * 0.85));
 
-    var rgb = mix(base, base * vec3<f32>(0.80, 0.55, 0.30), scorch * 0.65);
-    // warm soot, not neutral grey
-    let ash = vec3<f32>(0.040, 0.027, 0.020) * (0.7 + 0.8 * value_noise(p.xz * 1.7 + p.y));
-    rgb = mix(rgb, ash, charred);
-
-    let hot_col = mix(vec3<f32>(3.6, 2.1, 0.45), vec3<f32>(2.5, 0.60, 0.07), smoothstep(0.0, 0.22, l));
-    let ember_col = vec3<f32>(1.5, 0.20, 0.02);
-    // Fades out as the plant approaches its charred remains.
-    let late = 1.0 - smoothstep(0.80, 1.0, prog);
-    let glow = (hot * hot_col * flick + smoulder * ember_col * (0.25 + 0.9 * vein + 1.2 * speck) * flick) * late;
+    // yellow at the root of a tongue, deep orange at its tips
+    let hot_col = mix(vec3<f32>(3.2, 1.5, 0.22), vec3<f32>(2.6, 0.55, 0.05), smoothstep(0.45, 0.80, tongue));
+    let ember_col = vec3<f32>(1.2, 0.16, 0.015);
+    // the embers die down before the plant turns to charcoal
+    let late = 1.0 - smoothstep(0.0, 0.85, after);
+    let glow = hot * hot_col * flick + smoulder * ember_col * (0.7 * vein + 1.2 * speck) * flick * late;
     return Burnt(rgb, glow, gone, value_noise(p.xz * 3.1 + vec2<f32>(p.y * 2.3, 17.0)));
 }
 
@@ -159,7 +174,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr.material.diffuse_transmission = LEAF_TRANSMISSION * alive;
     if burning {
         let t0 = b1 - 1.0 - select(select(0.0, LEAF_OFFSET, leaf), REMAINS_OFFSET, remains);
-        let prog = clamp((foliage.fire.y - t0) / max(foliage.fire.z, 1.0), 0.0, 1.0);
+        let crown_s = max(foliage.fire.z * CROWN_SHARE, 1.0);
+        let raw = (foliage.fire.y - t0) / crown_s;
+        let prog = clamp(raw, 0.0, 1.0);
+        // 0 when the leaves here are gone, 1 when the plant turns to charcoal
+        let after = clamp((raw - 1.0) / (1.0 / CROWN_SHARE - 1.0), 0.0, 1.0);
         // Holes are cut at every distance, in cells about a pixel wide,
         // so the crown thins out instead of darkening to grey.
         let cell = max(0.3, px_m * 1.5);
@@ -188,13 +207,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 if l < 0.26 {
                     discard;
                 }
-                // a faint ember still in the twigs the front has just left
+                // the twigs the front has just left glow, then keep a few
+                // embers in their joints until the plant is charcoal
                 let ember = smoothstep(0.26, 0.40, l) * (1.0 - smoothstep(0.40, 0.95, l));
-                burn_glow = vec3<f32>(1.5, 0.20, 0.02) * ember * 0.5
+                let joints = smoothstep(0.62, 0.85, value_noise(p.xz * 4.3 + vec2<f32>(p.y * 3.1, 23.0)));
+                let lasting = smoothstep(0.40, 0.70, l) * joints * (1.0 - smoothstep(0.2, 0.9, after));
+                burn_glow = vec3<f32>(1.5, 0.20, 0.02) * (ember * 0.5 + lasting * 0.8)
                     * (0.4 + 0.8 * value_noise(p.xz * 3.6 + vec2<f32>(t * 2.0, p.y * 2.7)));
             }
         } else {
-            let r = burn_plant(pbr.material.base_color.rgb, p, prog, t);
+            let r = burn_plant(pbr.material.base_color.rgb, p, prog, after, t);
             if leaf && hole_n < r.gone {
                 discard;
             }

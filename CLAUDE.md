@@ -74,6 +74,7 @@ Variabili utili del gioco (prefisso storico `KIOSK_`):
 - `KIOSK_QUALITY=alta|media|bassa`, `KIOSK_GFX`: livello grafico.
 - `KIOSK_FPS=1`: misura degli FPS.
 - `KIOSK_MEMORY=risparmio|normale`: forza o spegne la scena leggera per macchine con poca memoria (`memory.rs`; da sola scatta con RAM ≤ 8 GiB o dopo un avvio non terminato).
+- `KIOSK_PIANTE=1`: al posto del gioco, il laboratorio del fuoco sulle piante (`veg_lab.rs`): ogni varietà in fila, colonne che prendono fuoco a intervalli, cursore del tempo. `KIOSK_PIANTE_SNAP=<png>` salva una foto senza finestra (con `KIOSK_PIANTE_ROW`, `KIOSK_PIANTE_T`, `KIOSK_PIANTE_STEP`).
 - `KIOSK_SCORES=<file>`: classifica in un altro file, per le prove (non toccare `~/.rocca_ventosa/`).
 - `ROCCA_SCENARIO=<id>`: un altro territorio.
 - `ROCCA_LANG=<codice>`: la lingua (`de`, `en`, …, `tlh` è il klingon); sul web `?lang=`. Ogni testo nuovo va in `tr!("…")` e `python3 tools/i18n/keys.py --check` deve passare (`docs/01-GIOCO.md` §7).
