@@ -4,7 +4,7 @@
 //! stand out. While time runs the same scenery is a little more saturated than
 //! its natural colours. One signed amount drives both: negative boosts the
 //! colour, positive greys it. The amount eases in and out; the shaders only
-//! read it (`terrain.wgsl`, `foliage.wgsl`, `water.wgsl`, and the sky
+//! read it (`terrain.wgsl`, `plants.wesl`, `water.wgsl`, and the sky
 //! here).
 
 use bevy::post_process::bloom::Bloom;
@@ -14,10 +14,10 @@ use bevy::prelude::*;
 use crate::kiosk::{Kiosk, Phase};
 use crate::flat::FlatMaterial;
 use crate::forecast_zone::ZoneMaterial;
-use crate::materials::{FoliageMaterial, TerrainMaterial};
+use crate::materials::TerrainMaterial;
 use crate::sea::WaterMaterial;
 use crate::sim::Sim;
-use crate::sky::{SkyHandle, SkyMaterial};
+use crate::sky::SkyUniform;
 use crate::tape::TapeMaterial;
 
 /// Desaturation at full effect. `KIOSK_TACTICAL=0..1` overrides it (0 = off).
@@ -25,7 +25,9 @@ const DEFAULT_AMOUNT: f32 = 0.55;
 /// Saturation gain of the game's own signs in the pause (zones, routes, tape).
 const SIGN_GAIN: f32 = 0.75;
 /// Extra saturation while time runs (0.15 = 15 % more). `KIOSK_BOOST` overrides.
-const DEFAULT_BOOST: f32 = 0.15;
+/// 0 since 2026-11-01: it made up for TonyMcMapface's washed colours, and
+/// the tone mapper is now AcesFitted (see `grading` in `main.rs`).
+const DEFAULT_BOOST: f32 = 0.0;
 /// Real seconds to ease fully in or out.
 const EASE_S: f32 = 0.4;
 
@@ -75,7 +77,7 @@ fn apply(
     mario: Option<Res<crate::mario::Playground>>,
     mut tactical: ResMut<Tactical>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
-    mut foliage: ResMut<Assets<FoliageMaterial>>,
+    veg: Option<ResMut<crate::vegetation::Vegetation>>,
     mut cover: ResMut<Assets<crate::near_cover::NearCoverMaterial>>,
     mut water: ResMut<Assets<WaterMaterial>>,
     mut flats: ResMut<Assets<FlatMaterial>>,
@@ -100,11 +102,9 @@ fn apply(
             m.set_tactical(amount);
         }
     }
-    let stale: Vec<_> = foliage.iter().filter(|(_, m)| m.tactical() != amount).map(|(id, _)| id).collect();
-    for id in stale {
-        if let Some(mut m) = foliage.get_mut(id) {
-            m.set_tactical(amount);
-        }
+    // the plants read it from their uniforms, written every frame anyway
+    if let Some(mut veg) = veg {
+        veg.set_tactical(amount);
     }
     let stale: Vec<_> = cover.iter().filter(|(_, m)| m.extension.tactical() != amount).map(|(id, _)| id).collect();
     for id in stale {
@@ -141,36 +141,38 @@ fn apply(
     }
 }
 
-/// Haze and glow are not information. The sky resets fog, sky and clouds
-/// every frame, so this runs after it: fade the fog out with its sun glow, the
-/// bloom, the sky gradient, sun and clouds; and carry the colour amount into
-/// the sky. At rest (running, no boost) nothing changes.
+/// The sky in the pause: gradient to one tone, sun, moon and clouds faded,
+/// the colour amount carried in. `sky::update_sky` applies it to the sky it
+/// computes, before deciding whether the material has to be written again.
+pub fn sky_effects(tactical: &Tactical, u: &mut SkyUniform) {
+    let amount = tactical.amount();
+    let k = tactical.eased() * tactical.max;
+    let luma = |c: Vec4| c.truncate().dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    let flat = u.horizon_color.lerp(u.zenith_color, 0.25);
+    let grey = |c: Vec4| Vec4::splat(luma(c) * 0.9).with_w(1.0);
+    // gradient to one tone, then the signed colour amount around grey
+    u.zenith_color = u.zenith_color.lerp(flat, k);
+    u.horizon_color = u.horizon_color.lerp(flat, k);
+    u.zenith_color = u.zenith_color.lerp(grey(u.zenith_color), amount);
+    u.horizon_color = u.horizon_color.lerp(grey(u.horizon_color), amount);
+    u.sun_color *= 1.0 - k;
+    u.moon_color *= 1.0 - k;
+    // coverage below zero pushes the cloud threshold past any density
+    u.cloud.z = u.cloud.z * (1.0 - k) - k;
+}
+
+/// Haze and glow are not information. The sky resets fog every frame, so
+/// this runs after it: fade the fog out with its sun glow and the bloom (the
+/// sky's gradient, sun and clouds: [`sky_effects`]). At rest (running, no
+/// boost) nothing changes.
 fn effects_off(
     tactical: Res<Tactical>,
     mut fog: Query<&mut DistanceFog>,
     mut bloom: Query<&mut Bloom>,
     mut bloom_base: Local<Option<f32>>,
-    sky_handle: Option<Res<SkyHandle>>,
-    mut skies: ResMut<Assets<SkyMaterial>>,
 ) {
-    let amount = tactical.amount();
     // how far the effects are off: only the pause turns them off
     let k = tactical.eased() * tactical.max;
-    if let Some(mut mat) = sky_handle.and_then(|h| skies.get_mut(&h.0)) {
-        let u = &mut mat.uniform;
-        let luma = |c: Vec4| c.truncate().dot(Vec3::new(0.2126, 0.7152, 0.0722));
-        let flat = u.horizon_color.lerp(u.zenith_color, 0.25);
-        let grey = |c: Vec4| Vec4::splat(luma(c) * 0.9).with_w(1.0);
-        // gradient to one tone, then the signed colour amount around grey
-        u.zenith_color = u.zenith_color.lerp(flat, k);
-        u.horizon_color = u.horizon_color.lerp(flat, k);
-        u.zenith_color = u.zenith_color.lerp(grey(u.zenith_color), amount);
-        u.horizon_color = u.horizon_color.lerp(grey(u.horizon_color), amount);
-        u.sun_color *= 1.0 - k;
-        u.moon_color *= 1.0 - k;
-        // coverage below zero pushes the cloud threshold past any density
-        u.cloud.z = u.cloud.z * (1.0 - k) - k;
-    }
     if k <= 0.0 {
         // nobody else rewrites the bloom, so remember its normal intensity
         *bloom_base = bloom.iter().next().map(|b| b.intensity);

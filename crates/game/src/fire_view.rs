@@ -30,6 +30,7 @@ use fire::CellFire;
 use scenario::Pos;
 
 use crate::field::{noise, FireField};
+use crate::streamed_mesh::{push_vertex, Shape, Streamed, StreamedFrame};
 use crate::fire_shader::{FireGroundMaterial, FireMaterial, SmokeMaterial};
 use crate::sim::Sim;
 use crate::textures;
@@ -100,9 +101,10 @@ pub struct FireOverlay;
 #[derive(Resource)]
 pub struct FireView {
     overlay: Handle<Mesh>,
-    flames: Handle<Mesh>,
-    smoke_mesh: Handle<Mesh>,
-    sparks: Handle<Mesh>,
+    /// Rewritten every frame in place (`streamed_mesh`): tongues, billboards.
+    flames: Streamed,
+    smoke_mesh: Streamed,
+    sparks: Streamed,
     last_generation: u64,
     last_layer: FireLayer,
     since_overlay: f32,
@@ -160,9 +162,9 @@ pub fn setup(
     sim: Res<crate::sim::Sim>,
 ) {
     let overlay = meshes.add(empty_mesh());
-    let flames = meshes.add(empty_mesh());
-    let smoke_mesh = meshes.add(empty_mesh());
-    let sparks = meshes.add(empty_mesh());
+    let flames = Streamed::new(&mut meshes, TONGUE, false);
+    let smoke_mesh = Streamed::new(&mut meshes, BILLBOARD, true);
+    let sparks = Streamed::new(&mut meshes, BILLBOARD, false);
 
     let flame_tex = images.add(textures::flame_tongue());
     let puff_tex = images.add(textures::puff());
@@ -192,19 +194,19 @@ pub fn setup(
         bevy::light::NotShadowCaster,
     ));
     commands.spawn((
-        (Mesh3d(flames.clone()), MeshMaterial3d(flame_mat)),
+        (Mesh3d(flames.handle.clone()), MeshMaterial3d(flame_mat)),
         // Mesh vertices change every frame; Bevy's cached bounds do not.
         bevy::camera::visibility::NoFrustumCulling,
         bevy::light::NotShadowCaster,
     ));
     commands.spawn((
-        (Mesh3d(sparks.clone()), MeshMaterial3d(spark_mat)),
+        (Mesh3d(sparks.handle.clone()), MeshMaterial3d(spark_mat)),
         // Mesh vertices change every frame; Bevy's cached bounds do not.
         bevy::camera::visibility::NoFrustumCulling,
         bevy::light::NotShadowCaster,
     ));
     commands.spawn((
-        (Mesh3d(smoke_mesh.clone()), MeshMaterial3d(smoke_mat)),
+        (Mesh3d(smoke_mesh.handle.clone()), MeshMaterial3d(smoke_mat)),
         // Mesh vertices change every frame; Bevy's cached bounds do not.
         bevy::camera::visibility::NoFrustumCulling,
         bevy::light::NotShadowCaster,
@@ -242,18 +244,6 @@ fn empty_mesh() -> Mesh {
     m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; 3]);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; 3]);
     m.insert_indices(Indices::U32(vec![0, 1, 2]));
-    m
-}
-
-/// `mesh`, or [`empty_mesh`] (with the attributes `mesh` has) when it has no vertices.
-fn or_empty(mesh: Mesh) -> Mesh {
-    if mesh.count_vertices() > 0 {
-        return mesh;
-    }
-    let mut m = empty_mesh();
-    if !mesh.contains_attribute(Mesh::ATTRIBUTE_NORMAL) {
-        m.remove_attribute(Mesh::ATTRIBUTE_NORMAL);
-    }
     m
 }
 
@@ -554,33 +544,76 @@ fn ramp(t: f32, stops: &[(f32, [f32; 3])]) -> [f32; 3] {
 /// Rows per flame tongue ribbon.
 const TONGUE_SEGMENTS: usize = 7;
 
-#[derive(Default)]
+/// A flame tongue as [`QuadBuilder::tongue`] lays it out: two vertices per
+/// row, two triangles per segment.
+const TONGUE: Shape = Shape { verts: 2 * (TONGUE_SEGMENTS as u32 + 1), indices: &TONGUE_INDICES };
+const TONGUE_INDICES: [u32; TONGUE_SEGMENTS * 6] = {
+    let mut out = [0u32; TONGUE_SEGMENTS * 6];
+    let mut j = 0;
+    while j < TONGUE_SEGMENTS {
+        let a = j as u32 * 2;
+        let k = j * 6;
+        (out[k], out[k + 1], out[k + 2], out[k + 3], out[k + 4], out[k + 5]) = (a, a + 1, a + 3, a, a + 3, a + 2);
+        j += 1;
+    }
+    out
+};
+/// A billboard as [`QuadBuilder::billboard`] lays it out.
+const BILLBOARD: Shape = Shape { verts: 4, indices: &[0, 1, 2, 0, 2, 3] };
+
+/// What a row of every tongue shares: its height share `s` (0 foot, 1 tip)
+/// and powers, the taper `(1 − s)^0.85`, and the waves' phase offsets along
+/// the tongue as (cos, sin): 4.5 s, 7 s and 3 s.
+struct TongueRow {
+    s: f32,
+    s2: f32,
+    s3: f32,
+    taper: f32,
+    w1: (f32, f32),
+    w2: (f32, f32),
+    w3: (f32, f32),
+}
+
+fn tongue_rows() -> &'static [TongueRow; TONGUE_SEGMENTS + 1] {
+    static ROWS: std::sync::OnceLock<[TongueRow; TONGUE_SEGMENTS + 1]> = std::sync::OnceLock::new();
+    ROWS.get_or_init(|| {
+        std::array::from_fn(|j| {
+            let s = j as f32 / TONGUE_SEGMENTS as f32;
+            let cs = |k: f32| {
+                let (sin, cos) = (k * s).sin_cos();
+                (cos, sin)
+            };
+            TongueRow { s, s2: s * s, s3: s * s * s, taper: (1.0 - s).powf(0.85), w1: cs(4.5), w2: cs(7.0), w3: cs(3.0) }
+        })
+    })
+}
+
+/// Streamed geometry (flames, smoke, sparks), packed as it is made in the
+/// order a streamed mesh takes (`streamed_mesh::push_vertex`): no arrays per
+/// attribute to interleave afterwards, ~30 000 vertices a frame on a big fire.
 struct QuadBuilder {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
-    uvs: Vec<[f32; 2]>,
-    indices: Vec<u32>,
+    bytes: Vec<u8>,
+    verts: usize,
     /// Flames and embers read no normal (their shader never lights); only the
     /// smoke uses the slot, for its fog.
-    no_normals: bool,
+    normals: bool,
 }
 
 impl QuadBuilder {
-    fn with_capacity(verts: usize) -> Self {
-        QuadBuilder {
-            positions: Vec::with_capacity(verts),
-            normals: Vec::with_capacity(verts),
-            colors: Vec::with_capacity(verts),
-            uvs: Vec::with_capacity(verts),
-            indices: Vec::with_capacity(verts / 16 * 42),
-            no_normals: true,
-        }
+    fn new(normals: bool, verts: usize) -> Self {
+        QuadBuilder { bytes: Vec::with_capacity(verts * crate::streamed_mesh::stride(normals)), verts: 0, normals }
+    }
+
+    fn vertex(&mut self, p: Vec3, normal: [f32; 3], uv: [f32; 2], color: [f32; 4]) {
+        push_vertex(&mut self.bytes, p.into(), self.normals.then_some(normal), uv, color);
+        self.verts += 1;
     }
 
     /// A textured billboard. `right`/`up` are world-space half-extents;
     /// `taper` narrows the top edge, which is what gives a flame tongue its
     /// shape independently of the texture.
+    /// `normal` goes in the normal slot, if the builder has one.
+    #[allow(clippy::too_many_arguments)]
     fn billboard(
         &mut self,
         centre: Vec3,
@@ -589,23 +622,13 @@ impl QuadBuilder {
         taper: f32,
         bottom: [f32; 4],
         top: [f32; 4],
+        normal: [f32; 3],
     ) {
-        let base = self.positions.len() as u32;
-        for (offset, color, uv) in [
-            (centre - right - up, bottom, [0.0, 1.0]),
-            (centre + right - up, bottom, [1.0, 1.0]),
-            (centre + right * taper + up, top, [1.0, 0.0]),
-            (centre - right * taper + up, top, [0.0, 0.0]),
-        ] {
-            self.positions.push(offset.into());
-            if !self.no_normals {
-                self.normals.push([0.0, 1.0, 0.0]);
-            }
-            self.colors.push(color);
-            self.uvs.push(uv);
-        }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        self.vertex(centre - right - up, normal, [0.0, 1.0], bottom);
+        self.vertex(centre + right - up, normal, [1.0, 1.0], bottom);
+        self.vertex(centre + right * taper + up, normal, [1.0, 0.0], top);
+        self.vertex(centre - right * taper + up, normal, [0.0, 0.0], top);
+        // joined by `BILLBOARD`'s indices
     }
 
     /// A flame tongue: a ribbon of `TONGUE_SEGMENTS` rows from foot to tip.
@@ -624,18 +647,24 @@ impl QuadBuilder {
         bottom: [f32; 4],
         top: [f32; 4],
     ) {
-        let base = self.positions.len() as u32;
-        for j in 0..=TONGUE_SEGMENTS {
-            let s = j as f32 / TONGUE_SEGMENTS as f32; // 0 foot -> 1 tip
-            let s2 = s * s;
+        // Each wave's phase at the foot; a row's phase is that minus (or plus)
+        // a fixed offset, so its sine is an angle sum with the row's constants:
+        // three sin_cos per tongue instead of a sine per row and wave and a
+        // power per row (libm in wasm: a fifth of the browser's frame).
+        let (a1, b1) = (t * 7.0 + phase).sin_cos();
+        let (a2, b2) = (t * 11.3 + phase * 1.7).sin_cos();
+        let (a3, b3) = (t * 9.0 + phase).sin_cos();
+        for row in tongue_rows() {
+            let (s, s2, s3) = (row.s, row.s2, row.s3);
             // Two waves running upward at different speeds: the second makes
             // the motion non-periodic to the eye.
-            let w1 = (t * 7.0 - s * 4.5 + phase).sin();
-            let w2 = (t * 11.3 - s * 7.0 + phase * 1.7).sin();
-            let lateral = h * (0.30 * s2 * w1 + 0.12 * s2 * s * w2);
+            let w1 = a1 * row.w1.0 - b1 * row.w1.1; // sin(t·7 + phase − 4.5 s)
+            let w2 = a2 * row.w2.0 - b2 * row.w2.1; // sin(t·11.3 + 1.7 phase − 7 s)
+            let w3 = a3 * row.w3.0 + b3 * row.w3.1; // sin(t·9 + phase + 3 s)
+            let lateral = h * (0.30 * s2 * w1 + 0.12 * s3 * w2);
             // The tip droops a little as it whips.
-            let drop = h * 0.06 * s2 * s * (w1 * w2).abs();
-            let width = half_w * (1.0 - s).powf(0.85) * (1.0 + 0.18 * (t * 9.0 + phase + s * 3.0).sin());
+            let drop = h * 0.06 * s3 * (w1 * w2).abs();
+            let width = half_w * row.taper * (1.0 + 0.18 * w3);
             let centre = foot + Vec3::Y * (h * s - drop) + right * lateral;
             let color = [
                 bottom[0] + (top[0] - bottom[0]) * s,
@@ -644,34 +673,19 @@ impl QuadBuilder {
                 1.0,
             ];
             // uv.y: 1 at the foot, 0 at the tip (what the shader expects).
-            for (side, u) in [(-1.0f32, 0.0f32), (1.0, 1.0)] {
-                self.positions.push((centre + right * width * side).into());
-                if !self.no_normals {
-                    self.normals.push([0.0, 1.0, 0.0]);
-                }
-                self.colors.push(color);
-                self.uvs.push([u, 1.0 - s]);
-            }
+            let side = right * width;
+            self.vertex(centre - side, [0.0, 1.0, 0.0], [0.0, 1.0 - s], color);
+            self.vertex(centre + side, [0.0, 1.0, 0.0], [1.0, 1.0 - s], color);
         }
-        for j in 0..TONGUE_SEGMENTS as u32 {
-            let a = base + j * 2;
-            self.indices.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
-        }
+        // joined by `TONGUE`'s indices
     }
 
-    fn finish(self) -> Mesh {
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
-        if !self.no_normals {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
-        }
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
-        mesh.insert_indices(Indices::U32(self.indices));
-        mesh
+    /// The position of vertex `i` (tests).
+    #[cfg(test)]
+    fn position(&self, i: usize) -> Vec3 {
+        let at = i * crate::streamed_mesh::stride(self.normals);
+        let f = |k: usize| f32::from_le_bytes(self.bytes[at + 4 * k..at + 4 * k + 4].try_into().unwrap());
+        Vec3::new(f(0), f(1), f(2))
     }
 }
 
@@ -688,6 +702,7 @@ pub fn update_flames(
     suns: Query<(&GlobalTransform, &DirectionalLight)>,
     mut view: ResMut<FireView>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut frame: ResMut<StreamedFrame>,
 ) {
     // `?fuoco=0`: no flames, smoke or sparks (see `update_overlay`)
     if crate::quality::web_off("fuoco") {
@@ -784,7 +799,7 @@ pub fn update_flames(
         view.tongues = tongues;
     }
 
-    let mut flames = QuadBuilder::with_capacity(view.last_flame_verts);
+    let mut flames = QuadBuilder::new(false, view.last_flame_verts);
     let max_half_w = scn.world.cellsize * 1.3;
     for c in &view.tongues {
         let flicker = 0.62 + 0.38 * (t * 5.5 + c.phase).sin() * (t * 2.3 + c.phase).cos();
@@ -877,7 +892,7 @@ pub fn update_flames(
     }
 
     let fogger = PuffFog::new(&fog, &suns, cam.translation);
-    let mut smoke = QuadBuilder { no_normals: false, ..default() };
+    let mut smoke = QuadBuilder::new(true, 4 * view.smoke.len());
     for puff in &view.smoke {
         let k = (puff.age / puff.life).clamp(0.0, 1.0);
         // Grows as it disperses, darkest and densest near the fire.
@@ -900,18 +915,15 @@ pub fn update_flames(
             shade * 0.84 * gain.z,
             alpha,
         ];
-        smoke.billboard(puff.pos, r, u, 1.0, c, c);
         // The normal slot carries the fog's additive part (`smoke.wgsl`).
-        for n in smoke.normals.iter_mut().rev().take(4) {
-            *n = offset.into();
-        }
+        smoke.billboard(puff.pos, r, u, 1.0, c, c, offset.into());
     }
 
     // Embers are plain round particles (`flame.wgsl`, mode 2). Colour
     // channels carry no colour: r = age share,
     // g = per-ember phase, b = gain (negative for the landing flash).
     let eye = cam.translation;
-    let mut sparks = QuadBuilder { no_normals: true, ..default() };
+    let mut sparks = QuadBuilder::new(false, 4 * view.embers.len());
     for ember in &view.embers {
         let k = (ember.age / ember.life).clamp(0.0, 1.0);
         // never smaller than ~2 px, or a far ember shimmers in and out
@@ -924,7 +936,7 @@ pub fn update_flames(
             let pulse = (1.0 - k).powf(0.5) * (1.0 - (k * 3.0 - 1.0).max(0.0));
             let size = (ember.size * (1.0 + 1.5 * (1.0 - k))).max(min_size);
             let c = [k, ember.phase, -pulse, 1.0];
-            sparks.billboard(ember.pos, right * size, up * size, 1.0, c, c);
+            sparks.billboard(ember.pos, right * size, up * size, 1.0, c, c, [0.0, 1.0, 0.0]);
             continue;
         }
         let size = (ember.size * (1.0 - 0.35 * k)).max(min_size);
@@ -942,13 +954,15 @@ pub fn update_flames(
             along = up;
         }
         let stretch = 1.0 + (0.04 * speed).min(0.7);
-        sparks.billboard(ember.pos, across * size, along * size * stretch, 1.0, c, c);
+        sparks.billboard(ember.pos, across * size, along * size * stretch, 1.0, c, c, [0.0, 1.0, 0.0]);
     }
 
-    view.last_flame_verts = flames.positions.len();
-    let _ = meshes.insert(&view.flames, or_empty(flames.finish()));
-    let _ = meshes.insert(&view.smoke_mesh, or_empty(smoke.finish()));
-    let _ = meshes.insert(&view.sparks, or_empty(sparks.finish()));
+    view.last_flame_verts = flames.verts;
+    let view = &mut *view;
+    for (target, built, shape) in [(&mut view.flames, flames, TONGUE), (&mut view.smoke_mesh, smoke, BILLBOARD), (&mut view.sparks, sparks, BILLBOARD)] {
+        let items = built.verts as u32 / shape.verts;
+        target.write(&mut meshes, &mut frame, built.bytes, items);
+    }
 }
 
 
@@ -1230,8 +1244,18 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// What the previous overlay builder made: four private vertices per quad.
+    #[derive(Default)]
+    struct LegacyMesh {
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        colors: Vec<[f32; 4]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<u32>,
+    }
+
     /// The previous overlay builder: four private vertices per kept quad.
-    fn legacy(sim: &Sim, layer: FireLayer, now: f32) -> Option<QuadBuilder> {
+    fn legacy(sim: &Sim, layer: FireLayer, now: f32) -> Option<LegacyMesh> {
         let scn = &sim.scn;
         let w = scn.world;
         let hazard = sim.fire.hazard().as_slice();
@@ -1248,7 +1272,7 @@ mod tests {
         let step = w.cellsize / subdiv as f32;
         let nx = (c1 - c0) * subdiv + 1;
         let ny = (r1 - r0) * subdiv + 1;
-        let mut mesh = QuadBuilder::default();
+        let mut mesh = LegacyMesh::default();
         let mut colors = Vec::with_capacity(nx * ny);
         let mut positions = Vec::with_capacity(nx * ny);
         for iy in 0..ny {
@@ -1280,6 +1304,33 @@ mod tests {
             }
         }
         Some(mesh)
+    }
+
+    /// The tongue's rows from the angle sums are the ones of the old formula
+    /// (a sine per row and wave, a power per row), to float rounding.
+    #[test]
+    fn tongue_rows_match_the_direct_formula() {
+        let (foot, right, h, half_w) = (Vec3::new(10.0, 50.0, -20.0), Vec3::X, 60.0, 15.0);
+        for (t, phase) in [(0.0f32, 0.0f32), (3.7, 12.9), (812.25, 29.4), (3600.5, 7.1)] {
+            let mut q = QuadBuilder::new(false, 32);
+            q.tongue(foot, right, h, half_w, t, phase, [1.0; 4], [0.5; 4]);
+            for j in 0..=TONGUE_SEGMENTS {
+                let s = j as f32 / TONGUE_SEGMENTS as f32;
+                let s2 = s * s;
+                let w1 = (t * 7.0 - s * 4.5 + phase).sin();
+                let w2 = (t * 11.3 - s * 7.0 + phase * 1.7).sin();
+                let lateral = h * (0.30 * s2 * w1 + 0.12 * s2 * s * w2);
+                let drop = h * 0.06 * s2 * s * (w1 * w2).abs();
+                let width = half_w * (1.0 - s).powf(0.85) * (1.0 + 0.18 * (t * 9.0 + phase + s * 3.0).sin());
+                let centre = foot + Vec3::Y * (h * s - drop) + right * lateral;
+                for (k, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+                    let want = centre + right * width * side;
+                    let got = q.position(2 * j + k);
+                    // the phases of t = 3600 s carry ~2e-3 rad of f32 rounding either way
+                    assert!(want.distance(got) < 0.05 + 2e-3 * h, "t {t} row {j}: {want} vs {got}");
+                }
+            }
+        }
     }
 
     #[test]

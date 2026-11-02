@@ -1,10 +1,16 @@
 // The sky dome: a large inverted sphere around the whole scenario, shaded
 // purely from view direction, not from geometry. `crate::sky::update_sky`
-// recomputes the four colours below every frame from the sun's actual
-// elevation, so this shader only has to blend them and paint the disc.
+// recomputes the four colours below from the sun's actual elevation, so this
+// shader only has to blend them and paint the disc.
+//
+// What moves every frame is not in the material (2026-11-01: a material
+// changed is a new GPU buffer on WebGL2): the sun's direction is the scene's
+// directional light, the moon is opposite it, and the clouds drift from
+// `sky.cloud.xy` at the velocity in `cloud_lit.a`, `cloud_shade.a` since the
+// time in `cloud.w` (`globals.time`).
 
 import bevy_pbr::render::forward_io::VertexOutput;
-import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_view_bindings::{view, lights, globals};
 
 struct SkyUniform {
     sun_dir: vec4<f32>,      // xyz: direction to the sun. w: day gate, 0..1.
@@ -13,11 +19,23 @@ struct SkyUniform {
     horizon_color: vec4<f32>,
     moon_dir: vec4<f32>,     // xyz: direction to the moon. w: how high it is, 0..1.
     moon_color: vec4<f32>,
-    cloud: vec4<f32>,        // xy: downwind travel, metres (XZ). z: coverage.
-    cloud_lit: vec4<f32>,
-    cloud_shade: vec4<f32>,
+    cloud: vec4<f32>,        // xy: downwind travel, metres (XZ), at time w. z: coverage.
+    cloud_lit: vec4<f32>,    // a: drift velocity along x, m/s
+    cloud_shade: vec4<f32>,  // a: drift velocity along z, m/s
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> sky: SkyUniform;
+
+// Direction to the sun: the sun light's, as the scene is lit this frame.
+fn sun_direction() -> vec3<f32> {
+    if (lights.n_directional_lights > 0u) {
+        return normalize(lights.directional_lights[0].direction_to_light);
+    }
+    return normalize(sky.sun_dir.xyz);
+}
+
+fn cloud_drift() -> vec2<f32> {
+    return sky.cloud.xy + vec2<f32>(sky.cloud_lit.a, sky.cloud_shade.a) * (globals.time - sky.cloud.w);
+}
 
 // Volumetric clouds: a slab between CLOUD_BOTTOM and CLOUD_TOP, ray-marched
 // through a 3D noise density with a short march toward the sun for the
@@ -61,7 +79,8 @@ fn cloud_density(p: vec3<f32>, octaves: i32) -> f32 {
     let h = clamp((p.y - CLOUD_BOTTOM) / (CLOUD_TOP - CLOUD_BOTTOM), 0.0, 1.0);
     // flat bases, rounded tops
     let profile = smoothstep(0.0, 0.12, h) * smoothstep(1.0, 0.55, h);
-    let q = vec3<f32>(p.x - sky.cloud.x, p.y * 1.6, p.z - sky.cloud.y) / CLOUD_SCALE;
+    let drift = cloud_drift();
+    let q = vec3<f32>(p.x - drift.x, p.y * 1.6, p.z - drift.y) / CLOUD_SCALE;
     let n = fbm3(q, octaves);
     let thr = mix(0.78, 0.38, sky.cloud.z);
     return smoothstep(thr, thr + 0.2, n) * profile;
@@ -80,7 +99,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let below_t = clamp(-up, 0.0, 1.0);
     col = mix(col, sky.horizon_color.rgb * 0.55, below_t * 0.8);
 
-    let sun_dir = normalize(sky.sun_dir.xyz);
+    let sun_dir = sun_direction();
     let sun_amt = max(dot(dir, sun_dir), 0.0);
     // A tight disc plus a broad, dim glow around it: bloom picks the disc up,
     // the glow reads even where bloom would otherwise clip it away.
@@ -92,7 +111,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // a soft glow is enough — no terminator, no phase shading. Gated purely
     // by how high it is, unlike the sun's floor, so it is not a ghost in the
     // daytime sky when it sits opposite a sun that is still up.
-    let moon_dir = normalize(sky.moon_dir.xyz);
+    // exactly opposite the sun (`crate::sky`)
+    let moon_dir = -sun_dir;
     let moon_amt = max(dot(dir, moon_dir), 0.0);
     let moon_disc = smoothstep(0.9985, 0.9996, moon_amt);
     let moon_glow = pow(moon_amt, 400.0) * 0.4 + pow(moon_amt, 6.0) * 0.05;
@@ -106,7 +126,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if (t1 > t0) {
             let dt = (t1 - t0) / f32(CLOUD_STEPS);
             let jitter = hash3(vec3<f32>(in.position.xy, 1.0));
-            let sun_d = normalize(sky.sun_dir.xyz);
+            let sun_d = sun_dir;
             var trans = 1.0;
             var light = vec3<f32>(0.0);
             for (var i = 0; i < CLOUD_STEPS; i++) {

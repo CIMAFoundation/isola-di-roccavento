@@ -527,9 +527,10 @@ class Geo:
                 c, d = rb[k], rb[(k + 1) % 4]
                 self.T += [(a, b, d), (a, d, c)]
 
-    def core(self, centre, size, canopy, seed, jit=.14, flat=.55):
+    def core(self, centre, size, canopy, seed, jit=.14, flat=.55, shade=1.0):
         """The crown's body: a lumpy 12-vertex icosahedron, its texture the
-        canopy tile projected from above, normals of an ellipsoid."""
+        canopy tile projected from above, normals of an ellipsoid. `shade`
+        darkens it: inside a crown it is the shadow between the leaves."""
         c, s = Vector(centre), Vector(size)
         u0, v0, u1, v1 = canopy_rect(canopy)
         t = (1 + 5 ** .5) / 2
@@ -549,8 +550,9 @@ class Geo:
             p = c + Vector((q.x * s.x, q.y * s.y, q.z * s.z))
             n = Vector((q.x / s.x, q.y / s.y, q.z / s.z))
             h = (q.z + 1) / 2
-            uv = (u0 + (u1 - u0) * (q.x * .5 + .5), v0 + (v1 - v0) * (q.y * .5 + .5))
-            idx.append(self.v(p, n, uv, .78 + .40 * min(max(h, 0), 1), False))
+            # projected obliquely, not from above: the sides are not streaks
+            uv = (u0 + (u1 - u0) * ((q.x + .4 * q.y) * .36 + .5), v0 + (v1 - v0) * ((q.z - .4 * q.y) * .36 + .5))
+            idx.append(self.v(p, n, uv, (.78 + .40 * min(max(h, 0), 1)) * shade, False))
         for f in faces:
             # icosahedron faces listed counter-clockwise from outside
             self.T.append((idx[f[0]], idx[f[1]], idx[f[2]]))
@@ -582,33 +584,43 @@ class Geo:
         self.T += [(a, b, cc), (a, cc, dd)]
 
 
-def crown(g, centre, size, leaf, seed, style, cards=None, core=.78):
-    """A crown part: a core a little smaller than the part and leaf cards
-    reaching past it, which make the silhouette."""
+def crown(g, centre, size, leaf, seed, style, cards=None, core=.55):
+    """A crown part: a small dark core, the shadow inside the crown, and
+    leaf cards cut out of the atlas around it, which make the crown and its
+    silhouette (2026-11-01: the core used to fill the crown, and the
+    stretched canopy tile on it read as plastic)."""
     rng = random.Random(seed)
     c, s = Vector(centre), Vector(size)
-    # a column is all core (the cypress is dense), rods and heath are mostly cards
-    core = {'column': .92, 'upright': .6}.get(style, core)
-    g.core(c, s * core, leaf, seed, flat={'umbrella': .35, 'column': 1.0}.get(style, .6))
+    # the cypress stays dense; rods and heath are mostly cards
+    core = {'column': .70, 'upright': .45, 'umbrella': .45}.get(style, core)
+    g.core(c, s * core, leaf, seed, flat={'umbrella': .35, 'column': 1.0}.get(style, .6),
+           shade={'column': .80}.get(style, .72))
     g.pads[-1] = (tuple(c), tuple(s))
     if style == 'umbrella':
         # flat pads: cards lying across the top, a little tilted
-        n = cards or 2
+        # one wide card on top, smaller tufts around and under its rim
+        n = cards or 4
+        a0 = rng.uniform(0, math.tau)
         for i in range(n):
             a = rng.uniform(0, math.tau)
-            tilt = rng.uniform(.10, .30)
+            tilt = rng.uniform(.10, .35)
             nrm = Vector((math.cos(a) * tilt, math.sin(a) * tilt, 1))
-            g.card(c + Vector((0, 0, s.z * (.15 + .3 * i))), nrm, rng.uniform(0, math.tau),
-                   (s.x * 1.12, s.y * 1.12), leaf, c, s, i % 2 == 1)
+            if i == 0:
+                off, k = Vector((0, 0, s.z * .45)), 1.0
+            else:
+                b = a0 + i * math.tau / (n - 1)
+                off = Vector((math.cos(b) * s.x * .45, math.sin(b) * s.y * .45, s.z * rng.uniform(-.3, .2)))
+                k = .62
+            g.card(c + off, nrm, rng.uniform(0, math.tau), (s.x * k, s.y * k), leaf, c, s, i % 2 == 1)
     elif style == 'column':
-        n = cards or 2
+        n = cards or 3
         a0 = rng.uniform(0, math.pi)
         for i in range(n):
             a = a0 + i * math.pi / n
-            g.card(c, Vector((math.cos(a), math.sin(a), .12)), 0, (s.x * 1.25, s.z * 1.02), leaf, c, s, i % 2 == 1)
+            g.card(c, Vector((math.cos(a), math.sin(a), .12)), 0, (s.x * 1.15, s.z * 1.02), leaf, c, s, i % 2 == 1)
     elif style == 'upright':
         # rods and heath: cards standing, crossing at the clump's axis
-        n = cards or 3
+        n = cards or 4
         a0 = rng.uniform(0, math.pi)
         for i in range(n):
             a = a0 + i * math.pi / n
@@ -617,18 +629,20 @@ def crown(g, centre, size, leaf, seed, style, cards=None, core=.78):
     else:
         # round crowns and mounds: one card across the top, the others
         # leaning out around it
-        n = cards or 3
+        n = cards or 6
         a0 = rng.uniform(0, math.tau)
         for i in range(n):
             if i == 0:
                 nrm = Vector((rng.uniform(-.2, .2), rng.uniform(-.2, .2), 1))
-                off = Vector((0, 0, s.z * .35))
-                half = (s.x * 1.05, s.y * 1.05)
+                off = Vector((0, 0, s.z * .45))
+                half = (s.x * .85, s.y * .85)
             else:
+                # a ring of tufts on the crown's surface, at two heights
                 a = a0 + i * math.tau / (n - 1)
-                nrm = Vector((math.cos(a), math.sin(a), .55))
-                off = Vector((math.cos(a), math.sin(a), 0)) * s.x * .25
-                half = (s.x * 1.08, s.z * 1.15)
+                up = .35 if i % 2 else -.15
+                nrm = Vector((math.cos(a), math.sin(a), .45 + up))
+                off = Vector((math.cos(a) * s.x * .5, math.sin(a) * s.y * .5, s.z * up))
+                half = (s.x * .72, s.z * .85)
             g.card(c + off, nrm, rng.uniform(0, math.tau), half, leaf, c, s, i % 2 == 1)
 
 
@@ -645,6 +659,9 @@ def variety(species, name, text, leaf, bark, kind='tree'):
 
 def tree(trunks, pads, leaf, bark, style, limbs=(), seed=0, cards=None):
     """trunks/limbs: (polyline, r0, r1); pads: (centre, size)."""
+    # a crown of three or more parts takes fewer tufts each (vertex budget)
+    if cards is None and style == 'round' and len(pads) >= 3:
+        cards = 5
     g = Geo()
     for pts, r0, r1 in trunks:
         g.limb(pts, r0, r1, bark)
@@ -701,7 +718,7 @@ def pine_4():
 def aleppo_1():
     return tree([([(0, 0, 0), (.06, .02, .40), (.14, .04, .66)], .04, .02)],
                 [((.14, .04, .72), (.28, .26, .17)), ((-.04, .10, .64), (.22, .20, .15)), ((.28, -.04, .62), (.20, .18, .14))],
-                'aleppo', 'aleppo', 'round', seed=21, cards=2)
+                'aleppo', 'aleppo', 'round', seed=21, cards=4)
 
 
 @variety('aleppo', 'aleppo_2', "Pino d'Aleppo biforcato: due cime aperte.", 'aleppo', 'aleppo')
@@ -709,14 +726,14 @@ def aleppo_2():
     return tree([([(0, 0, 0), (.02, 0, .34)], .045, .032)],
                 [((.18, .06, .74), (.24, .22, .16)), ((-.16, -.04, .70), (.25, .23, .16)), ((.02, .02, .84), (.20, .18, .12))],
                 'aleppo', 'aleppo', 'round',
-                limbs=[([(.02, 0, .32), (.18, .05, .70)], .026, .014), ([(.02, 0, .32), (-.16, -.03, .66)], .024, .013)], seed=22, cards=2)
+                limbs=[([(.02, 0, .32), (.18, .05, .70)], .026, .014), ([(.02, 0, .32), (-.16, -.03, .66)], .024, .013)], seed=22, cards=4)
 
 
 @variety('aleppo', 'aleppo_3', "Pino marittimo giovane: chioma conica e rada.", 'aleppo', 'aleppo')
 def aleppo_3():
     return tree([([(0, 0, 0), (.01, 0, .48), (.0, .01, .92)], .035, .015)],
                 [((0, .01, .50), (.26, .24, .16)), ((.01, 0, .66), (.21, .20, .15)), ((0, .01, .82), (.14, .13, .11))],
-                'aleppo', 'aleppo', 'round', seed=23, cards=2)
+                'aleppo', 'aleppo', 'round', seed=23, cards=4)
 
 
 # Mediterranean cypress: a dark green flame.
@@ -724,14 +741,14 @@ def aleppo_3():
 def cypress_1():
     return tree([([(0, 0, 0), (0, 0, .16)], .035, .03)],
                 [((0, 0, .48), (.12, .12, .38)), ((0, 0, .84), (.07, .07, .14))],
-                'cypress', 'cypress', 'column', seed=31, cards=2)
+                'cypress', 'cypress', 'column', seed=31, cards=4)
 
 
 @variety('cypress', 'cypress_2', 'Cipresso a fiamma larga: rami aperti in basso.', 'cypress', 'cypress')
 def cypress_2():
     return tree([([(0, 0, 0), (0, 0, .14)], .04, .034)],
                 [((0, 0, .42), (.16, .15, .32)), ((.01, 0, .78), (.10, .09, .18))],
-                'cypress', 'cypress', 'column', seed=32, cards=2)
+                'cypress', 'cypress', 'column', seed=32, cards=4)
 
 
 # Holm oak: dense rounded dark crown on a short dark trunk.
@@ -814,26 +831,26 @@ def olive_3():
 @variety('lentisk', 'lentisk_1', 'Lentisco: cuscino largo e denso, verde scuro.', 'lentisk', 'stem', 'shrub')
 def lentisk_1():
     return shrub([((0, 0, .32), (.78, .72, .36)), ((.46, .22, .22), (.46, .42, .26)), ((-.40, -.30, .20), (.44, .40, .24))],
-                 'lentisk', seed=81, cards=2)
+                 'lentisk', seed=81, cards=4)
 
 
 @variety('lentisk', 'lentisk_2', 'Lentisco basso: tappeto a quattro lobi.', 'lentisk', 'stem', 'shrub')
 def lentisk_2():
     return shrub([((0, 0, .22), (.82, .78, .24)), ((.52, .30, .16), (.42, .38, .16)), ((-.46, -.26, .15), (.40, .36, .15))],
-                 'lentisk', seed=82, cards=2)
+                 'lentisk', seed=82, cards=4)
 
 
 # Myrtle: compact rounded, brighter green.
 @variety('myrtle', 'myrtle_1', 'Mirto: mazzo compatto e tondo, verde vivo.', 'myrtle', 'stem', 'shrub')
 def myrtle_1():
     return shrub([((0, 0, .40), (.52, .50, .40)), ((.32, .12, .28), (.34, .32, .28)), ((-.26, -.12, .30), (.32, .30, .28))],
-                 'myrtle', seed=91, cards=2)
+                 'myrtle', seed=91, cards=4)
 
 
 @variety('myrtle', 'myrtle_2', 'Mirto rado: tre ciuffi staccati.', 'myrtle', 'stem', 'shrub')
 def myrtle_2():
     return shrub([((-.40, .10, .28), (.36, .34, .28)), ((.38, -.10, .26), (.38, .35, .26)), ((.05, .42, .20), (.30, .28, .20))],
-                 'myrtle', seed=92, cards=2)
+                 'myrtle', seed=92, cards=4)
 
 
 # Strawberry tree: a small tree of the macchia, several red-barked stems.
@@ -852,35 +869,35 @@ def arbutus_2():
 # Broom (Spartium): upright green rods, yellow in flower.
 @variety('broom', 'broom_1', 'Ginestra: ciuffo di verghe diritte, fiori gialli.', 'broom', 'stem', 'shrub')
 def broom_1():
-    return shrub([((0, 0, .45), (.36, .34, .45))], 'broom', 'upright', seed=111, cards=3)
+    return shrub([((0, 0, .45), (.36, .34, .45))], 'broom', 'upright', seed=111, cards=4)
 
 
 @variety('broom', 'broom_2', 'Ginestra doppia: due ciuffi accostati.', 'broom', 'stem', 'shrub')
 def broom_2():
-    return shrub([((-.18, 0, .40), (.28, .26, .40)), ((.22, .08, .34), (.26, .24, .34))], 'broom', 'upright', seed=112, cards=2)
+    return shrub([((-.18, 0, .40), (.28, .26, .40)), ((.22, .08, .34), (.26, .24, .34))], 'broom', 'upright', seed=112, cards=3)
 
 
 # Tree heath: upright, fine, grey-green, white in flower.
 @variety('heather', 'heather_1', 'Erica arborea: fusti diritti e fitti, chioma fine.', 'heather', 'stem', 'shrub')
 def heather_1():
-    return shrub([((0, 0, .50), (.30, .28, .50)), ((.24, .10, .36), (.22, .20, .36))], 'heather', 'upright', seed=121, cards=2)
+    return shrub([((0, 0, .50), (.30, .28, .50)), ((.24, .10, .36), (.22, .20, .36))], 'heather', 'upright', seed=121, cards=3)
 
 
 @variety('heather', 'heather_2', 'Erica bassa: cespuglio largo.', 'heather', 'stem', 'shrub')
 def heather_2():
-    return shrub([((0, 0, .36), (.44, .40, .36)), ((-.30, .16, .26), (.26, .24, .26))], 'heather', 'upright', seed=122, cards=2)
+    return shrub([((0, 0, .36), (.44, .40, .36)), ((-.30, .16, .26), (.26, .24, .26))], 'heather', 'upright', seed=122, cards=3)
 
 
 # Rosemary and cistus: the low garrigue.
 @variety('rosemary', 'rosemary_1', 'Rosmarino: cuscino basso grigio-verde.', 'rosemary', 'stem', 'shrub')
 def rosemary_1():
-    return shrub([((0, 0, .20), (.50, .46, .22)), ((.36, .20, .14), (.30, .28, .14))], 'rosemary', seed=131, cards=3)
+    return shrub([((0, 0, .20), (.50, .46, .22)), ((.36, .20, .14), (.30, .28, .14))], 'rosemary', seed=131, cards=5)
 
 
 @variety('rosemary', 'rosemary_2', 'Rosmarino sparso: tre cuscini.', 'rosemary', 'stem', 'shrub')
 def rosemary_2():
     return shrub([((-.30, .05, .18), (.32, .30, .18)), ((.30, -.08, .16), (.30, .28, .16)), ((0, .34, .14), (.24, .22, .14))],
-                 'rosemary', seed=132, cards=2)
+                 'rosemary', seed=132, cards=4)
 
 
 @variety('cistus', 'cistus_1', 'Cisto: cupola bassa grigio-verde, fiori bianchi e rosa.', 'cistus', 'stem', 'shrub')
@@ -891,7 +908,7 @@ def cistus_1():
 @variety('cistus', 'cistus_2', 'Cisto largo: tappeto a tre lobi.', 'cistus', 'stem', 'shrub')
 def cistus_2():
     return shrub([((0, 0, .20), (.62, .58, .20)), ((.42, .30, .14), (.34, .30, .14)), ((-.40, -.26, .14), (.32, .30, .14))],
-                 'cistus', seed=142, cards=2)
+                 'cistus', seed=142, cards=4)
 
 
 SPECIES = [
@@ -1062,7 +1079,7 @@ def live_json(g):
     )
 
 
-LIVE_TRIS, LIVE_VERTS = 120, 96
+LIVE_TRIS, LIVE_VERTS = 140, 128
 
 
 def export():

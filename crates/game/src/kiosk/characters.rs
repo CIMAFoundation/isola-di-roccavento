@@ -137,7 +137,13 @@ pub fn load_portraits(mut commands: Commands, mut images: ResMut<Assets<Image>>,
     commands.insert_resource(ScenarioIcons(icons));
     let logo = picture!("brand/cima_logo_white.png");
     if let Some(t) = texture(&logo, &mut images, &mut contexts) {
+        // The browser draws one pixel per CSS pixel (`main.rs`): the opening's
+        // logo is never taller than the 360 px one, and the large one cost
+        // 4.4 MiB of GPU texture plus its copy in the wasm memory (2026-11-01).
+        #[cfg(not(target_arch = "wasm32"))]
         let large = texture(&picture!("brand/cima_logo_white_1200.png"), &mut images, &mut contexts);
+        #[cfg(target_arch = "wasm32")]
+        let large = None;
         commands.insert_resource(Logo(t, large));
     }
 }

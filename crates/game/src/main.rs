@@ -24,6 +24,7 @@ mod fire_shader;
 mod fire_view;
 mod forecast_view;
 mod forecast_zone;
+mod gpu_memory;
 mod reach_zone;
 mod frame;
 mod kiosk;
@@ -58,13 +59,13 @@ mod sky;
 mod sky_light;
 mod sim;
 mod sound;
+mod streamed_mesh;
 mod terrain_mesh;
 mod textures;
 mod ui;
 mod near_cover;
 mod units;
 mod vegetation;
-mod veg_instancing;
 mod visual_scale;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_state;
@@ -72,6 +73,8 @@ mod window_state;
 mod memory;
 #[cfg(target_arch = "wasm32")]
 mod web_input;
+#[cfg(target_arch = "wasm32")]
+mod web_gpu;
 
 use bevy::post_process::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -217,6 +220,10 @@ fn main() -> anyhow::Result<()> {
     if kiosk::snap::bench_s().is_some() {
         app.add_plugins(bench::BenchPlugin);
     }
+    app.add_plugins(gpu_memory::GpuMemoryPlugin);
+    app.add_plugins(streamed_mesh::StreamedMeshPlugin);
+    #[cfg(target_arch = "wasm32")]
+    app.add_plugins(web_gpu::WebGpuPlugin);
     app.add_plugins(mario::MarioPlugin);
     app.add_plugins(pad::PadPlugin);
     // `?audio=0`, `?orizzonte=0`, `?raggi=0` in the browser switch these off
@@ -232,7 +239,7 @@ fn main() -> anyhow::Result<()> {
     if !quality::web_off("raggi") {
         app.add_plugins(godrays::GodRaysPlugin);
     }
-    app.add_plugins(veg_instancing::VegInstancingPlugin);
+    app.add_plugins(vegetation::PlantRenderPlugin);
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);
     app.add_systems(PostUpdate, kiosk::snap::redirect_camera);
@@ -289,7 +296,7 @@ fn setup_scene(
     let focus = frame::to_bevy(p, h);
     let mut camera = commands.spawn((
         Camera3d::default(),
-        Tonemapping::TonyMcMapface,
+        Tonemapping::AcesFitted,
         gfx.msaa(),
         grading(),
         Transform::from_xyz(focus.x, focus.y + distance * 0.77, focus.z + distance * 0.77),
@@ -373,16 +380,10 @@ fn kiosk_systems(app: &mut App) {
             (
                 fire_view::update_overlay,
                 fire_view::update_flames,
-                (
-                    // `lod` may toggle a burnt-remains layer `burn` has just spawned: since
-                    // Bevy 0.20 an entity exists only once the spawning command is applied
-                    (vegetation::burn, vegetation::lod).chain(),
-                    vegetation::fire_clock,
-                ),
+                (vegetation::burn, vegetation::clock),
                 buildings::damage,
                 units::update_units,
                 units::animate_units,
-                overlays::pulse_rings,
                 rings::spin,
                 overlays::no_ui_shadows,
                 units::sync_orders,
@@ -409,16 +410,11 @@ fn map_camera_allowed(mario: Res<mario::Playground>) -> bool {
     !mario.active
 }
 
-/// The film look on top of the tone mapper: a touch more contrast in the
-/// midtones and saturation after it, so the sunlit island does not read
-/// washed out (TonyMcMapface desaturates bright, saturated colours). Tuned on
-/// snapshots against the sky's fill (`sky_light`), 2026-10-20.
+/// The film look on top of the tone mapper. With TonyMcMapface it added
+/// contrast and saturation (it washes bright, saturated colours out, flames
+/// included: salmon instead of orange); since 2026-11-01 the tone mapper is
+/// AcesFitted (user's choice, compared in `veg_lab` on main), contrasty and
+/// saturated of itself, and the grading is neutral: on top of it the sea went navy.
 fn grading() -> bevy::render::view::ColorGrading {
-    use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
-    let mut g = ColorGrading::with_identical_sections(
-        ColorGradingGlobal { post_saturation: 1.15, ..default() },
-        ColorGradingSection::default(),
-    );
-    g.midtones.contrast = 1.15;
-    g
+    bevy::render::view::ColorGrading::default()
 }

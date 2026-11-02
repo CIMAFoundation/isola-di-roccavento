@@ -22,10 +22,12 @@ sfx.workspace = true
 libsm64-native = { path = "../libsm64-native", optional = true }
 serde.workspace = true
 serde_json.workspace = true
+# vertices packed in one copy (`streamed_mesh`); already in the tree through Bevy
+bytemuck = "1"
 bevy = { version = "0.20", default-features = false }
 # Only for the timestamp queries of `bench.rs` (QuerySet, RenderPassTimestampWrites are not
 # re-exported by bevy::render::render_resource). Same major as Bevy uses.
-wgpu = { version = "30", default-features = false }
+wgpu = { version = "30", default-features = false, features = ["counters"] }
 bevy_egui = { version = "0.43.1", default-features = false, features = ["open_url", "default_fonts", "render"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

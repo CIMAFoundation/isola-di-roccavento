@@ -161,12 +161,21 @@ fn spawn(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<Mesh>>
 }
 
 /// The land's colour mixed with the horizon's, as the sky sets it.
+/// Only when the colour moved by more than a step of an 8-bit channel: a
+/// material changed is a new GPU buffer on WebGL2, and the sky's colour drifts
+/// a little every frame (2026-11-01, six of them a frame).
 fn tint(clear: Res<ClearColor>, distant: Query<&Distant>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let h = clear.0.to_srgba();
     for d in &distant {
-        if let Some(mut m) = materials.get_mut(&d.material) {
-            let mix = |land: f32, sky: f32| land + (sky - land) * d.haze;
-            m.base_color = Color::srgb(mix(LAND[0], h.red), mix(LAND[1], h.green), mix(LAND[2], h.blue));
+        let mix = |land: f32, sky: f32| land + (sky - land) * d.haze;
+        let want = Color::srgb(mix(LAND[0], h.red), mix(LAND[1], h.green), mix(LAND[2], h.blue));
+        let Some(now) = materials.get(&d.material).map(|m| m.base_color.to_srgba()) else { continue };
+        let w = want.to_srgba();
+        let moved = (now.red - w.red).abs().max((now.green - w.green).abs()).max((now.blue - w.blue).abs());
+        if moved > 0.5 / 255.0 {
+            if let Some(mut m) = materials.get_mut(&d.material) {
+                m.base_color = want;
+            }
         }
     }
 }

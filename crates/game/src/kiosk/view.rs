@@ -599,6 +599,21 @@ pub fn camera(
 /// is near (a home within `NEAR_M` of it). Returns the middle (Bevy x, z)
 /// and the widest extent in metres. `None` if nothing burns.
 pub(super) fn fire_extent(sim: &Sim) -> Option<(Vec2, f32)> {
+    // asked every frame by the camera, it changes only with the game state:
+    // homes × fire points was a frame's 1 % in the browser (2026-11-01)
+    type Extent = Option<(Vec2, f32)>;
+    thread_local! { static LAST: std::cell::Cell<Option<(u64, Extent)>> = const { std::cell::Cell::new(None) }; }
+    if let Some((generation, extent)) = LAST.get() {
+        if generation == sim.generation {
+            return extent;
+        }
+    }
+    let extent = fire_extent_now(sim);
+    LAST.set(Some((sim.generation, extent)));
+    extent
+}
+
+fn fire_extent_now(sim: &Sim) -> Option<(Vec2, f32)> {
     const NEAR_M: f32 = 1500.0;
     let cells = sim.fire.active_cells();
     if cells.is_empty() {
@@ -609,7 +624,7 @@ pub(super) fn fire_extent(sim: &Sim) -> Option<(Vec2, f32)> {
     let mut pts = fire.clone();
     for d in &sim.districts {
         let homes = d.households.iter().map(|&i| Pos::from(sim.scn.population.households[i].pos));
-        let near = homes.clone().any(|h| fire.iter().any(|f| (f.x - h.x).hypot(f.y - h.y) < NEAR_M));
+        let near = homes.clone().any(|h| fire.iter().any(|f| (f.x - h.x).powi(2) + (f.y - h.y).powi(2) < NEAR_M * NEAR_M));
         if near {
             pts.extend(homes);
         }

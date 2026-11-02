@@ -3012,6 +3012,7 @@ dependencies = [
  "behavior",
  "bevy",
  "bevy_egui",
+ "bytemuck",
  "datafs",
  "fire",
  "getrandom 0.2.17",

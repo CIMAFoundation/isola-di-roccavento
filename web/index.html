@@ -503,6 +503,9 @@
       canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }));
       const focusCanvas = () => { if (!nameDialog.open) canvas.focus({ preventScroll: true }); };
       canvas.addEventListener('webglcontextlost', event => {
+        // leaving: no restore wanted (with preventDefault the old page kept
+        // its memory after a reload in the simulator)
+        if (leaving) return;
         event.preventDefault();
         trace('webglcontextlost');
         const message = document.createElement('div');
@@ -524,6 +527,19 @@
       // game: it is running, not failing.
       const winitControlFlow = 'Using exceptions for control flow, don\'t mind me.';
       let started = false;
+      // Leaving the page, a reload too, the WebGL context is lost on purpose
+      // (2026-11-01: on an iPhone 13 a reload in the same tab kept the old
+      // page's memory, about 2 GB in all). In the iOS simulator the old page
+      // was then freed in 3 reloads out of 6, without it in 1 out of 7: still
+      // to be seen on the phone (docs/web.md). Back from the browser's page
+      // cache, the page starts again.
+      let leaving = false;
+      addEventListener('pagehide', () => {
+        if (!started) return;
+        leaving = true;
+        try { canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext(); } catch (e) {}
+      });
+      addEventListener('pageshow', event => { if (event.persisted && leaving) location.reload(); });
       // The intro page costs nothing: the wasm is fetched and started only here.
       async function start() {
         if (started) return;

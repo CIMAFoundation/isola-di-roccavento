@@ -33,49 +33,15 @@ pub struct OverlayAssets {
     key: (usize, usize, i64),
     /// What the order rings were built for: (warned districts, engine posts).
     order_key: (usize, usize),
-    ring_cover: Handle<StandardMaterial>,
-    ring_white: Handle<StandardMaterial>,
     /// What the routes were built for.
     route_key: u64,
 }
 
-/// The colour of a glowing UI element: `c` as sRGB, its linear value scaled by
-/// `gain`. Unlit output ignores emissive and goes through the tone mapper, so
-/// anything near 1.0 comes out as muted as the terrain; >1 stays saturated and
-/// feeds the bloom. No gain (0) is a plain colour.
-fn hdr(c: [f32; 3], a: f32, gain: f32) -> Color {
-    let l = Color::srgb(c[0], c[1], c[2]).to_linear();
-    let g = if gain > 0.0 { gain } else { 1.0 };
-    Color::LinearRgba(LinearRgba::new(l.red * g, l.green * g, l.blue * g, a))
-}
-
-fn glow(c: [f32; 3], a: f32, boost: f32) -> StandardMaterial {
-    StandardMaterial {
-        base_color: hdr(c, a, boost),
-        emissive: LinearRgba::rgb(c[0] * boost, c[1] * boost, c[2] * boost),
-        unlit: true,
-        alpha_mode: if a < 1.0 { AlphaMode::Blend } else { AlphaMode::Opaque },
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    }
-}
-
-pub fn setup(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut mat = |c: [f32; 3], a: f32, boost: f32| materials.add(glow(c, a, boost));
-    // UI in 3D is all blues: cyan = defended area and active routes, ice = proposed plan.
-    let ring_cover = mat([0.00, 0.90, 1.00], 0.9, 1.6);
-    let ring_white = mat([0.65, 0.90, 1.00], 0.9, 1.6);
-    commands.insert_resource(OverlayAssets {
-        key: (usize::MAX, 0, 0),
-        order_key: (usize::MAX, 0),
-        ring_cover,
-        ring_white,
-        route_key: u64::MAX,
-    });
+// The two glowing ring materials and their pulse (`pulse_rings`) are gone
+// (2026-11-01): no entity drew them, and changing two materials every frame
+// made two new GPU buffers a frame on WebGL2.
+pub fn setup(mut commands: Commands) {
+    commands.insert_resource(OverlayAssets { key: (usize::MAX, 0, 0), order_key: (usize::MAX, 0), route_key: u64::MAX });
 }
 
 /// 3D UI is a graphic layer, not part of the scene: it casts and receives no
@@ -93,22 +59,6 @@ pub fn no_ui_shadows(
     for e in &new {
         // may already be despawned this frame (rings are rebuilt eagerly)
         commands.entity(e).try_insert((bevy::light::NotShadowCaster, bevy::light::NotShadowReceiver));
-    }
-}
-
-/// Rings and routes breathe: a slow pulse of alpha and glow, out of phase per
-/// colour, so they read as UI laid over the landscape and not as scenery.
-pub fn pulse_rings(time: Res<Time>, assets: Res<OverlayAssets>, mut materials: ResMut<Assets<StandardMaterial>>) {
-    let t = time.elapsed_secs();
-    let set = [
-        (&assets.ring_cover, [0.00, 0.90, 1.00], 2.2),
-        (&assets.ring_white, [0.65, 0.90, 1.00], 3.3),
-    ];
-    for (h, c, phase) in set {
-        let k = 0.5 + 0.5 * (t * 2.6 + phase).sin();
-        if let Some(mut m) = materials.get_mut(h) {
-            m.base_color = hdr(c, 0.70 + 0.30 * k, 2.2 + 1.8 * k);
-        }
     }
 }
 

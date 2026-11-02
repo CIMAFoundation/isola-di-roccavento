@@ -62,7 +62,8 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
         for n in names:
             rel = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
             # from assets/ only what the game reads: the bakes and the pictures
-            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel):
+            # the 1200 px logo is for the desktop's opening only (kiosk/characters.rs)
+            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or rel.endswith("_1200.png")):
                 continue
             files.append(rel)
 files.append("data/fuels_eu12.json")

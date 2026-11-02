@@ -467,6 +467,37 @@ const MOON_AMBIENT_TINT: [(f32, [f32; 3]); 3] = [
     (90.0, [0.20, 0.25, 0.40]),
 ];
 
+/// How much a slowly changing colour or gate may move before the material is
+/// written again. A material changed is a new GPU buffer on WebGL2
+/// (2026-11-01, the iPhone): in the browser a change under half an 8-bit
+/// step waits; on the desktop every change is written, as before.
+pub(crate) const SLOW_EPS: f32 = if cfg!(target_arch = "wasm32") { 0.5 / 255.0 } else { 0.0 };
+
+/// The sky has to be written again: a colour or gate moved, the clouds'
+/// velocity changed, or the time they drift from is old or wrapped. The sun's
+/// and the moon's directions are not compared: the shader takes them from
+/// the light (`sky.wesl`).
+fn sky_stale(old: &SkyUniform, new: &SkyUniform) -> bool {
+    let moved = |a: Vec4, b: Vec4| (a - b).abs().max_element() > SLOW_EPS;
+    let since = new.cloud.w - old.cloud.w;
+    !(0.0..20.0).contains(&since)
+        || old.cloud_lit.w != new.cloud_lit.w
+        || old.cloud_shade.w != new.cloud_shade.w
+        || old.cloud.z != new.cloud.z
+        || (old.sun_dir.w - new.sun_dir.w).abs() > SLOW_EPS
+        || (old.moon_dir.w - new.moon_dir.w).abs() > SLOW_EPS
+        || [
+            (old.sun_color, new.sun_color),
+            (old.zenith_color, new.zenith_color),
+            (old.horizon_color, new.horizon_color),
+            (old.moon_color, new.moon_color),
+            (old.cloud_lit.truncate().extend(0.0), new.cloud_lit.truncate().extend(0.0)),
+            (old.cloud_shade.truncate().extend(0.0), new.cloud_shade.truncate().extend(0.0)),
+        ]
+        .into_iter()
+        .any(|(a, b)| moved(a, b))
+}
+
 pub fn update_sky(
     sim: Res<Sim>,
     day: Res<DayClock>,
@@ -481,6 +512,7 @@ pub fn update_sky(
     mut fog_q: Query<&mut DistanceFog>,
     mut dome_q: Query<&mut Visibility, With<SkyDome>>,
     time: Res<Time>,
+    tactical: Option<Res<crate::tactical::Tactical>>,
     mut cloud_offset: Local<Vec2>,
 ) {
     // The layer is carried by the wind the sea reads, and integrated, so a
@@ -546,22 +578,31 @@ pub fn update_sky(
     clear_color.0 = Color::srgb(horizon[0], horizon[1], horizon[2]);
 
     if let Some(handle) = sky_handle {
-        if let Some(mut mat) = sky_materials.get_mut(&handle.0) {
-            mat.uniform = SkyUniform {
-                sun_dir: dir.extend(day_gate),
-                sun_color: Vec3::from(sun_color).extend(1.0),
-                zenith_color: Vec3::from(zenith).extend(1.0),
-                horizon_color: Vec3::from(horizon).extend(1.0),
-                moon_dir: moon_dir.extend(moon_gate),
-                moon_color: Vec3::from(moon_color).extend(1.0),
-                cloud: Vec4::new(cloud_offset.x, cloud_offset.y, CLOUD_COVERAGE, 0.0),
-                cloud_lit: (Vec3::from(sun_color) * (0.12 + 0.88 * brightness)
-                    + Vec3::splat(0.05 * moon_gate))
-                .extend(1.0),
-                cloud_shade: (Vec3::from(horizon) * 0.55 * (0.2 + 0.8 * brightness)
-                    + Vec3::splat(0.03 * moon_gate))
-                .extend(1.0),
-            };
+        // the drift's velocity and the time it starts from: the shader moves
+        // the clouds on from there (`sky.wesl`, `cloud_drift`)
+        let velocity = drift * wind * CLOUD_SPEED_FACTOR;
+        let mut want = SkyUniform {
+            sun_dir: dir.extend(day_gate),
+            sun_color: Vec3::from(sun_color).extend(1.0),
+            zenith_color: Vec3::from(zenith).extend(1.0),
+            horizon_color: Vec3::from(horizon).extend(1.0),
+            moon_dir: moon_dir.extend(moon_gate),
+            moon_color: Vec3::from(moon_color).extend(1.0),
+            cloud: Vec4::new(cloud_offset.x, cloud_offset.y, CLOUD_COVERAGE, time.elapsed_secs_wrapped()),
+            cloud_lit: (Vec3::from(sun_color) * (0.12 + 0.88 * brightness)
+                + Vec3::splat(0.05 * moon_gate))
+            .extend(velocity.x),
+            cloud_shade: (Vec3::from(horizon) * 0.55 * (0.2 + 0.8 * brightness)
+                + Vec3::splat(0.03 * moon_gate))
+            .extend(velocity.y),
+        };
+        if let Some(t) = &tactical {
+            crate::tactical::sky_effects(t, &mut want);
+        }
+        if sky_materials.get(&handle.0).is_some_and(|m| sky_stale(&m.uniform, &want)) {
+            if let Some(mut mat) = sky_materials.get_mut(&handle.0) {
+                mat.uniform = want;
+            }
         }
     }
 

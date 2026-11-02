@@ -305,8 +305,9 @@ mod tests {
             for name in variety_names(species) {
                 let v = variety(name);
                 let hi = v.live.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
-                assert!(v.live.indices.len() / 3 <= 120, "{name}: {} live triangles", v.live.indices.len() / 3);
-                assert!(v.live.positions.len() <= 96, "{name}: {} live vertices", v.live.positions.len());
+                // as `LIVE_TRIS`, `LIVE_VERTS` in scripts/build_vegetation_models.py
+                assert!(v.live.indices.len() / 3 <= 140, "{name}: {} live triangles", v.live.indices.len() / 3);
+                assert!(v.live.positions.len() <= 128, "{name}: {} live vertices", v.live.positions.len());
                 let n = v.live.positions.len();
                 assert!(v.live.normals.len() == n && v.live.uvs.len() == n, "{name}: normals and uvs per vertex");
                 assert!(v.live.uvs.iter().flatten().all(|c| (0.0..=1.0).contains(c)), "{name}: uv outside the atlas");

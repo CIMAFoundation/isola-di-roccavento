@@ -12,7 +12,7 @@
 import bevy_pbr::render::forward_io::{Vertex, VertexOutput};
 import bevy_pbr::render::mesh_functions;
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_pbr::render::mesh_view_bindings::{view, globals};
+import bevy_pbr::render::mesh_view_bindings::{view, globals, lights};
 import game::shaders::scene_light::apply_scene_fog;
 import game::shaders::noise::{hash21, value_noise};
 
@@ -150,7 +150,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let sky_reflection = (water.deep_color.rgb * 0.4 + vec3<f32>(0.55, 0.62, 0.68)) * light;
     col = mix(col, sky_reflection, fresnel * 0.6);
 
-    let sun_dir = normalize(water.sun_dir.xyz);
+    // the sun light's direction, this frame: the material keeps only what
+    // changes slowly (`crate::sea::update_water`)
+    var sun_dir = normalize(water.sun_dir.xyz);
+    if (lights.n_directional_lights > 0u) {
+        sun_dir = normalize(lights.directional_lights[0].direction_to_light);
+    }
     let half_dir = normalize(sun_dir + view_dir);
     // A calm sea gives a tight glitter; wind-chopped water spreads the same
     // light over a wider, softer streak.

@@ -967,6 +967,7 @@ pub fn damage(
     sim: Res<Sim>,
     mut buildings: ResMut<Buildings>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut frame: ResMut<crate::streamed_mesh::StreamedFrame>,
 ) {
     // The sim is flagged changed every frame (kiosk systems take it mutably);
     // the buildings only change when it has stepped.
@@ -982,7 +983,8 @@ pub fn damage(
     let Buildings { chunks, .. } = &mut *buildings;
 
     for chunk in chunks.iter_mut() {
-        let mut dirty = false;
+        // the vertices of the structures that change
+        let mut dirty = usize::MAX..0;
         for s in &mut chunk.structures {
             let lost = s.households.iter().any(|&h| lost.get(h as usize) == Some(&true));
             let threatened = s.households.iter().any(|&h| warm.get(h as usize) == Some(&true));
@@ -1002,19 +1004,25 @@ pub fn damage(
             } as u8;
             if want != s.drawn {
                 s.drawn = want;
-                dirty = true;
+                dirty.start = dirty.start.min(s.vert_start as usize);
+                dirty.end = dirty.end.max(s.vert_end as usize);
             }
         }
-        if !dirty {
+        if dirty.is_empty() {
             continue;
         }
 
-        let mut colors = chunk.base.clone();
-        for s in &chunk.structures {
-            recolor_structure(&mut colors, &chunk.base, s);
+        // Only those vertices, in place (`streamed_mesh::write_range`): the
+        // mesh prepared again was a new copy of the whole block of houses,
+        // indices too, several times a second while a village burns.
+        let Some(mesh) = meshes.get_mut_untracked(&chunk.mesh) else { continue };
+        if let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+            for s in &chunk.structures {
+                if (s.vert_start as usize) < dirty.end && s.vert_end as usize > dirty.start {
+                    recolor_structure(colors, &chunk.base, s);
+                }
+            }
         }
-        if let Some(mut mesh) = meshes.get_mut(&chunk.mesh) {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-        }
+        crate::streamed_mesh::write_range(&mut frame, chunk.mesh.id(), mesh, dirty);
     }
 }

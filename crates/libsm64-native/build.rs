@@ -5,14 +5,24 @@ fn main() {
         // wasm32-unknown-unknown has no libc: freestanding, with the small
         // headers in wasm/shim and the stubs in wasm/libc.c. Apple's clang
         // cannot target wasm; use an LLVM one (CC_wasm32_unknown_unknown wins).
+        // Homebrew may install it versioned only (`llvm@22`, 2026-11-01): the
+        // plain `llvm` first, then the `llvm@N`, newest first.
         if std::env::var_os("CC_wasm32_unknown_unknown").is_none() {
-            for dir in ["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"] {
-                let clang = std::path::Path::new(dir).join("clang");
+            for dir in llvm_dirs() {
+                let clang = dir.join("clang");
                 if clang.exists() {
                     build.compiler(clang);
-                    build.archiver(std::path::Path::new(dir).join("llvm-ar"));
+                    if std::env::var_os("AR_wasm32_unknown_unknown").is_none() {
+                        build.archiver(dir.join("llvm-ar"));
+                    }
                     break;
                 }
+            }
+        } else if std::env::var_os("AR_wasm32_unknown_unknown").is_none() {
+            // the llvm-ar next to the clang given (Apple's ar cannot index wasm objects)
+            let cc = std::path::PathBuf::from(std::env::var_os("CC_wasm32_unknown_unknown").unwrap());
+            if let Some(ar) = cc.parent().map(|d| d.join("llvm-ar")).filter(|p| p.exists()) {
+                build.archiver(ar);
             }
         }
         build
@@ -66,4 +76,27 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
         println!("cargo:rustc-link-lib=m");
     }
+}
+
+/// The `bin` of each LLVM Homebrew may have installed: `llvm`, then
+/// `llvm@N` from the highest N.
+fn llvm_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    for root in ["/opt/homebrew/opt", "/usr/local/opt"] {
+        let root = std::path::Path::new(root);
+        dirs.push(root.join("llvm/bin"));
+        let mut versioned: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let n = name.strip_prefix("llvm@")?.parse().ok()?;
+                Some((n, e.path().join("bin")))
+            })
+            .collect();
+        versioned.sort_by(|a, b| b.0.cmp(&a.0));
+        dirs.extend(versioned.into_iter().map(|(_, d)| d));
+    }
+    dirs
 }

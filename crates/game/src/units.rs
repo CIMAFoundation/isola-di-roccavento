@@ -771,6 +771,7 @@ pub fn animate_spray(
     time: Res<Time>,
     assets: Res<UnitAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut frame: ResMut<crate::streamed_mesh::StreamedFrame>,
     mut arcs: Query<(&Jet, &Mesh3d, &mut Visibility)>,
 ) {
     let now = time.elapsed_secs();
@@ -831,8 +832,11 @@ pub fn animate_spray(
                 (frame::to_bevy(p, y), width)
             })
             .collect();
-        if let Some(mut m) = meshes.get_mut(handle) {
+        // The same vertices and indices every frame: written over the old
+        // ones on the GPU (`streamed_mesh`), not a new mesh to prepare.
+        if let Some(m) = meshes.get_mut_untracked(handle.id()) {
             *m = arc_mesh(&points);
+            crate::streamed_mesh::write_range(&mut frame, handle.id(), m, 0..m.count_vertices());
         }
         if *vis != Visibility::Inherited {
             *vis = Visibility::Inherited;

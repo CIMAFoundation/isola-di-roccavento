@@ -435,7 +435,7 @@ fn update_water(
     mut materials: ResMut<Assets<WaterMaterial>>,
 ) {
     let Some(handle) = handle else { return };
-    let Some(mut mat) = materials.get_mut(&handle.0) else {
+    let Some(now) = materials.get(&handle.0).map(|m| m.uniform) else {
         return;
     };
 
@@ -443,11 +443,26 @@ fn update_water(
     // drift is the direction the wind carries things, the opposite bearing.
     let (drift, wind_ms) = wind_drift(&sim);
 
-    mat.uniform.wind = Vec4::new(drift.x, drift.y, wind_ms, 0.0);
-    mat.uniform.sun_dir = sun.direction.extend(sun.day_gate);
+    let wind = Vec4::new(drift.x, drift.y, wind_ms, 0.0);
+    let sun_dir = sun.direction.extend(sun.day_gate);
     // `.a` rides along as the water's own brightness gate (see
     // `shaders/water.wgsl`) — `sun.brightness`, not `sun.day_gate`, so the
     // sea tracks the same illuminance curve the rest of the scene is lit
     // from instead of dimming early on a perfectly sunny afternoon.
-    mat.uniform.sun_color = sun.color.extend(sun.brightness);
+    let sun_color = sun.color.extend(sun.brightness);
+    // Written only when it moved (a material changed is a new GPU buffer on
+    // WebGL2): the sun's direction is not compared, the shader takes it from
+    // the light (`water.wesl`); colours and gates by `sky::SLOW_EPS`.
+    let eps = crate::sky::SLOW_EPS;
+    let stale = now.wind != wind
+        || (now.sun_dir.w - sun_dir.w).abs() > eps
+        || (now.sun_color - sun_color).abs().max_element() > eps
+        || (cfg!(not(target_arch = "wasm32")) && now.sun_dir != sun_dir);
+    if stale {
+        if let Some(mut mat) = materials.get_mut(&handle.0) {
+            mat.uniform.wind = wind;
+            mat.uniform.sun_dir = sun_dir;
+            mat.uniform.sun_color = sun_color;
+        }
+    }
 }
