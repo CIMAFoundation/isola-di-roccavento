@@ -37,6 +37,14 @@ grafiche e di input.
   normalizzati alla stessa scala.
 - **Memoria:** si misura la memoria lineare del wasm durante uno smoke test, con un limite
   di regressione (es. 450 MiB), e si cerca dove cresce.
+- **Ospitare in una sottocartella** (itch.io, un CDN, il sito dell'ente): solo percorsi
+  relativi (un `/` iniziale rompe tutto), nomi di file con le maiuscole giuste (i CDN le
+  distinguono), `index.html` nella radice, richieste ad altri domini solo in HTTPS. Su
+  itch.io, inoltre: pagina di tipo HTML e canale segnato «giocabile nel browser» (a mano,
+  dopo il primo invio), tetti di 1000 file e 200 MB per file, pagina in bozza finché non è
+  pronta. Si carica la cartella non compressa (le patch restano piccole), con
+  `butler push <dir> <utente>/<gioco>:<canale> --userversion <commit>`; la chiave API sta
+  nei segreti della CI e non va mai nei log.
 
 ## 2. Mobile
 
@@ -76,10 +84,31 @@ grafiche e di input.
 - Nessun reset per inattività, se non c'è un chiosco presidiato. La classifica è locale
   (un file per il desktop, lo storage del browser per il web), e il menu dell'operatore la
   azzera.
-- Funziona offline una volta caricato. Nessun audio necessario.
+- Funziona offline una volta caricato. Nessun audio necessario (`serious-game-audio`).
+
+## 4b. Dati salvati (classifica, preferenze)
+
+- Si salvano **dati semplici**, mai oggetti del motore: punteggi, nome, data, lingua,
+  grafica, volumi.
+- **Un numero di versione** in ogni file (JSON con `"v": 1`); un file senza versione è la
+  versione 1, uno di una build più nuova non si tocca. Le migrazioni vanno da `v` a `v+1`,
+  in ordine, come funzioni pure.
+- **Scrittura atomica** sul desktop: file temporaneo, poi rinomina sull'originale, con una
+  copia `.bak` dell'ultimo buono. Il caricamento prova il file, poi la copia; un file
+  rotto non deve mai bloccare l'avvio né azzerare la classifica in silenzio.
+- Numeri scritti senza dipendere dalla lingua del sistema (punto decimale).
+- Sul web lo storage del browser può mancare (navigazione privata) o essere pieno: il
+  gioco lo dice una volta e continua.
+- Prova: salvare, chiudere davvero, riaprire; e caricare un file della versione precedente.
 
 ## 5. Esempio: Isola di Roccavento
 
 `scripts/build_web.sh`, `web/index.html`, `crates/datafs`, `crates/game/src/quality.rs`,
 `.github/workflows/pages.yml` e `desktop.yml`, `docs/web.md` (tutto il dettaglio verificato
 del web e del mobile).
+
+---
+
+Le note su itch.io (§1) e sui dati salvati (§4b) adattano `itch-publish` e `save-systems`
+di [awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills)
+(© 2026 Abhishek Barali e contributori, Apache-2.0). Nessun testo copiato.

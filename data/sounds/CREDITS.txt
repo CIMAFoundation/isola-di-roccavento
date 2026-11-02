@@ -1,5 +1,9 @@
-Suoni registrati del gioco (tools/sounds/prepare.py). Tutto il resto è sintetizzato in crates/sfx.
+Suoni registrati del gioco (tools/sounds/prepare.py). Il mare e i segnali sono sintetizzati in crates/sfx.
 
+fuoco.mp3: Trees and bush burning in a wildfire, Legand569, CC0 (https://freesound.org/s/659951/)
+fuoco_forte.mp3: Wild fire. Large, goochiano, CC0 (https://freesound.org/s/755366/); Fire - massive no cracking, Aegersum, CC0 (https://freesound.org/s/387924/)
+vento_alberi.mp3: wind in the trees, utente Freesound cancellato (229898), CC0 (https://freesound.org/s/150174/)
+vento_aperto.mp3: Wind is blowing into the grass on the top of the hill (Venezuela, Gran Sabana), felix.blume, CC0 (https://freesound.org/s/376965/)
 gabbiano_*.mp3: XC707075 - European Herring Gull - Larus argentatus, Sonothèque ADVL, CC0 (https://upload.wikimedia.org/wikipedia/commons/5/5c/XC707075_-_European_Herring_Gull_-_Larus_argentatus.mp3)
 cicale_1.mp3: Cicada orni, DavidDelon, public domain (https://upload.wikimedia.org/wikipedia/commons/a/a8/Cicada_orni.ogg)
 cicale_2.mp3: Cicadas in Greece, Channel R, public domain (https://upload.wikimedia.org/wikipedia/commons/f/f4/Cicadas_in_Greece.ogg)

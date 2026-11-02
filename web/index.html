@@ -252,6 +252,24 @@
         window.AudioContext = Remembered;
         const wake = () => made.forEach(c => { if (c.state === 'suspended') c.resume(); });
         for (const ev of ['pointerdown', 'keydown', 'touchend']) addEventListener(ev, wake, { capture: true });
+        // The opening's jingle (2026-11-02, crates/game/src/sound.rs): played
+        // here, on the browser's own audio thread, `delay` seconds after the
+        // call. The game's audio is filled from the main thread, and the first
+        // frames are long: through it the jingle crackled.
+        let own = null;
+        window.roccaPlayAt = (bytes, delay, volume) => {
+          own = own || new Remembered();
+          if (own.state === 'suspended') own.resume();
+          const at = own.currentTime + delay;
+          own.decodeAudioData(bytes.slice().buffer).then(buffer => {
+            const source = own.createBufferSource();
+            const gain = own.createGain();
+            source.buffer = buffer;
+            gain.gain.value = volume;
+            source.connect(gain).connect(own.destination);
+            source.start(Math.max(at, own.currentTime));
+          }).catch(e => console.warn('jingle', e));
+        };
       })();
     </script>
     <script type="module">

@@ -173,14 +173,6 @@ pub struct Kiosk {
 impl Kiosk {
     /// How many of the opening's two jingles are due: the first as the logo
     /// fades in, the second as it fades out on the island (or once it is over).
-    pub fn jingles_due(&self) -> u8 {
-        match self.opening {
-            None => 2,
-            Some(t) if t >= screens::JINGLE_ISLAND_S => 2,
-            Some(t) if t >= screens::JINGLE_S => 1,
-            Some(_) => 0,
-        }
-    }
 
     fn new(territory: Territory, data: PathBuf) -> Kiosk {
         Kiosk {

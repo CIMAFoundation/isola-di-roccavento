@@ -89,6 +89,23 @@ Il gioco insegna qualcosa solo se **nessuna strategia banale vince**: «evacua t
 subito», «tutte le squadre sull'innesco», «non fare niente». Si misura con
 `sim-game-balance`, prima di decidere soglie e meccaniche.
 
+## 5b. Provare una meccanica nuova prima di costruirla
+
+- **Una domanda sola**, se possibile sì/no («il giocatore capisce da solo che la
+  previsione si chiede con la pausa?»). Due domande, due prove.
+- Si scrive prima: domanda, azione centrale, se la prova si butta o si tiene, tempo
+  massimo, **«si tiene se…»** e **«si scarta se…»** con un segnale osservabile. Senza un
+  criterio di scarto non si scarta niente.
+- Grafica grezza, nessun menu né salvataggio: solo ciò da cui dipende la domanda. I valori
+  misurati si mostrano sullo schermo o nel runner headless.
+- Segnale tipico: una persona che non conosce il gioco compie l'azione da sola entro
+  circa 30 secondi e la ripete senza che glielo si chieda (`agent-playtest`). Se la
+  meccanica funziona solo dopo una spiegazione, va ripensata, non spiegata meglio.
+- La prova sta fuori dal gioco (un esempio, un flag spento, una cartella a parte). Se si
+  tiene, si riscrive per bene nel nucleo; il codice della prova non diventa il prodotto.
+  Il resto segue il metodo per fasi (`phased-multiagent-workflow`): accesa nel gioco solo
+  dopo la conferma dell'utente.
+
 ## 6. Esempio: Isola di Roccavento
 
 Incendio boschivo su un'isola immaginaria. RTS con pausa: ×120 o fermo. Le leve sono
@@ -107,3 +124,9 @@ Errori che sono costati iterazioni:
   civile»;
 - l'evacuazione a piedi;
 - il giocatore nel ruolo del sindaco, che è già un personaggio.
+
+---
+
+Il §5b adatta `prototype-fast` di
+[awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills)
+(© 2026 Abhishek Barali e contributori, Apache-2.0). Nessun testo copiato.

@@ -56,6 +56,20 @@ description: Integrare un modello fisico di rischio naturale (automa cellulare d
   identiche, prima e dopo, su tutti i territori: una derivazione giusta su un territorio
   può essere sbagliata sul successivo.
 
+- **Comportamento delle squadre come grafo** (albero di comportamento o simile), dati e
+  non codice. Regole che evitano bug difficili da vedere:
+  - ogni nodo risponde riuscito, fallito o *in corso*; un'azione in corso **riprende** al
+    passo dopo, e si azzera solo quando il genitore abbandona quel ramo;
+  - le condizioni di sicurezza («il fronte è vicino: ritirarsi») vanno **ricontrollate a
+    ogni passo** anche mentre un'azione è in corso (sequenza reattiva o interruzione da
+    priorità più alta), se no la squadra resta sotto il fuoco;
+  - un tempo di attesa (cooldown) non si azzera cambiando ramo;
+  - se si sceglie per punteggio (utilità), ogni criterio va normalizzato tra 0 e 1, e
+    l'azione in corso ha un piccolo bonus, così la squadra non oscilla tra due scelte
+    quasi pari;
+  - il grafo si valuta al ritmo del modello (tempo simulato), non del frame, e senza
+    allocare a ogni passo; il ramo attivo si mostra sullo schermo mentre si tara.
+
 ## 4. Previsione per il giocatore
 
 - Si usa un **ensemble dallo stato presente** e dal bollettino (N realizzazioni, isocrone
@@ -95,3 +109,9 @@ guida, spegnimento), `rocca` (il `Game`, CLI e test), `game` (Bevy). Test chiave
 - `orders_only_in_pause_and_one_evacuation_at_a_time`.
 
 Laboratorio con interruttori in `Tuning`: `docs/05-LABORATORIO.md`.
+
+---
+
+Le regole sui grafi di comportamento del §3 adattano `ai-behavior-trees-utility-ai` di
+[awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills)
+(© 2026 Abhishek Barali e contributori, Apache-2.0). Nessun testo copiato.
