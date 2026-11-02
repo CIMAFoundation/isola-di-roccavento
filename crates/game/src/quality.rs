@@ -65,6 +65,11 @@ pub struct Graphics {
     /// Share of the plants built that are shown; changes while the game runs
     /// (`adaptive` thins the forest before it takes the shadows away).
     pub veg_keep: f32,
+    /// The plants' stand-ins are their crown parts as lumps, painted by the
+    /// shader (`vegetation::meshes::lobed_mesh`), rather than one six-sided
+    /// crown: the browser's, which draws no leaf cards. Read when the scene
+    /// is built.
+    pub lobes: bool,
 }
 
 impl Graphics {
@@ -85,6 +90,7 @@ impl Graphics {
         terrain_stride: 1,
         cover_m: if cfg!(target_arch = "wasm32") { 0.0 } else { 45.0 },
         veg_keep: 1.0,
+        lobes: false,
     };
     pub const MEDIA: Graphics = Graphics {
         dof: false,
@@ -136,29 +142,32 @@ impl Graphics {
     /// The same level with what was built at launch kept (it cannot change
     /// until the next launch, and a new town rebuilds the scene from it).
     pub fn built_as(self, now: &Graphics) -> Graphics {
-        Graphics { vegetation: now.vegetation, terrain_stride: now.terrain_stride, cover_m: now.cover_m, ..self }
+        Graphics { vegetation: now.vegetation, terrain_stride: now.terrain_stride, cover_m: now.cover_m, lobes: now.lobes, ..self }
     }
 
     /// Browser budget, also on desktop: no post-processing or shadow passes.
+    /// The plants as lobed stand-ins (`lobes`), twice as many as until
+    /// 2026-11-02 (0.025).
     pub const WEB: Graphics = Graphics {
         shadows: false, shadow_map: 256, cascades: 1,
-        vegetation: 0.025, lod_m: 0.0, terrain_stride: 4, cover_m: 0.0,
+        vegetation: 0.05, lod_m: 0.0, terrain_stride: 4, cover_m: 0.0, lobes: true,
         ..Graphics::BASSA
     };
 
     /// Browser on a computer: the same as `WEB` plus sun shadows (two cascades)
-    /// and a finer terrain and a few more plants. Still no HDR, DoF, bloom or MSAA.
+    /// and a finer terrain and more plants. Still no HDR, DoF, bloom or MSAA.
     pub const WEB_MEDIA: Graphics = Graphics {
         shadows: true, shadow_map: 1024, cascades: 2, shadow_distance: 1800.0,
-        vegetation: 0.05, terrain_stride: 2,
+        vegetation: 0.08, terrain_stride: 2,
         ..Graphics::WEB
     };
 
     /// The top of the browser's adaptive ladder on a computer: `WEB_MEDIA` with
     /// the shadows of `MEDIA` (three cascades, 2048) and twice the plants;
-    /// `adaptive` brings it down (the plants are hidden, not unbuilt).
+    /// `adaptive` brings it down (the plants are hidden, not unbuilt, and not
+    /// drawn: `vegetation::PlantScene::thin_by_count`).
     pub const WEB_TOP: Graphics = Graphics {
-        cascades: 3, shadow_distance: 2500.0, shadow_map: 2048, vegetation: 0.10,
+        cascades: 3, shadow_distance: 2500.0, shadow_map: 2048, vegetation: 0.14,
         ..Graphics::WEB_MEDIA
     };
 
@@ -244,6 +253,7 @@ impl Graphics {
                 ("veg", Some(v)) => self.vegetation = v.max(0.0),
                 ("cover", Some(m)) => self.cover_m = m.max(0.0),
                 ("cover", None) => self.cover_m = if on { Graphics::ALTA.cover_m } else { 0.0 },
+                ("lobes", _) => self.lobes = on,
                 _ => warn!("KIOSK_GFX: «{item}» non riconosciuto"),
             }
         }
@@ -254,7 +264,7 @@ impl Graphics {
         // the plant density and the terrain stride apply only at launch, and
         // the antialiasing is chosen apart, so they are not compared
         let same = |p: &Graphics| {
-            Graphics { vegetation: self.vegetation, terrain_stride: self.terrain_stride, cover_m: self.cover_m, veg_keep: self.veg_keep, msaa: self.msaa, smaa: self.smaa, ..*p } == *self
+            Graphics { vegetation: self.vegetation, terrain_stride: self.terrain_stride, cover_m: self.cover_m, veg_keep: self.veg_keep, lobes: self.lobes, msaa: self.msaa, smaa: self.smaa, ..*p } == *self
         };
         [("alta", &Graphics::ALTA), ("media", &Graphics::MEDIA), ("bassa", &Graphics::BASSA)]
             .into_iter()

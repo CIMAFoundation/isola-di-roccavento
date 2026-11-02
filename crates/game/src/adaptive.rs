@@ -193,6 +193,7 @@ fn rung(ladder: &[Graphics], step: usize, now: &Graphics) -> Graphics {
         vegetation: now.vegetation,
         terrain_stride: now.terrain_stride,
         cover_m: now.cover_m,
+        lobes: now.lobes,
         ..ladder[step.min(ladder.len() - 1)]
     }
 }

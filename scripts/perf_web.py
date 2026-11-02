@@ -8,11 +8,19 @@
       wasm built with function names (docs/web.md, «CPU per frame»), else wasm-function[N].
   .venv/bin/python scripts/perf_web.py gl <site> [--mode title|game]
       WebGL2 calls per frame, and draws per shader program (Chromium).
+  .venv/bin/python scripts/perf_web.py shots <site> --out <dir> --view <spec> [--view ...]
+      Screenshots at fixed framings (Chromium), to compare two builds: each <spec> is
+      `name:title|game@<min>:<x>:<y>:<distance>:<yaw>:<pitch>` (focus in scenario
+      metres, radians; `game@60` an hour into the game). Needs a build with
+      `playtest::camera` (2026-11-02).
 
 <site> is a built site (target/web, or $CARGO_TARGET_DIR/web). Profile `q=bassa`
 (the phone's) unless --query says otherwise. «title» waits --settle seconds on the
 title (the demo fire burns there); «game» starts a game and lets it run, the clock
 as for a player (the playtest bridge only presses the buttons, then it is removed).
+The viewport is a phone's (390x844 at 3x, touch) unless --viewport says otherwise:
+1000 px wide or more is a computer (mouse), e.g. `--viewport 1440x900 --dpr 1
+--query q=media`.
 """
 import argparse, collections, functools, http.server, json, re, statistics, threading
 from pathlib import Path
@@ -99,16 +107,57 @@ def serve(site):
     return server
 
 
-def open_game(pw, browser_name, site, args, init_script=None):
-    """A page at the state asked (`--mode`), its clock running. Returns (browser, page, server)."""
-    server = serve(site)
+def new_page(pw, browser_name, args, init_script=None):
+    """A browser and a page with the viewport asked (a phone's by default)."""
     launch = {'args': ['--enable-gpu', '--use-angle=metal']} if browser_name == 'chromium' else {}
     browser = getattr(pw, browser_name).launch(headless=True, **launch)
-    page = browser.new_page(viewport={'width': 390, 'height': 844}, device_scale_factor=3, is_mobile=True, has_touch=True, locale='it-IT')
+    w, h = map(int, args.viewport.split('x'))
+    phone = w < 1000
+    dpr = args.dpr if args.dpr else (3 if phone else 1)
+    page = browser.new_page(viewport={'width': w, 'height': h}, device_scale_factor=dpr, is_mobile=phone, has_touch=phone, locale='it-IT')
     page.set_default_timeout(240000)
     page.add_init_script(MUTE)
     if init_script:
         page.add_init_script(init_script)
+    return browser, page, phone
+
+
+def frames(page, n=4):
+    """Wait for `n` frames of the game (the playtest bridge counts them)."""
+    f = page.evaluate('window.roccaPlaytest.frame')
+    page.wait_for_function('f => window.roccaPlaytest.frame >= f', arg=f + n)
+
+
+def start_game(page, phone):
+    """From the title, through name and tutorial choice, into a running game."""
+    def tap(*labels):
+        # the title's «Gioca» shows only after the opening sequence
+        page.wait_for_function('ls => (window.roccaPlaytest.state?.controls || []).some(c => ls.includes(c.label) && c.enabled)', arg=list(labels), timeout=60000)
+        frames(page)
+        cs = [c for c in page.evaluate('window.roccaPlaytest.state')['controls'] if c['label'] in labels and c['enabled']]
+        assert cs, labels
+        if phone:
+            page.touchscreen.tap(cs[0]['x'], cs[0]['y'])
+        else:
+            page.mouse.click(cs[0]['x'], cs[0]['y'])
+        frames(page, 8)
+    tap('Gioca'); tap('Nome')
+    if phone:
+        # the phone types in an HTML field (its keyboard), the computer in the game's
+        page.locator('#player-name').fill('Profilo')
+        page.get_by_role('button', name='Continua', exact=True).click()
+    else:
+        page.keyboard.type('Profilo')
+    frames(page, 10)
+    tap('Inizia'); frames(page, 20)
+    tap('Parti'); frames(page, 60)
+    tap('Riprendi'); frames(page, 10)
+
+
+def open_game(pw, browser_name, site, args, init_script=None):
+    """A page at the state asked (`--mode`), its clock running. Returns (browser, page, server)."""
+    server = serve(site)
+    browser, page, phone = new_page(pw, browser_name, args, init_script)
     base = f'http://127.0.0.1:{server.server_port}/'
     if args.mode == 'title':
         page.goto(f'{base}?{args.query}')
@@ -118,23 +167,7 @@ def open_game(pw, browser_name, site, args, init_script=None):
     else:
         page.goto(f'{base}?playtest=1&{args.query}')
         page.wait_for_function('window.roccaPlaytest?.state && !document.querySelector("#loading")')
-
-        def frames(n=4):
-            f = page.evaluate('window.roccaPlaytest.frame')
-            page.wait_for_function('f => window.roccaPlaytest.frame >= f', arg=f + n)
-
-        def tap(*labels):
-            frames()
-            cs = [c for c in page.evaluate('window.roccaPlaytest.state')['controls'] if c['label'] in labels and c['enabled']]
-            assert cs, labels
-            page.touchscreen.tap(cs[0]['x'], cs[0]['y'])
-            frames(8)
-        tap('Gioca'); tap('Nome')
-        page.locator('#player-name').fill('Profilo')
-        page.get_by_role('button', name='Continua', exact=True).click(); frames(10)
-        tap('Inizia'); frames(20)
-        tap('Parti'); frames(60)
-        tap('Riprendi'); frames(10)
+        start_game(page, phone)
         page.evaluate('delete window.roccaPlaytest')
     page.wait_for_timeout(int(args.settle * 1000))
     return browser, page, server
@@ -169,6 +202,42 @@ def cmd_gl(args):
     print('draws per frame by program (vertices drawn per frame):')
     for k, (d, v) in sorted(res['draws'], key=lambda kv: -kv[1][0]):
         print(f'{d / n:7.1f}  {v / n / 1000:8.1f} k  {k}')
+
+
+def cmd_shots(args):
+    args.out.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        server = serve(args.sites[0])
+        browser, page, phone = new_page(pw, 'chromium', args)
+        logs = []
+        page.on('console', lambda m: logs.append(m.text))
+        page.goto(f'http://127.0.0.1:{server.server_port}/?playtest=1&{args.query}')
+        page.wait_for_function('window.roccaPlaytest?.state && !document.querySelector("#loading")')
+        page.wait_for_timeout(int(args.settle * 1000))
+        in_game, minutes = False, 0.0
+        for spec in args.view:
+            name, phase, x, y, d, yaw, pitch = spec.split(':')
+            if phase.startswith('game'):
+                if not in_game:
+                    page.evaluate('delete window.roccaPlaytest.camera')
+                    start_game(page, phone)
+                    in_game = True
+                want = float(phase.partition('@')[2] or 0)
+                if want > minutes:
+                    page.evaluate(f'window.roccaPlaytest.advance_s = {(want - minutes) * 60}')
+                    page.wait_for_function('window.roccaPlaytest.advance_s === 0')
+                    minutes = want
+            elif in_game:
+                raise SystemExit(f'{name}: the title views come before the game ones')
+            page.evaluate(f'window.roccaPlaytest.camera = {{x: {x}, y: {y}, distance: {d}, yaw: {yaw}, pitch: {pitch}}}')
+            frames(page, args.hold)
+            page.screenshot(path=str(args.out / f'{name}.png'))
+            state = page.evaluate('window.roccaPlaytest.state')
+            print(f"{name}: phase {state['phase']}, t {state['time_s'] / 60:.0f} min, camera {state['camera']}", flush=True)
+        browser.close(); server.shutdown()
+    for line in logs:
+        if 'vegetation' in line:
+            print(re.sub(r'%c|color: [^;]*;?|background: [^;]*;?|font-style: \w+', '', line).strip())
 
 
 def system_of(name):
@@ -216,15 +285,19 @@ def cmd_cpu(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('what', choices=['frames', 'cpu', 'gl'])
+    ap.add_argument('what', choices=['frames', 'cpu', 'gl', 'shots'])
     ap.add_argument('sites', type=Path, nargs='+')
     ap.add_argument('--mode', choices=['title', 'game'], default='title')
     ap.add_argument('--settle', type=float, default=25, help='seconds before measuring (the scene builds, caches fill)')
     ap.add_argument('--seconds', type=float, default=10)
     ap.add_argument('--query', default='q=bassa')
     ap.add_argument('--out', type=Path, default=Path('out/perf'))
+    ap.add_argument('--viewport', default='390x844', help='CSS pixels; 1000 wide or more is a computer')
+    ap.add_argument('--dpr', type=float, default=0, help='device pixel ratio (default 3 on a phone, 1 on a computer)')
+    ap.add_argument('--view', action='append', default=[], help='shots: name:title|game@<min>:x:y:distance:yaw:pitch')
+    ap.add_argument('--hold', type=int, default=90, help='shots: frames at the view before the picture')
     args = ap.parse_args()
-    {'frames': cmd_frames, 'cpu': cmd_cpu, 'gl': cmd_gl}[args.what](args)
+    {'frames': cmd_frames, 'cpu': cmd_cpu, 'gl': cmd_gl, 'shots': cmd_shots}[args.what](args)
 
 
 if __name__ == '__main__':

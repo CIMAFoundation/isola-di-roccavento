@@ -12,7 +12,8 @@ struct PlantUniform {
     // w: real seconds (wrapped), for sway and flicker
     wind: vec4<f32>,
     // x = 1: a burnt crown is gone and its remains show (desktop); 0: a
-    // burnt plant turns all charcoal
+    // burnt plant turns all charcoal, its crown shrunk (the browser);
+    // yz: the size of a canopy tile in the atlas (`PLANT_CANOPY`)
     look: vec4<f32>,
 }
 
@@ -67,6 +68,9 @@ const GONE: vec4<f32> = vec4<f32>(2.0, 2.0, 2.0, 1.0);
 
 struct Placed {
     world: vec3<f32>,
+    // where the vertex is from the plant's foot, turned with it but before
+    // the wind: what stays put on a swaying crown (`PLANT_CANOPY`)
+    rest: vec3<f32>,
     normal: vec3<f32>,
     // -1: standing; 0..1: burning (how far); 2: burnt
     burn: f32,
@@ -107,16 +111,19 @@ fn place(v: PlantVertex) -> Placed {
     out.gone = gone;
 
     var local = v.position;
-    if kind_leaf(kind) && burn >= 0.0 && burn <= 1.0 && remains {
-        // late in the burn what is left of the crown slumps toward the trunk
-        let k = 1.0 - 0.6 * smoothstep(0.55, 1.0, burn);
+    if kind_leaf(kind) && burn >= 0.0 && (burn <= 1.0 || !remains) {
+        // late in the burn what is left of the crown slumps toward the trunk;
+        // without remains to take its place (the browser) the charred crown
+        // stays so, a tuft among the bare limbs rather than a black ball
+        let k = 1.0 - 0.6 * smoothstep(0.55, 1.0, min(burn, 1.0));
         local = vec3<f32>(local.x * k, local.y * mix(1.0, 0.92, 1.0 - k), local.z * k);
     }
     let s = vec3<f32>(v.size.x, v.size.y, v.size.x);
     let p = local * s;
     let c = cos(v.foot_yaw.w);
     let sn = sin(v.foot_yaw.w);
-    var world = v.foot_yaw.xyz + vec3<f32>(c * p.x + sn * p.z, p.y, -sn * p.x + c * p.z);
+    out.rest = vec3<f32>(c * p.x + sn * p.z, p.y, -sn * p.x + c * p.z);
+    var world = v.foot_yaw.xyz + out.rest;
 
     // wind: the crown leans downwind and sways in gusts, the leaves flutter;
     // a burning plant shakes in its own draught. Weighted by height, so the

@@ -211,6 +211,8 @@ struct PlantKey {
     pass: Pass,
     cutout: bool,
     double_sided: bool,
+    /// The leaves are painted with the canopy tile (`PLANT_CANOPY`).
+    canopy: bool,
     /// The main pass looks the sun's shadows up (`PLANT_SHADOWS`).
     receive_shadows: bool,
 }
@@ -319,6 +321,9 @@ impl SpecializedRenderPipeline for PlantPipeline {
         }
         if key.receive_shadows {
             defs.push("PLANT_SHADOWS".into());
+        }
+        if key.canopy {
+            defs.push("PLANT_CANOPY".into());
         }
         d.vertex.shader = SHADER;
         d.vertex.entry_point = Some("vertex".into());
@@ -563,6 +568,9 @@ struct Draw {
     group: u32,
     /// Drawn for the plants the fire has come to ([`GpuRemains`]), not the whole group.
     remains: bool,
+    /// The group's plants drawn, from its first (`Group::kept`); the
+    /// remains draw all theirs.
+    count: u32,
 }
 
 /// What each view draws this frame, by render-world view entity.
@@ -626,10 +634,18 @@ fn queue_plants(
     let shadow_draw = shadow_draws.read().id::<DrawPlantsShadow>();
     let lod_m = plants.lod_m;
     let far_m = (lod_m * FAR_TIER).max(FAR_TIER_MIN_M);
+    // the plants of each group drawn: all, or those the thinning keeps
+    let keep = plants.uniform[2];
+    let drawn = |g: usize| {
+        let group = &scene.groups[g];
+        if scene.thin_by_count { group.kept(keep) } else { group.count }
+    };
     let mut pipeline_for = |view: MeshPipelineKey, pass: Pass, mesh: u32| {
         let m = &scene.meshes[mesh as usize];
         let receive_shadows = pass == Pass::Main && plants.shadows;
-        let key = PlantKey { view, pass, cutout: m.cutout, double_sided: m.double_sided, receive_shadows };
+        // the depth-only passes paint nothing
+        let canopy = m.canopy && pass == Pass::Main;
+        let key = PlantKey { view, pass, cutout: m.cutout, double_sided: m.double_sided, canopy, receive_shadows };
         specialized.specialize(&cache, pipeline, key)
     };
     for (view_entity, view, lights) in &views {
@@ -662,12 +678,13 @@ fn queue_plants(
                 let group = &scene.groups[g];
                 let tier = |t: Tier| group.tiers[t as usize];
                 let plant = if near { tier(Tier::Full) } else if far { tier(Tier::Far) } else { None }.or(tier(Tier::Proxy));
-                if let Some(mesh) = plant {
-                    list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: false });
+                let count = drawn(g);
+                if let Some(mesh) = plant.filter(|_| count > 0) {
+                    list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: false, count });
                 }
                 if plants.fire.get(g).is_some_and(|f| !f.2.is_empty()) {
                     if let Some(mesh) = if near { tier(Tier::RemainsNear) } else { None }.or(tier(Tier::RemainsFar)) {
-                        list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: true });
+                        list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: true, count: 0 });
                     }
                 }
             }
@@ -737,12 +754,13 @@ fn queue_plants(
                     let group = &scene.groups[g];
                     let tier = |t: Tier| group.tiers[t as usize];
                     let plant = if full { tier(Tier::Full) } else if far { tier(Tier::Far) } else { None }.or(tier(Tier::Proxy));
-                    if let Some(mesh) = plant {
-                        list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: false });
+                    let count = drawn(g);
+                    if let Some(mesh) = plant.filter(|_| count > 0) {
+                        list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: false, count });
                     }
                     if full && plants.fire.get(g).is_some_and(|f| !f.2.is_empty()) {
                         if let Some(mesh) = tier(Tier::RemainsNear) {
-                            list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: true });
+                            list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: true, count: 0 });
                         }
                     }
                 }
@@ -810,7 +828,7 @@ impl<P: PhaseItem, const PASS: u8> RenderCommand<P> for DrawPlants<PASS> {
                 let Some(r) = group.remains.as_ref() else { continue };
                 (&r.instances, &r.fire, r.count)
             } else {
-                (&group.instances, &group.fire, group.count)
+                (&group.instances, &group.fire, d.count.min(group.count))
             };
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_vertex_buffer(1, instances.slice(..));
