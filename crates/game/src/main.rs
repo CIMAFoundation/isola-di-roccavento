@@ -76,8 +76,10 @@ mod window_state;
 mod memory;
 #[cfg(target_arch = "wasm32")]
 mod web_input;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
 mod web_gpu;
+#[cfg(any(feature = "webgpu", test))]
+mod webgpu_shaders;
 
 use bevy::post_process::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -233,8 +235,10 @@ fn main() -> anyhow::Result<()> {
         app.add_plugins(bench::BenchPlugin);
     }
     app.add_plugins(streamed_mesh::StreamedMeshPlugin);
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
     app.add_plugins(web_gpu::WebGpuPlugin);
+    #[cfg(feature = "webgpu")]
+    app.add_plugins(webgpu_shaders::WebGpuShadersPlugin);
     app.add_plugins(mario::MarioPlugin);
     app.add_plugins(pad::PadPlugin);
     app.add_plugins(sound::SoundPlugin);
@@ -249,7 +253,7 @@ fn main() -> anyhow::Result<()> {
     app.add_systems(Update, quality_live::apply_live.run_if(resource_changed::<quality::Graphics>.and_then(not(resource_added::<quality::Graphics>))));
     // MSAA is per camera since Bevy 0.15: every camera takes the profile's.
     app.add_systems(PostUpdate, quality_live::msaa_on_new_cameras);
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
     app.add_systems(PostUpdate, camera::web_near_plane.before(bevy::camera::CameraUpdateSystems));
     if let Some(a) = auto {
         app.insert_resource(a);
@@ -313,11 +317,11 @@ fn setup_scene(
     // Metal has no multi-draw-indirect: the GPU-driven path only adds an indirect
     // buffer per batch (measured 2026-10-21: frame 16.5 -> 13.5 ms at 1600x1000).
     // WebGL2 has no indirect drawing at all.
-    if !cfg!(target_arch = "wasm32") {
+    if !quality::WEBGL2 {
         camera.insert(bevy::render::view::NoIndirectDrawing);
     }
-    // an HDR target on the desktop (WebGL2 has no multisampled HDR targets)
-    if !cfg!(target_arch = "wasm32") {
+    // an HDR target on the desktop and WebGPU (WebGL2 has no multisampled HDR targets)
+    if !quality::WEBGL2 {
         camera.insert(bevy::camera::Hdr);
     }
     if gfx.smaa {

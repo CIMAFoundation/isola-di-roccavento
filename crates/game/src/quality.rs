@@ -30,6 +30,12 @@
 
 use bevy::prelude::*;
 
+/// The browser build on WebGL2, the one for phones and for browsers without
+/// WebGPU: no multisampled HDR target, depth in OpenGL's range, 16 texture
+/// units, a GPU buffer per changed mesh. The WebGPU build (feature `webgpu`,
+/// computers only) draws as the desktop does.
+pub const WEBGL2: bool = cfg!(all(target_arch = "wasm32", not(feature = "webgpu")));
+
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct Graphics {
     /// Depth of field (and the depth prepass that only it needs).
@@ -89,11 +95,11 @@ impl Graphics {
         cascades: 4,
         shadow_distance: 4000.0,
         shadow_map: 2048,
-        vegetation: if cfg!(target_arch = "wasm32") { 0.12 } else { 0.5 },
+        vegetation: if WEBGL2 { 0.12 } else { 0.5 },
         lod_m: 1400.0,
         terrain_shadows: true,
         terrain_stride: 1,
-        cover_m: if cfg!(target_arch = "wasm32") { 0.0 } else { 45.0 },
+        cover_m: if WEBGL2 { 0.0 } else { 45.0 },
         veg_keep: 1.0,
         render_scale: 1.0,
         lobes: false,
@@ -105,9 +111,9 @@ impl Graphics {
         smaa: true,
         cascades: 3,
         shadow_distance: 2500.0,
-        vegetation: if cfg!(target_arch = "wasm32") { 0.12 } else { 0.35 },
+        vegetation: if WEBGL2 { 0.12 } else { 0.35 },
         lod_m: 1000.0,
-        cover_m: if cfg!(target_arch = "wasm32") { 0.0 } else { 35.0 },
+        cover_m: if WEBGL2 { 0.0 } else { 35.0 },
         ..Graphics::ALTA
     };
     pub const BASSA: Graphics = Graphics {
@@ -117,9 +123,9 @@ impl Graphics {
         cascades: 2,
         shadow_distance: 1800.0,
         shadow_map: 1024,
-        vegetation: if cfg!(target_arch = "wasm32") { 0.08 } else { 0.2 },
+        vegetation: if WEBGL2 { 0.08 } else { 0.2 },
         lod_m: 600.0,
-        cover_m: if cfg!(target_arch = "wasm32") { 0.0 } else { 22.0 },
+        cover_m: if WEBGL2 { 0.0 } else { 22.0 },
         ..Graphics::ALTA
     };
 
@@ -183,6 +189,10 @@ impl Graphics {
     pub fn from_env() -> Graphics {
         if cfg!(target_arch = "wasm32") {
             let mut g = match web_profile().as_deref() {
+                // WebGPU: the desktop's levels, `adaptive` from the top
+                Some("bassa") if !WEBGL2 => Graphics::BASSA,
+                Some("media") if !WEBGL2 && !Graphics::auto_wanted() => Graphics::MEDIA,
+                _ if !WEBGL2 => Graphics::ALTA,
                 Some("media") if Graphics::auto_wanted() => Graphics::WEB_TOP,
                 Some("media") => Graphics::WEB_MEDIA,
                 _ => Graphics::WEB,
@@ -299,7 +309,7 @@ impl Graphics {
 
     pub fn msaa(&self) -> Msaa {
         // WebGL2 has no multisampled HDR targets.
-        if cfg!(target_arch = "wasm32") || self.msaa < 4 { Msaa::Off } else { Msaa::Sample4 }
+        if WEBGL2 || self.msaa < 4 { Msaa::Off } else { Msaa::Sample4 }
     }
 }
 

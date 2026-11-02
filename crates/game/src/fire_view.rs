@@ -45,9 +45,9 @@ const FIRE_MAP_MIN_INTERVAL_S: f32 = 0.15;
 const FLAMING_S: f32 = 900.0;
 
 /// Caps, all of them per-frame geometry budgets rather than physical limits.
-const MAX_FLAME_CELLS: usize = if cfg!(target_arch = "wasm32") { 600 } else { 3_500 };
-const MAX_SMOKE: usize = if cfg!(target_arch = "wasm32") { 100 } else { 800 };
-const MAX_EMBERS: usize = if cfg!(target_arch = "wasm32") { 60 } else { 525 };
+const MAX_FLAME_CELLS: usize = if crate::quality::WEBGL2 { 600 } else { 3_500 };
+const MAX_SMOKE: usize = if crate::quality::WEBGL2 { 100 } else { 800 };
+const MAX_EMBERS: usize = if crate::quality::WEBGL2 { 60 } else { 525 };
 
 /// Shape of the firebrand's flight, mirroring `compute_spotting` in
 /// `propagator-core/src/kernel.rs` — the median landing distance is linear in

@@ -25,7 +25,7 @@ use scenario::{Pos, Scenario};
 /// and road network retain their full data. Each doubling takes a quarter of
 /// the texels (native 2 m: 85 MB with the mipmaps).
 fn resolution(gfx: &crate::quality::Graphics) -> f32 {
-    match (cfg!(target_arch = "wasm32"), gfx.terrain_stride) {
+    match (crate::quality::WEBGL2, gfx.terrain_stride) {
         (false, 1) => 2.0,
         (_, s) if s >= 4 => 8.0,
         _ => 4.0,

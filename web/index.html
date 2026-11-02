@@ -314,6 +314,29 @@
         return phone ? 'bassa' : 'media';
       })();
 
+      // The WebGPU build draws as the desktop does (HDR, MSAA, bloom, depth of
+      // field, the authored plants); it is loaded on computers whose browser
+      // gives a WebGPU adapter, the WebGL2 one everywhere else. `?gpu=0` keeps
+      // WebGL2, `?gpu=1` asks for WebGPU on any device. build_web.sh sets
+      // `webgpuBuilt` to false when it built WebGL2 only.
+      const webgpuBuilt = true;
+      const webgpu = (async () => {
+        const want = new URLSearchParams(location.search).get('gpu');
+        if (!webgpuBuilt || want === '0' || (want !== '1' && window.roccaProfile !== 'media')) return false;
+        try { return !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch (e) { return false; }
+      })();
+      // The WebGPU build calls this when its renderer stops on an error: the
+      // same page again, on WebGL2.
+      window.roccaWebGpuFailed = () => {
+        const url = new URL(location.href);
+        if (url.searchParams.get('gpu') === '0') return;
+        url.searchParams.set('gpu', '0');
+        // straight into the game, as the player had already pressed «Gioca»
+        try { sessionStorage.setItem('roccaStart', '1'); } catch (e) {}
+        leaving = true;
+        location.replace(url);
+      };
+
       // Keep compressed data on phones and avoid overlapping compilation,
       // decompression and many downloads during the scene's startup peak.
       const lowMemory = window.roccaProfile === 'bassa';
@@ -523,7 +546,17 @@
         document.body.classList.add('playing');
         intro.classList.add('leaving');
         setTimeout(() => intro.remove(), 400);
-        const { default: init } = await retried('game.js', () => import('./game.js'));
+        const gpu = await webgpu;
+        window.roccaWebGpu = gpu;
+        // a panic in the WebGPU build (a device it cannot have, a shader this
+        // browser rejects) also falls back: Rust prints it with console.error
+        if (gpu) {
+          const error = console.error;
+          console.error = (...a) => { error(...a); if (String(a[0]).includes('panicked at')) window.roccaWebGpuFailed(); };
+        }
+        const { default: init } = gpu
+          ? await retried('game_gpu.js', () => import('./game_gpu.js'))
+          : await retried('game.js', () => import('./game.js'));
         // On phones compilation finishes before loading data; on computers they overlap.
         (async () => {
           // The wasm also comes gzipped (build_web.sh), inflated here as it
@@ -531,9 +564,9 @@
           // Streaming needs the type application/wasm; without it the whole
           // file is compiled at once.
           // A download cut halfway (seen on CIMA's host) is tried again.
-          const wasmUrl = './game_bg.wasm';
+          const wasmUrl = gpu ? './game_gpu_bg.wasm' : './game_bg.wasm';
           const zipped = typeof DecompressionStream === 'function';
-          const compile = () => download(zipped ? wasmUrl.replace('.wasm', '.wasm.gz') : wasmUrl, 'rocca-wasm', true).then(r =>
+          const compile = () => download(zipped ? wasmUrl.replace('.wasm', '.wasm.gz') : wasmUrl, gpu ? 'rocca-wasm-gpu' : 'rocca-wasm', true).then(r =>
             zipped
               ? WebAssembly.compileStreaming(new Response(r.body.pipeThrough(new DecompressionStream('gzip')), { headers: { 'Content-Type': 'application/wasm' } }))
               : (r.headers.get('Content-Type') || '').startsWith('application/wasm')
@@ -562,6 +595,7 @@
       document.querySelectorAll('.play').forEach(button => button.addEventListener('click', start));
       // The playtest scripts drive the game itself: no intro page for them.
       if (window.roccaPlaytest) start();
+      try { if (sessionStorage.getItem('roccaStart')) { sessionStorage.removeItem('roccaStart'); start(); } } catch (e) {}
     </script>
   </body>
 </html>

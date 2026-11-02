@@ -9,6 +9,9 @@ description = "The wildfire kiosk demo: Bevy front end"
 # Mario (docs/MARIO.md) needs libsm64, a C build: the desktop CI builds leave it out.
 default = ["mario"]
 mario = ["dep:libsm64-native"]
+# The browser build for WebGPU instead of WebGL2 (docs/web.md, «WebGPU»): the
+# page loads it on computers whose browser has WebGPU.
+webgpu = ["bevy/webgpu"]
 
 [dependencies]
 scenario.workspace = true

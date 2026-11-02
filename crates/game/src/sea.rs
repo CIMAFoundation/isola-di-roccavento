@@ -36,7 +36,7 @@ const WATER_SHADER_HANDLE: Handle<Shader> =
 /// Lattice spacing for the water mesh: coarser than the 5 m terrain posting,
 /// since the wave shapes it carries (tens of metres) do not need it and the
 /// fine chop is a fragment-shader noise wobble, not geometry (see the wgsl).
-const WATER_STRIDE: usize = if cfg!(target_arch = "wasm32") { 12 } else { 3 };
+const WATER_STRIDE: usize = if crate::quality::WEBGL2 { 12 } else { 3 };
 const WATER_CHUNK: usize = 64;
 
 /// Must agree with `terrain_mesh::ground_color`'s own sea threshold: this is
@@ -59,7 +59,7 @@ const WATER_BASE_Y: f32 = 0.8;
 /// window, so everything outside the window is sea: one surface, one shader,
 /// so no seam can show at the horizon.
 const SEA_EXTEND_M: f32 = 700.0;
-const OPEN_SEA_STRIDE_M: f32 = if cfg!(target_arch = "wasm32") { 600.0 } else { 150.0 };
+const OPEN_SEA_STRIDE_M: f32 = if crate::quality::WEBGL2 { 600.0 } else { 150.0 };
 /// Half-extent of the open sea's lattice and the radius it is trimmed to.
 const SEA_OUT_M: f32 = 32_000.0;
 const OPEN_SEA_RADIUS_M: f32 = 30_000.0;
@@ -457,7 +457,7 @@ fn update_water(
     let stale = now.wind != wind
         || (now.sun_dir.w - sun_dir.w).abs() > eps
         || (now.sun_color - sun_color).abs().max_element() > eps
-        || (cfg!(not(target_arch = "wasm32")) && now.sun_dir != sun_dir);
+        || (!crate::quality::WEBGL2 && now.sun_dir != sun_dir);
     if stale {
         if let Some(mut mat) = materials.get_mut(&handle.0) {
             mat.uniform.wind = wind;

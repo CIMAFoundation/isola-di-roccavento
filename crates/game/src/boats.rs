@@ -111,7 +111,7 @@ fn spawn_boats(
     };
 
     // the moorings the factory laid along the pier, bows into the wind
-    let island = std::fs::read_to_string(sim.data.join("scenarios").join(sim.scn.id.as_str()).join("island.json"))
+    let island = datafs::read_to_string(sim.data.join("scenarios").join(sim.scn.id.as_str()).join("island.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
     let moorings: Vec<Pos> = island

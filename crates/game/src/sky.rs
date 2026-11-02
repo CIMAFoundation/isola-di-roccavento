@@ -471,7 +471,7 @@ const MOON_AMBIENT_TINT: [(f32, [f32; 3]); 3] = [
 /// written again. A material changed is a new GPU buffer on WebGL2
 /// (2026-11-01, the iPhone): in the browser a change under half an 8-bit
 /// step waits; on the desktop every change is written, as before.
-pub(crate) const SLOW_EPS: f32 = if cfg!(target_arch = "wasm32") { 0.5 / 255.0 } else { 0.0 };
+pub(crate) const SLOW_EPS: f32 = if crate::quality::WEBGL2 { 0.5 / 255.0 } else { 0.0 };
 
 /// The sky has to be written again: a colour or gate moved, the clouds'
 /// velocity changed, or the time they drift from is old or wrapped. The sun's

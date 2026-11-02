@@ -240,10 +240,10 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
     let w = scn.world;
     let (rows, cols) = (w.fire_rows, w.fire_cols);
     // the browser: the whole island one tile of proxies, never far from the camera
-    let tile_cells = if cfg!(target_arch = "wasm32") { rows.max(cols) } else { TILE_CELLS };
+    let tile_cells = if crate::quality::WEBGL2 { rows.max(cols) } else { TILE_CELLS };
     let full = gfx.lod_m > 0.0;
     let far = tile_cells < rows.max(cols);
-    let remains = !cfg!(target_arch = "wasm32");
+    let remains = !crate::quality::WEBGL2;
     // the browser's stand-ins: the crown parts as lumps (`meshes::lobed_mesh`);
     // they cast their own shadows (2026-11-02: the cheapest crowns stood out
     // of the lumps and shadowed them in hard notches)

@@ -18,17 +18,24 @@ command -v wasm-bindgen >/dev/null || {
 
 # libsm64 (Mario) is C: it needs an LLVM clang that targets wasm (brew install llvm);
 # crates/libsm64-native/build.rs finds it, or set CC_wasm32_unknown_unknown.
+# Two builds of the same code: WebGL2 (game.*, phones and browsers without
+# WebGPU) and WebGPU (game_gpu.*, computers: drawn as on the desktop). Bevy
+# chooses the backend when compiling, so the page chooses the build. The
+# WebGPU one has a target directory of its own, or each would rebuild the other.
+# `ROCCA_WEB_GPU=0` skips it (the page then always loads WebGL2).
+gpu="${ROCCA_WEB_GPU:-1}"
 cargo build --package game --target wasm32-unknown-unknown --profile wasm-release
+if [ "$gpu" = 1 ]; then
+  cargo build --package game --target wasm32-unknown-unknown --profile wasm-release --features webgpu --target-dir "$tgt/webgpu"
+fi
 rm -rf "$out"
 mkdir -p "$out"
 wasm-bindgen --target web --no-typescript --out-dir "$out" --out-name game \
   "$tgt/wasm32-unknown-unknown/wasm-release/game.wasm"
-# A version in the URLs, so a browser that has the previous build cached
-# fetches the new one (python's server and GitHub Pages both let it cache).
-v="$(shasum "$out"/game_bg.wasm | cut -c1-12)"
-li="$(shasum web/i18n.js | cut -c1-12)"
-sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?v=$v'#" \
-  -e "s#\"./i18n.js\"#\"./i18n.js?v=$li\"#" web/index.html > "$out"/index.html
+if [ "$gpu" = 1 ]; then
+  wasm-bindgen --target web --no-typescript --out-dir "$out" --out-name game_gpu \
+    "$tgt/webgpu/wasm32-unknown-unknown/wasm-release/game.wasm"
+fi
 cp -R web/img "$out"/img
 # The landing page's texts (tools/i18n/landing.py)
 cp web/i18n.js "$out"/i18n.js
@@ -61,8 +68,8 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
         for n in names:
             rel = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
             # from assets/ only what the game reads: the bakes and the pictures
-            # the 1200 px logo is for the desktop's opening only (kiosk/characters.rs)
-            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or rel.endswith("_1200.png")):
+            # the logo: the game halves the 1200 px one (kiosk/characters.rs)
+            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or rel == "assets/brand/cima_logo_white.png"):
                 continue
             files.append(rel)
 files.append("data/fuels_eu12.json")
@@ -80,20 +87,36 @@ print("data: %d files, %.1f MB gzipped (of %.1f MB)" % (
     len(manifest), sum(m["bytes"] for m in manifest) / 1e6,
     sum(os.path.getsize(os.path.join(root, m["path"])) for m in manifest) / 1e6))
 PY
-if command -v wasm-opt >/dev/null; then
-  # Rust's default wasm features; a failure keeps the unoptimised file
-  if wasm-opt -Oz --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
-      --enable-mutable-globals --enable-reference-types --enable-multivalue \
-      -o "$out"/game.opt.wasm "$out"/game_bg.wasm; then
-    mv "$out"/game.opt.wasm "$out"/game_bg.wasm
-  else
-    echo "wasm-opt failed: the wasm is not optimised" >&2
-    rm -f "$out"/game.opt.wasm
+builds=(game)
+[ "$gpu" = 1 ] && builds+=(game_gpu)
+for b in "${builds[@]}"; do
+  if command -v wasm-opt >/dev/null; then
+    # Rust's default wasm features; a failure keeps the unoptimised file
+    if wasm-opt -Oz --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+        --enable-mutable-globals --enable-reference-types --enable-multivalue \
+        -o "$out"/$b.opt.wasm "$out"/${b}_bg.wasm; then
+      mv "$out"/$b.opt.wasm "$out"/${b}_bg.wasm
+    else
+      echo "wasm-opt failed: $b's wasm is not optimised" >&2
+      rm -f "$out"/$b.opt.wasm
+    fi
   fi
-fi
+  # a gzipped copy, inflated by the page: some hosts do not compress
+  gzip -9 -c "$out"/${b}_bg.wasm > "$out"/${b}_bg.wasm.gz
+done
+# A version in the URLs, so a browser that has the previous build cached
+# fetches the new one (python's server and GitHub Pages both let it cache).
+v="$(shasum "$out"/game_bg.wasm | cut -c1-12)"
+vg="$v"
+[ "$gpu" = 1 ] && vg="$(shasum "$out"/game_gpu_bg.wasm | cut -c1-12)"
+li="$(shasum web/i18n.js | cut -c1-12)"
 # the data list's URL carries its hash, as the wasm's does
 m="$(shasum "$out"/data/manifest.json | cut -c1-12)"
-sed -i.bak "s#'./data/manifest.json'#'./data/manifest.json?v=$m'#" "$out"/index.html && rm "$out"/index.html.bak
-# a gzipped copy, inflated by the page: some hosts do not compress
-gzip -9 -c "$out"/game_bg.wasm > "$out"/game_bg.wasm.gz
-echo "Built $out ($(du -sh "$out"/game_bg.wasm | cut -f1) wasm)"
+sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?v=$v'#" \
+  -e "s#'./game_gpu.js'#'./game_gpu.js?v=$vg'#" -e "s#'./game_gpu_bg.wasm'#'./game_gpu_bg.wasm?v=$vg'#" \
+  -e "s#const webgpuBuilt = true#const webgpuBuilt = $([ "$gpu" = 1 ] && echo true || echo false)#" \
+  -e "s#\"./i18n.js\"#\"./i18n.js?v=$li\"#" -e "s#'./data/manifest.json'#'./data/manifest.json?v=$m'#" \
+  web/index.html > "$out"/index.html
+for b in "${builds[@]}"; do
+  echo "Built $out ($b: $(du -sh "$out"/${b}_bg.wasm | cut -f1) wasm)"
+done

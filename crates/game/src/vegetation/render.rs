@@ -265,7 +265,7 @@ impl SpecializedRenderPipeline for PlantPipeline {
             if emulate {
                 defs.push("UNCLIPPED_DEPTH_ORTHO_EMULATION".into());
             }
-            if cfg!(target_arch = "wasm32") {
+            if crate::quality::WEBGL2 {
                 defs.push("WEBGL2".into());
             }
             let fragment = (emulate || key.cutout).then(|| FragmentState {

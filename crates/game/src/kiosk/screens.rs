@@ -65,13 +65,14 @@ const LOGO_IN_S: f32 = 0.8;
 /// The jingle's climax (`sound`), as the logo comes up: 0.3 s after the game
 /// starts (user, 2026-11-02).
 pub const JINGLE_S: f32 = 0.3;
-/// The jingle's cadence, 0.9 s into the climax (user, 2026-11-02; it was
-/// 1.7 s in, at −22 dB, and sounded like a gap), as the logo fades out.
-pub const JINGLE_ISLAND_S: f32 = JINGLE_S + 0.9;
-/// The logo starts to fade out.
-const LOGO_OUT_S: f32 = JINGLE_ISLAND_S;
+/// The jingle's cadence, 0.6 s into the climax, while it is still at its
+/// loudest (user, 2026-11-02: «diminuisci ancora la distanza»; 1.7 s in, at
+/// −22 dB, sounded like a gap, and 0.9 s, at −17 dB, still had a dip).
+pub const JINGLE_ISLAND_S: f32 = JINGLE_S + 0.6;
+/// The logo starts to fade out (as at 0.9 s, when the climax decays).
+const LOGO_OUT_S: f32 = JINGLE_S + 0.9;
 /// The black starts to lift on the island.
-pub const ISLAND_S: f32 = JINGLE_ISLAND_S + 0.4;
+pub const ISLAND_S: f32 = LOGO_OUT_S + 0.4;
 /// No black left.
 const CLEAR_S: f32 = 3.8;
 /// The title starts to show, and is all there one second later.
@@ -116,7 +117,7 @@ pub fn opening(ctx: &egui::Context, t: f32, logo: Option<&Logo>) {
         // the brand file is 77 x 96
         let h = (screen.height() * 0.32).min(screen.width() * 0.4 * 96.0 / 77.0);
         let r = egui::Rect::from_center_size(screen.center(), egui::vec2(h * 77.0 / 96.0, h));
-        p.image(l.1.unwrap_or(l.0), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::from_white_alpha((shown * 255.0) as u8));
+        p.image(l.for_height(ctx, h), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::from_white_alpha((shown * 255.0) as u8));
     }
     ctx.request_repaint();
 }
@@ -157,7 +158,7 @@ pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>, alp
         ui.set_width((screen.width() - 24.0).min(900.0));
         ui.vertical_centered(|ui| {
             if let Some(l) = logo {
-                ui.add(egui::Image::new(egui::load::SizedTexture::new(l.0, egui::vec2(77.0 * sc, 96.0 * sc))));
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(l.for_height(ctx, 96.0 * sc), egui::vec2(77.0 * sc, 96.0 * sc))));
                 ui.add_space(6.0);
             }
             ui.label(RichText::new(super::TITLE).size(84.0 * sc).strong().color(Color32::WHITE));
@@ -200,7 +201,7 @@ pub fn intro(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &mut 
             ui.set_width(card_w);
             ui.horizontal(|ui| {
                 if let Some(l) = logo {
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(l.0, egui::vec2(77.0, 96.0))));
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(l.for_height(ui.ctx(), 96.0), egui::vec2(77.0, 96.0))));
                     ui.add_space(14.0);
                 }
                 ui.vertical(|ui| {

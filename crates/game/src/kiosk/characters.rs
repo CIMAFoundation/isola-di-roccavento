@@ -61,11 +61,49 @@ impl Portraits {
     }
 }
 
-/// The CIMA logo, as egui textures: 360 px for the title and the screens, and
-/// 1200 px for the opening, where it fills a third of the screen (egui has no
-/// mipmaps: one size would be either blurred big or jagged small).
+/// The CIMA logo, as egui textures: the 1200 px drawing and its halves down
+/// to ~150 px, each the average of four pixels of the one above. egui has no
+/// mipmaps: one size would be blurred where it is drawn bigger and jagged
+/// where it is drawn smaller than a half (2026-11-02, the title's logo).
 #[derive(Resource)]
-pub struct Logo(pub egui::TextureId, pub Option<egui::TextureId>);
+pub struct Logo(Vec<(f32, egui::TextureId)>);
+
+impl Logo {
+    /// The smallest level at least `px` physical pixels tall, else the largest.
+    pub fn at(&self, px: f32) -> egui::TextureId {
+        self.0.iter().find(|(h, _)| *h >= px).or(self.0.last()).map(|(_, t)| *t).expect("a logo level")
+    }
+
+    /// For a logo `h` points tall on `ctx`'s screen.
+    pub fn for_height(&self, ctx: &egui::Context, h: f32) -> egui::TextureId {
+        self.at(h * ctx.pixels_per_point())
+    }
+}
+
+/// Halves an RGBA8 picture, averaging by alpha so the edges do not darken.
+fn half(w: usize, h: usize, px: &[u8]) -> (usize, usize, Vec<u8>) {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut out = vec![0u8; hw * hh * 4];
+    for y in 0..hh {
+        for x in 0..hw {
+            let (mut rgb, mut a) = ([0.0f32; 3], 0.0f32);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let i = ((y * 2 + dy) * w + x * 2 + dx) * 4;
+                let al = px[i + 3] as f32;
+                for c in 0..3 {
+                    rgb[c] += px[i + c] as f32 * al;
+                }
+                a += al;
+            }
+            let o = (y * hw + x) * 4;
+            for c in 0..3 {
+                out[o + c] = if a > 0.0 { (rgb[c] / a).round() as u8 } else { 0 };
+            }
+            out[o + 3] = (a / 4.0).round() as u8;
+        }
+    }
+    (hw, hh, out)
+}
 
 /// The scenario screen's icons (`tools/factory/scenario_icons.py`), by case.
 #[derive(Resource)]
@@ -105,7 +143,12 @@ macro_rules! picture {
     }};
 }
 
-pub fn load_portraits(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut contexts: EguiContexts) {
+pub fn load_portraits(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut contexts: EguiContexts,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+) {
     macro_rules! png {
         ($f:literal) => {
             picture!(concat!("characters/", $f, ".png"))
@@ -136,16 +179,37 @@ pub fn load_portraits(mut commands: Commands, mut images: ResMut<Assets<Image>>,
     ];
     let icons = icons.into_iter().filter_map(|(c, bytes)| texture(&bytes, &mut images, &mut contexts).map(|t| (c, t))).collect();
     commands.insert_resource(ScenarioIcons(icons));
-    let logo = picture!("brand/cima_logo_white.png");
-    if let Some(t) = texture(&logo, &mut images, &mut contexts) {
-        // The browser draws one pixel per CSS pixel (`main.rs`): the opening's
-        // logo is never taller than the 360 px one, and the large one cost
-        // 4.4 MiB of GPU texture plus its copy in the wasm memory (2026-11-01).
-        #[cfg(not(target_arch = "wasm32"))]
-        let large = texture(&picture!("brand/cima_logo_white_1200.png"), &mut images, &mut contexts);
-        #[cfg(target_arch = "wasm32")]
-        let large = None;
-        commands.insert_resource(Logo(t, large));
+    let logo = picture!("brand/cima_logo_white_1200.png");
+    let decoded = Image::from_buffer(&logo, bevy::image::ImageType::Extension("png"), bevy::image::CompressedImageFormats::NONE, true, bevy::image::ImageSampler::linear(), bevy::asset::RenderAssetUsages::all());
+    if let Ok(Some((mut w, mut h, mut px))) = decoded.map(|i| i.data.clone().map(|d| (i.width() as usize, i.height() as usize, d))) {
+        // In the browser the levels the screen cannot show are not kept (the
+        // 1200 px one is 4.4 MiB of texture and as much of wasm memory): the
+        // opening's logo is at most a third of the longer side tall.
+        let tallest = windows.single().map_or(f32::MAX, |w| w.physical_width().max(w.physical_height()) as f32 * 0.32);
+        let mut levels = Vec::new();
+        loop {
+            let unseen = cfg!(target_arch = "wasm32") && h as f32 / 2.0 >= tallest;
+            if unseen {
+                (w, h, px) = half(w, h, &px);
+                continue;
+            }
+            let mut img = Image::new(
+                bevy::render::render_resource::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 },
+                bevy::render::render_resource::TextureDimension::D2,
+                px.clone(),
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                // not RENDER_WORLD alone: see `texture`
+                bevy::asset::RenderAssetUsages::all(),
+            );
+            img.sampler = bevy::image::ImageSampler::linear();
+            levels.push((h as f32, contexts.add_image(bevy_egui::EguiTextureHandle::Strong(images.add(img)))));
+            if h < 300 {
+                break;
+            }
+            (w, h, px) = half(w, h, &px);
+        }
+        levels.sort_by(|a, b| a.0.total_cmp(&b.0));
+        commands.insert_resource(Logo(levels));
     }
 }
 

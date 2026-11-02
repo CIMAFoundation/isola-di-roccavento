@@ -29,7 +29,7 @@ fn spawn_landmarks(
     mut materials: ResMut<Assets<StructureMaterial>>,
 ) {
     let path = sim.data.join("scenarios").join(sim.scn.id.as_str()).join("island.json");
-    let Some(island) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else {
+    let Some(island) = datafs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else {
         return; // a scenario that is not an island has none
     };
     let material = materials.add(materials::structure(StandardMaterial {

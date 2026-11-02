@@ -139,6 +139,35 @@ Chiamate WebGL sul titolo: da 3571 a 3009 per frame, per 77 draw call.
 
 **Profilo.** La pagina sceglie `window.roccaProfile` e `quality::Graphics::from_env` lo legge: **`bassa`** (`Graphics::WEB`, il profilo di sotto) su telefoni e tablet (puntatore primario grossolano, `(pointer: coarse)`, o `userAgentData.mobile`); **`media`** (`Graphics::WEB_MEDIA`) su computer: come `WEB` più ombre del sole (2 cascate, 1024), terreno a passo 2 e vegetazione 0,08 (0,05 fino al 2026-11-02). `?q=bassa` o `?q=media` forzano il profilo, per le prove; `?gfx=` lo corregge come `KIOSK_GFX` sul desktop (es. `?gfx=veg=0,terrain_stride=8`). I tetti del fuoco, il mare e la risoluzione del suolo restano uguali nei due profili. Dal 2026-10-21 su computer il livello è **adattivo** (`adaptive.rs`, vedi `TODO.md`): parte da `WEB_TOP` (`WEB_MEDIA` con ombre da 3 cascate, 2048, e vegetazione 0,14) e scende se i frame sono lenti; `?q=` lo spegne. Verificato in Chrome su desktop con entrambi i valori di `?q=` (parte, grafica a vista); **non misurati gli FPS** (dal 2026-10-20 il terreno web usa colore e normale per vertice, senza le texture `ground_*`: WebGL2 ha 16 unità texture, vedi `TODO.md`) e non provato su un telefono vero.
 
+## WebGPU sui computer (2026-11-02)
+
+Richiesta dell'utente: «portare web sulla stessa qualità di desktop». WebGL2 non ha target HDR con MSAA, ha la profondità di OpenGL, 16 unità texture e un buffer GPU per ogni mesh cambiata: da lì venivano quasi tutte le rinunce del web. Bevy decide il backend alla compilazione (la feature `webgpu` sostituisce `webgl2`), quindi le build sono due, dallo stesso codice:
+
+- `build_web.sh` compila `game.*` (WebGL2) e `game_gpu.*` (`--features webgpu`, cartella `target/webgpu` perché le due non si ricompilino a vicenda); `ROCCA_WEB_GPU=0` fa solo la prima. Ogni wasm ha il suo hash nell'URL e la sua cache (`rocca-wasm`, `rocca-wasm-gpu`).
+- La pagina carica `game_gpu` se il profilo è quello dei computer (`media`) e `navigator.gpu.requestAdapter()` dà un adattatore; altrimenti WebGL2. `?gpu=0` tiene WebGL2, `?gpu=1` chiede WebGPU anche sul telefono.
+- **Ritorno a WebGL2:** se il renderer si ferma su un errore (`RenderErrorHandler` in `webgpu_shaders.rs`) o il wasm va in panico, la pagina si ricarica con `?gpu=0` ed entra nel gioco da sola.
+- Nel codice i limiti di WebGL2 stanno dietro `quality::WEBGL2` (vero solo nella build WebGL2): HDR, MSAA, god rays, contorno di Mario, piante a riquadri con resti e modelli autoriali, maschera delle strade a 2 m, mare a 15 m e largo a 150 m, tetti del fuoco, `web_gpu` e `web_near_plane` (questi due solo su WebGL2). Le cose del browser in sé (un thread, `localStorage`, dati scaricati) restano su `target_arch = "wasm32"`.
+- **Livelli:** con WebGPU il profilo `media` parte da `Graphics::ALTA`, come il desktop, e la grafica adattiva scende; `?q=media` ferma «media», `?q=bassa` «bassa».
+
+**Il compilatore WGSL del browser** (Tint in Chrome) è più severo di naga, e il primo avvio si fermava:
+
+- gli shader PBR di Bevy 0.20 (`pbr_fragment`, `pbr_prepass`, `pbr_prepass_functions`) mettono texture e sampler in un `let`, che WGSL vieta (ancora così su `main` di Bevy): `webgpu_shaders.rs` li riscrive quando arrivano tra gli asset, prima che una pipeline li compili, con le texture legate al posto del nome (in WebGPU non ci sono texture bindless); un test lo controlla sui sorgenti di Bevy nel registro di Cargo;
+- le derivate (`dpdx`, `fwidth`) dopo un ramo su un valore non uniforme: nella sola build WebGPU gli shader con un `@fragment` ricevono `diagnostic(off, derivative_uniformity);` dopo gli `import` (`shader_lib::derivatives_anywhere`).
+
+**Misure** (Chromium headless su Mac M4 Pro, Metal, 1440×900 CSS; titolo e partita dopo 30 s; 600 frame):
+
+| | WebGL2 | WebGPU |
+|---|---|---|
+| titolo, 1× | — | 10,6 ms (94 fps) |
+| titolo, 2× (2880×1800) | 8,5 ms | 29,2 ms (34 fps, la grafica adattiva era scesa di 2 gradini su 16) |
+| partita, 1× | — | 8,3 ms (120 fps) |
+| partita, 2× | 8,5 ms | 11,3 ms (89 fps) |
+| piante | 23 158, 1,5 M triangoli | 83 117, 7,4 M triangoli |
+| terreno costruito in | 2,5 s (passo 2) | 6,4 s (passo 1, pagina bloccata) |
+| memoria (RSS) renderer / GPU | 783 / 236 MiB | 1292 / 528 MiB |
+
+A 2× il costo sono i pixel (con `gfx=scale=0.5` 8,5 ms): è il caso della risoluzione adattiva. Immagini a confronto, stesse inquadrature (`perf_web.py shots`, `?gpu=1` contro `?gpu=0`): ombre del sole, alberi autoriali con le foglie, tronchi bruciati, bloom, profondità di campo, erba vicina. Nessun errore in console; prova `--smoke` del telefono passata in Chromium e WebKit (WebGL2, come prima). WebKit di Playwright non ha WebGPU: Safari 26, che lo ha, non è provato.
+
 ## Vegetazione più fitta, a lobi (2026-11-02)
 
 Richiesta dell'utente: «più densità e resa grafica, senza perdere performances possibilmente» (branch `piante-ios`).

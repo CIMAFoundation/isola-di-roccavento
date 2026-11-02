@@ -27,7 +27,7 @@ impl Default for OrbitCamera {
 /// kilometres out, and the sea (0.8 m) lost to the sea floor beside the
 /// islets, in dark patches that moved with the view (2026-11-02). The camera
 /// stays 90 m from its focus at the closest (Mario's, about 36 m).
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
 pub fn web_near_plane(mut cameras: Query<(&OrbitCamera, &mut Projection), Without<AuxiliaryCamera>>) {
     for (orbit, mut projection) in &mut cameras {
         let near = (orbit.distance * 0.02).clamp(0.1, 50.0);

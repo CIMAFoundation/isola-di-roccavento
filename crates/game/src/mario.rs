@@ -880,7 +880,7 @@ fn drive(
         runtime.outline_material = Some(outline_material.clone());
         // The silhouette outline reads the scene's depth prepass, which WebGL2
         // cannot sample; on the web Mario is drawn without it.
-        if !cfg!(target_arch = "wasm32") {
+        if !crate::quality::WEBGL2 {
             runtime.mask_camera = Some(commands.spawn((
                 Camera3d::default(),
                 Camera {
@@ -964,7 +964,7 @@ fn drive(
         capture_pose(&mut runtime);
         return;
     }
-    if !depth_prepass && !cfg!(target_arch = "wasm32") {
+    if !depth_prepass && !crate::quality::WEBGL2 {
         commands.entity(camera_entity).insert(bevy::core_pipeline::prepass::DepthPrepass);
     }
     let dt = time.delta_secs().min(0.1);
