@@ -10,7 +10,7 @@ pub struct Playground {
 }
 
 impl Playground {
-    pub(crate) fn request_start_for_snapshot(&mut self, _wing_cap: bool) {}
+    pub(crate) fn request_start_for_snapshot(&mut self, _wing_cap: bool, _at: Option<Vec2>, _walk: bool) {}
     pub(crate) fn snapshot_ready(&self) -> bool { true }
 }
 
