@@ -24,6 +24,13 @@
 //! | `live`   | `1`: the world keeps running (×300) instead of freezing at the shot  |
 //! | `opening`| real seconds into the opening sequence, held (with `phase=title`)     |
 //! | `rec`    | seconds of video with sound instead of a picture: `<name>.mp4` (`record`) |
+//! | `spin`   | the camera turns, degrees of yaw per second (with `rec` or the bench) |
+//! | `zoom`   | the camera backs off, metres per second (negative: closer)            |
+//! | `pan`    | `<x>:<y>`: the focus slides, metres per second east and north         |
+//!
+//! The camera moves (`spin`, `zoom`, `pan`) from the end of the settling, on
+//! the game's clock: a recording at a fixed step films the same path on any
+//! machine, frame after frame, as a player's drag would show it.
 //!
 //! `KIOSK_SNAP_BENCH=<s>` also measures each state before its picture: the
 //! frame times over `<s>` real seconds (vsync off), printed as `bench:` lines.
@@ -80,6 +87,11 @@ struct State {
     live: bool,
     opening: Option<f32>,
     rec: Option<f32>,
+    /// The camera's motion: yaw (degrees/s), distance (m/s), focus (m/s
+    /// east, north).
+    spin: f32,
+    zoom: f32,
+    pan: Vec2,
 }
 
 /// What the state on show leaves out of the picture.
@@ -130,6 +142,9 @@ fn parse(spec: &str) -> Vec<State> {
                     "live" => st.live = v == "1",
                     "opening" => st.opening = v.parse().ok(),
                     "rec" => st.rec = v.parse().ok(),
+                    "spin" => st.spin = v.parse().unwrap_or(0.0),
+                    "zoom" => st.zoom = v.parse().unwrap_or(0.0),
+                    "pan" => st.pan = xy(v).map_or(Vec2::ZERO, |p| Vec2::new(p.x, p.y)),
                     other => eprintln!("snap: unknown key `{other}`"),
                 }
             }
@@ -228,6 +243,9 @@ pub struct Progress {
     filming: bool,
     /// frame times (s) of the state on show, while benchmarking
     frames: Vec<f32>,
+    /// Where a moving camera (`spin`, `zoom`, `pan`) set off from: focus,
+    /// distance, yaw (radians).
+    base: Option<(Vec3, f32, f32)>,
 }
 
 /// `KIOSK_SNAP_BENCH`: the seconds each state is measured for.
@@ -384,6 +402,7 @@ pub fn drive(
         p.goal = apply(&st, &mut kiosk, &mut sim, &mut restarted);
         p.applied = true;
         p.waited = 0.0;
+        p.base = None;
         if st.mario {
             mario.request_start_for_snapshot(false);
         }
@@ -392,6 +411,15 @@ pub fn drive(
     *hide = st.hide;
     if let Some((focus, dist, yaw, pitch)) = p.goal {
         *view = SnapView { focus: (!focus.is_nan()).then_some(focus), dist, yaw: yaw.map(f32::to_radians), pitch: pitch.map(f32::to_radians) };
+        // the camera on its way, from where the settling left it
+        let moving = st.spin != 0.0 || st.zoom != 0.0 || st.pan != Vec2::ZERO;
+        if let (true, Ok(o)) = (moving && p.waited > SETTLE_S, orbit.single()) {
+            let (f, d, y) = *p.base.get_or_insert((o.focus, o.distance, o.yaw));
+            let s = p.waited - SETTLE_S;
+            view.focus = Some(f + Vec3::new(st.pan.x, 0.0, -st.pan.y) * s);
+            view.dist = Some(d + st.zoom * s);
+            view.yaw = Some(y + (st.spin * s).to_radians());
+        }
         if let Ok(mut o) = orbit.single_mut() {
             if let Some(f) = view.focus {
                 o.focus = f;

@@ -10,15 +10,19 @@ const NOISE_SHADER_HANDLE: Handle<Shader> =
 const SCENE_LIGHT_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("5b1e93a7-c4d2-4f08-b6e3-1a7d28c9f054");
 
-/// Registers `game::shaders::noise` (`shaders/noise.wesl`) and
-/// `game::shaders::scene_light`. Shaders `import` them by path, so the order
-/// of the plugins does not matter.
+const FADED_SHADOW_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("5b1e93a7-c4d2-4f08-b6e3-1a7d28c9f055");
+
+/// Registers `game::shaders::noise` (`shaders/noise.wesl`),
+/// `game::shaders::scene_light` and `game::shaders::faded_shadow`. Shaders
+/// `import` them by path, so the order of the plugins does not matter.
 pub struct ShaderLibPlugin;
 
 impl Plugin for ShaderLibPlugin {
     fn build(&self, app: &mut App) {
         crate::load_wesl!(app, NOISE_SHADER_HANDLE, "shaders/noise.wesl");
         crate::load_wesl!(app, SCENE_LIGHT_SHADER_HANDLE, "shaders/scene_light.wesl");
+        crate::load_wesl!(app, FADED_SHADOW_SHADER_HANDLE, "shaders/faded_shadow.wesl");
     }
 }
 

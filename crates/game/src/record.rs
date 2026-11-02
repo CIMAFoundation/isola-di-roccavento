@@ -125,9 +125,19 @@ mod native {
             if job.asked < job.frames {
                 let index = job.asked;
                 let video = job.video.clone();
+                // `KIOSK_REC_PNG`: every frame also as a lossless picture,
+                // `<name>_frames/f0000.png`, for frame-by-frame comparisons
+                // (the video's B-frames blur one frame in two)
+                let png = std::env::var_os("KIOSK_REC_PNG").map(|_| PathBuf::from(format!("{}_frames", job.path.display())));
                 commands.spawn(Screenshot::image(target.clone())).observe(move |shot: On<ScreenshotCaptured>| {
                     let Ok(img) = shot.image.clone().try_into_dynamic() else { return };
                     let rgba = img.to_rgba8();
+                    if let Some(dir) = &png {
+                        let _ = std::fs::create_dir_all(dir);
+                        if let Err(e) = rgba.save(dir.join(format!("f{index:04}.png"))) {
+                            eprintln!("rec: {}: {e}", dir.display());
+                        }
+                    }
                     let mut v = video.lock().unwrap();
                     if v.size == (0, 0) {
                         v.size = rgba.dimensions();

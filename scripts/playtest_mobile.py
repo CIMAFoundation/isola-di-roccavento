@@ -14,6 +14,33 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# No sound from a headless run (user, 2026-11-02): Playwright mutes headless
+# Chromium (`--mute-audio`) but not WebKit, where the game's WebAudio reached
+# the Mac's speakers. Everything the page sends to its speakers goes through a
+# gain of 0; the audio graph keeps running, so the measures do not change.
+MUTE = r"""
+(() => {
+  if (typeof AudioNode === 'undefined') return;
+  const connect = AudioNode.prototype.connect;
+  const silent = new WeakMap();
+  AudioNode.prototype.connect = function (target, ...rest) {
+    if (target instanceof AudioDestinationNode) {
+      let gain = silent.get(target);
+      if (!gain) {
+        gain = target.context.createGain();
+        gain.gain.value = 0;
+        connect.call(gain, target);
+        silent.set(target, gain);
+      }
+      return connect.call(this, gain, ...rest);
+    }
+    return connect.call(this, target, ...rest);
+  };
+  const play = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () { this.muted = true; return play.call(this); };
+})();
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -39,6 +66,7 @@ def main():
             gpu = ['--enable-gpu'] + (['--use-angle=metal'] if sys.platform == 'darwin' else [])
             browser = getattr(pw, args.browser).launch(headless=True, executable_path=args.browser_executable, args=gpu if args.browser == 'chromium' else [])
             page = browser.new_page(viewport={'width': 390, 'height': 844}, device_scale_factor=3, is_mobile=True, has_touch=True, locale='it-IT')
+            page.add_init_script(MUTE)
             page.set_default_timeout(120000)
             page.on('pageerror', lambda e: errors.append(str(e)) if 'Using exceptions for control flow' not in str(e) else None)
             page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)

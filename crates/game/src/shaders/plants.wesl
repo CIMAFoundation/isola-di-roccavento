@@ -21,6 +21,7 @@
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
 import bevy_pbr::render::mesh_view_types;
 @if(PLANT_SHADOWS) import bevy_pbr::render::shadows;
+@if(PLANT_SHADOWS) import game::shaders::scene_light::{view_depth, shadow_reach};
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 import bevy_pbr::render::{pbr_functions, pbr_types};
 import game::shaders::noise::{hash21, value_noise};
@@ -155,13 +156,10 @@ fn foliage_light(albedo: vec3<f32>, n: vec3<f32>, world: vec3<f32>, frag: vec4<f
         var shadow = 1.0;
         @if(PLANT_SHADOWS)
         if (light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-            let view_z = dot(vec4<f32>(
-                view.view_from_world[0].z,
-                view.view_from_world[1].z,
-                view.view_from_world[2].z,
-                view.view_from_world[3].z,
-            ), vec4<f32>(world, 1.0));
+            let view_z = view_depth(world);
             shadow = shadows::fetch_directional_shadow(0u, vec4<f32>(world, 1.0), n, view_z, frag.xy);
+            // faded out toward the end of the shadows' reach, as the ground
+            shadow = mix(1.0, shadow, shadow_reach(view_z));
         }
         // the sun through the leaves, toward the eye, tinted by them
         let through = (pow(max(dot(-v, l), 0.0), 4.0) * 0.7 + max(-ndl, 0.0) * 0.25) * leafy;

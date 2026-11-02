@@ -14,13 +14,14 @@
 // What a baked vertex is made of: as `materials::Surface` (and the bakes'
 // `SURFACES`). The alpha is id / 255; 1.0 (no id) leaves the material alone.
 
-import bevy_pbr::render::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing};
+import bevy_pbr::render::pbr_functions::{alpha_discard, main_pass_post_lighting_processing};
 import bevy_pbr::render::pbr_fragment::pbr_input_from_standard_material;
 import bevy_pbr::render::pbr_types::{PbrInput, STANDARD_MATERIAL_FLAGS_UNLIT_BIT};
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 import bevy_pbr::render::mesh_functions::get_world_from_local;
 import game::shaders::noise::{hash21, value_noise};
 import game::shaders::scenery::{limestone, rock_bed, rock_bump};
+import game::shaders::faded_shadow::apply_pbr_lighting_faded;
 
 const SURFACE_PAINT: u32 = 1u;
 const SURFACE_METAL: u32 = 2u;
@@ -364,7 +365,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var out: FragmentOutput;
     if (pbr.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
-        out.color = apply_pbr_lighting(pbr);
+        out.color = apply_pbr_lighting_faded(pbr);
     } else {
         out.color = pbr.material.base_color;
     }

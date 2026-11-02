@@ -23,19 +23,49 @@ fn scene_shade(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> vec3<f32>
     if lights.n_directional_lights > 0u {
         let light = lights.directional_lights[0];
         let ndl = max(dot(n, light.direction_to_light), 0.0);
-        let view_z = dot(vec4<f32>(
-            view.view_from_world[0].z,
-            view.view_from_world[1].z,
-            view.view_from_world[2].z,
-            view.view_from_world[3].z,
-        ), vec4<f32>(world_pos, 1.0));
+        let view_z = view_depth(world_pos);
         var shadow = 1.0;
         if (light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
             shadow = shadows::fetch_directional_shadow(0u, vec4<f32>(world_pos, 1.0), n, view_z, frag.xy);
+            shadow = mix(1.0, shadow, shadow_reach(view_z));
         }
         lit += light.color.rgb * view.exposure * ndl * shadow * 0.3183;
     }
     return lit;
+}
+
+// The view-space depth of `world_pos` as Bevy measures it for the cascades
+// (negative in front of the camera).
+fn view_depth(world_pos: vec3<f32>) -> f32 {
+    return dot(vec4<f32>(
+        view.view_from_world[0].z,
+        view.view_from_world[1].z,
+        view.view_from_world[2].z,
+        view.view_from_world[3].z,
+    ), vec4<f32>(world_pos, 1.0));
+}
+
+// How much of the sun's shadow is kept at view depth `view_z`: all of it
+// until the last cascade's overlap, then less and less to none at its far
+// bound. Bevy blends each cascade into the next over that overlap and stops
+// the last one dead, a line across the land beyond which nothing casts a
+// shadow (user, 2026-11-02); here the last one hands over to no shadow the
+// same way. Every surface that takes the sun's shadow reads this: the
+// terrain and the structures (`apply_pbr_lighting` twice in the band), the
+// plants, the ground overlays (`scene_shade`).
+fn shadow_reach(view_z: f32) -> f32 {
+    // no sun, or a sun without shadows: nothing to fade
+    if lights.n_directional_lights == 0u {
+        return 1.0;
+    }
+    let light = &lights.directional_lights[0];
+    let n = (*light).num_cascades;
+    if ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) == 0u || n == 0u {
+        return 1.0;
+    }
+    let far = (*light).cascades[n - 1u].far_bound;
+    let near = (1.0 - (*light).cascades_overlap_proportion) * far;
+    return clamp((far + view_z) / max(far - near, 1.0), 0.0, 1.0);
 }
 
 // The scene's distance fog, applied by hand: `apply_fog` transcribed, because

@@ -3,7 +3,8 @@
 // the limestone's beds on the rock faces. A material of its own rather than an
 // extension of StandardMaterial, whose textures it would never read: on WebGL2
 // every texture of the layout takes one of the 16 units, read or not.
-// The light is Bevy's PBR all the same (`apply_pbr_lighting`), fog included.
+// The light is Bevy's PBR all the same (`apply_pbr_lighting`), fog included,
+// with the sun's shadow faded out at the end of its reach (`faded_shadow`).
 
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 import bevy_pbr::render::mesh_bindings::mesh;
@@ -11,6 +12,7 @@ import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::{pbr_functions, pbr_types};
 import game::shaders::noise::{hash21, value_noise};
 import game::shaders::scenery::{limestone, rock_bed, rock_bump, tactical_grey};
+import game::shaders::faded_shadow::apply_pbr_lighting_faded;
 
 struct Terrain {
     // world metres to mask uv (xy); z > 0.5: meadow on; w: where the blades
@@ -265,7 +267,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr.material.flags |= pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
 
     var out: FragmentOutput;
-    out.color = pbr_functions::apply_pbr_lighting(pbr);
+    out.color = apply_pbr_lighting_faded(pbr);
     out.color = pbr_functions::main_pass_post_lighting_processing(pbr, out.color);
     out.color = tactical_grey(out.color, terrain.tactical.x);
     return out;

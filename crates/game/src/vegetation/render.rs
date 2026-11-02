@@ -10,7 +10,8 @@
 //! Each frame, for every camera, the tiles in its frustum are listed with
 //! the level of detail their distance asks for, and one item goes into the
 //! camera's opaque phase (and into its depth prepass, when it has a bare
-//! one: the depth of field's); for every shadow cascade of the sun, the
+//! one: the depth of field's; there only the meshes the main pass draws
+//! whole, see [`Pass::Prepass`]); for every shadow cascade of the sun, the
 //! tiles in the cascade's box, and one item into its shadow phase. The item's draw
 //! command ([`DrawPlants`]) walks the view's list: per (variety, tier) one
 //! instanced draw. Bevy's binned phases take such items as
@@ -38,6 +39,7 @@ use bevy::pbr::{
 use bevy::platform::collections::HashMap;
 use bevy::shader::ShaderDefVal;
 use bevy::render::render_resource::SpecializedMeshPipeline;
+use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::render::{
     mesh::allocator::MeshSlabs,
@@ -130,6 +132,10 @@ struct ExtractedPlants {
     shadows: bool,
     /// The entity the draws hang on: render and main world.
     item: Option<(Entity, MainEntity)>,
+    /// Cameras that do not see the default render layer, where the plants
+    /// are, as Bevy keeps every mesh of that layer out of them: Mario's
+    /// silhouette camera drew the whole forest into his mask (2026-11-02).
+    blind: Vec<MainEntity>,
 }
 
 fn extract_plants(
@@ -137,7 +143,10 @@ fn extract_plants(
     veg: Extract<Option<Res<Vegetation>>>,
     gfx: Extract<Option<Res<crate::quality::Graphics>>>,
     item: Extract<Query<(Entity, &RenderEntity), With<PlantsDrawable>>>,
+    cameras: Extract<Query<(Entity, &RenderLayers), With<Camera>>>,
 ) {
+    out.blind.clear();
+    out.blind.extend(cameras.iter().filter(|(_, l)| !l.intersects(&RenderLayers::default())).map(|(e, _)| MainEntity::from(e)));
     let (Some(veg), Ok((main, render))) = (veg.as_ref(), item.single()) else {
         out.scene = None;
         out.item = None;
@@ -179,9 +188,17 @@ struct PlantPipelineSlot(Option<PlantPipeline>);
 enum Pass {
     /// The camera's opaque pass, lit (`plants.wesl`).
     Main,
-    /// The camera's depth prepass, when it has one (depth of field): depth
-    /// only, so the terrain under the crowns is not shaded in the main pass
-    /// and the depth of field sees the trees (`plant_shadow.wesl`).
+    /// The camera's depth prepass, when it has one (depth of field, Mario):
+    /// depth only, so the ground under the crowns is not shaded in the main
+    /// pass (`plant_shadow.wesl`). Only the meshes the main pass draws whole,
+    /// the proxies: behind a depth written here nothing else can draw, so
+    /// where the main pass then leaves a sample bare the clear colour shows.
+    /// The cut-out meshes (leaf cards, remains) are left to the main pass
+    /// alone, which smooths their edges with alpha to coverage and eats them
+    /// as they burn: with them in the prepass the crowns near the camera
+    /// shimmered grey at every edge and a burning crown turned into a grey
+    /// silhouette (2026-11-02). The depth of field reads the depth after the
+    /// main pass, plants and all.
     Prepass,
     /// The sun's cascades, depth only (`plant_shadow.wesl`).
     Shadow,
@@ -616,6 +633,9 @@ fn queue_plants(
         specialized.specialize(&cache, pipeline, key)
     };
     for (view_entity, view, lights) in &views {
+        if plants.blind.contains(&view.retained_view_entity.main_entity) {
+            continue;
+        }
         let Some(opaque) = opaque_phases.get_mut(&view.retained_view_entity) else { continue };
         let Some(&view_key) = view_keys.get(&view.retained_view_entity) else { continue };
         opaque.remove(item.1);
@@ -669,27 +689,32 @@ fn queue_plants(
             );
             // the depth prepass, when the camera has a bare one (its
             // normal, motion or deferred targets would want outputs of
-            // their own): the same plants, depth only
+            // their own): the plants the main pass draws whole, depth only
             let others = MeshPipelineKey::NORMAL_PREPASS | MeshPipelineKey::MOTION_VECTOR_PREPASS | MeshPipelineKey::DEFERRED_PREPASS;
             if view_key.contains(MeshPipelineKey::DEPTH_PREPASS) && !view_key.intersects(others) {
                 if let Some(prepass) = prepass_phases.get_mut(&view.retained_view_entity) {
                     prepass.remove(item.1);
-                    let mut pre: Vec<Draw> =
-                        list.iter().map(|d| Draw { pipeline: pipeline_for(view_key, Pass::Prepass, d.mesh), ..*d }).collect();
+                    let mut pre: Vec<Draw> = list
+                        .iter()
+                        .filter(|d| !scene.meshes[d.mesh as usize].cutout)
+                        .map(|d| Draw { pipeline: pipeline_for(view_key, Pass::Prepass, d.mesh), ..*d })
+                        .collect();
                     pre.sort_by_key(|d| (d.pipeline.id(), d.mesh));
-                    prepass.add(
-                        OpaqueNoLightmap3dBatchSetKey {
-                            pipeline: pre[0].pipeline,
-                            draw_function: prepass_draw,
-                            material_bind_group_index: None,
-                            slabs: MeshSlabs::default(),
-                        },
-                        OpaqueNoLightmap3dBinKey { asset_id: AssetId::<Mesh>::default().untyped() },
-                        item,
-                        InputUniformIndex::default(),
-                        BinnedRenderPhaseType::NonMesh,
-                    );
-                    draws.0.insert((view_entity, Pass::Prepass), pre);
+                    if let Some(first) = pre.first() {
+                        prepass.add(
+                            OpaqueNoLightmap3dBatchSetKey {
+                                pipeline: first.pipeline,
+                                draw_function: prepass_draw,
+                                material_bind_group_index: None,
+                                slabs: MeshSlabs::default(),
+                            },
+                            OpaqueNoLightmap3dBinKey { asset_id: AssetId::<Mesh>::default().untyped() },
+                            item,
+                            InputUniformIndex::default(),
+                            BinnedRenderPhaseType::NonMesh,
+                        );
+                        draws.0.insert((view_entity, Pass::Prepass), pre);
+                    }
                 }
             }
             draws.0.insert((view_entity, Pass::Main), list);

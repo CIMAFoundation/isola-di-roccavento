@@ -102,6 +102,7 @@ Output: `results/scenario-impacts/focused/images/01_valico.png`,
 `02_rotazione_est.png` e `03_quattro_borghi.png`. Per ricreare gli input della
 ricerca, vedere [`tools/factory/SCENARI.md`](tools/factory/SCENARI.md).
 **Non rubare il focus all'utente:** per queste immagini usare solo la procedura headless qui sopra. La finestra del gioco (`KIOSK_SNAP`, `cargo run -p game`) si avvia solo se l'utente chiede screenshot in quel messaggio.
+**Audio sempre spento nelle prove** (utente, 2026-11-02): dalle casse non deve uscire niente. `KIOSK_SNAP` mette a 0 il volume globale di Bevy, che moltiplica ogni suono, Mario compreso; `rec=` registra la traccia senza suonarla; il laboratorio delle piante non ha suoni. Nei browser headless Playwright zittisce solo Chromium: per WebKit gli script iniettano `MUTE` (`scripts/perf_web.py`, `scripts/playtest_mobile.py`), da copiare in ogni script nuovo.
 
 ### Screenshot di stati arbitrari (`KIOSK_SNAP`)
 
@@ -129,6 +130,7 @@ KIOSK_WINDOWED=1 KIOSK_SIZE=1600x1000 KIOSK_SCALE=1 KIOSK_SNAP=<cartella> KIOSK_
 - Chiave `live=1`: il mondo continua a scorrere (per misurare anche i costi CPU del fuoco).
 - Chiave `opening=<s>` (con `phase=title`): la sequenza d'apertura ferma a quell'istante; con `rec` la sequenza scorre.
 - **Video** (`record.rs`, 2026-10-30): `rec=<s>` registra `<s>` secondi di quello stato in `<nome>.mp4`, immagini e suoni del gioco, a passo fisso di 1/30 s (fluido su qualsiasi macchina, più veloce del tempo reale). Serve ffmpeg. Con `KIOSK_SIZE=1920x1080 KIOSK_SCALE=1.25` l'immagine è uscita nera, anche negli snapshot (2026-10-30): per i video usare `KIOSK_SCALE=1`. Esempio: `name=apertura,phase=title,opening=0,live=1,rec=14`. Il montaggio del video di presentazione (voce TTS, cartello) sta fuori dal repository, in `~/Movies/rocca-demo/cut.py`.
+- **Camera in movimento** (2026-11-02): `spin=<gradi/s>` (rotazione), `zoom=<m/s>` (negativo: avvicina), `pan=<x>:<y>` (m/s verso est e nord) muovono la camera dalla fine dell'assestamento, sul clock del gioco; con `rec` filmano lo stesso percorso su qualsiasi macchina. Con `KIOSK_REC_PNG=1` ogni fotogramma del video è salvato anche in PNG senza perdita (`<nome>_frames/f0000.png`): per confrontare fotogramma per fotogramma non usare l'mp4, i suoi B-frame sfocano un fotogramma su due. Esempio: `name=zoom,t=150,at=fire,dist=1600,pitch=-32,ui=0,marks=0,iso=0,zoom=-400,rec=3`.
 - **FPS per stato:** `KIOSK_SNAP_BENCH=<s>` misura ogni stato per `<s>` secondi e stampa righe `bench:` (main, render thread, GPU, fps). La finestra nascosta è cadenzata a ~57 Hz e la GPU abbassa il clock, quindi alla dimensione reale i ms GPU non sono confrontabili: per un prima/dopo si usa `KIOSK_SIZE` a 4–8 volte i pixel (es. `3919x2449` con `KIOSK_SCALE=2`) finché il `mean` supera i 17,5 ms; lì è il costo vero. Dettagli in `crates/game/src/bench.rs`.
 
 ## Trappole note
@@ -147,7 +149,9 @@ Sono costate tempo e non si vedono dal codice. Prima di fidarsi, verificare che 
   - una striscia stesa sul terreno con il winding sbagliato è invisibile (avvolgerla `a, a+2, a+1`, e controllare in che verso corrono le righe del reticolo);
   - le linee drappeggiate vanno ricampionate, circa ogni 5 m;
   - i segni vanno alzati sopra la chioma (+20 m o più);
-  - un `Material` personalizzato non riceve la nebbia.
+  - un `Material` personalizzato non riceve la nebbia;
+  - il depth prepass non deve coprire più del main pass: dove il prepass scrive una profondità e il main pass lascia il campione scoperto (alpha to coverage, `discard`), dietro non si disegna più nulla e resta il colore di sfondo, grigio, che sfarfalla muovendo la camera (2026-11-02). Per questo le mesh ritagliate delle piante restano fuori dal prepass;
+  - Bevy toglie di colpo l'ombra del sole alla fine dell'ultima cascata: la sfumatura sta in `scene_light::shadow_reach` e la leggono terreno e strutture (`faded_shadow::apply_pbr_lighting_faded`), piante e `scene_shade` (2026-11-02). Un materiale nuovo illuminato con l'`apply_pbr_lighting` di Bevy riporta la linea.
 - **Riavvio:** vanno ripuliti gli stati del rendering che si ricordano qualcosa (case annerite, particelle di fumo, chiavi dei segni). Tutto il resto si ricalcola da `Sim` a ogni frame.
 - **Scorciatoie da tastiera:** devono rispettare `egui` `wants_keyboard_input()`, altrimenti scattano mentre si scrive il nome.
 - **Un meccanismo nuovo deve essere inerte quando è spento**, anche a T+0. Una derivazione giusta su un territorio può essere sbagliata sul successivo: va verificata su tutti.
