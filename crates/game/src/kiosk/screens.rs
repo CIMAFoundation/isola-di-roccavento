@@ -58,17 +58,20 @@ fn volunteer(ui: &mut egui::Ui, faces: Option<&Portraits>, mood: Mood, size: f32
 // flying in to it fast and slowing down, as from a plane; the title and
 // «Gioca» come as the cadence dies away. A click or a key skips it. The times
 // follow the two cuts' envelopes (`tools/sounds/prepare.py`), without gaps
-// (user, 2026-10-30).
+// (user, 2026-10-30). The jingle plays on the real clock (`sound`): this one
+// slows down when the first frames are long, on the web above all.
 
 const LOGO_IN_S: f32 = 0.8;
-/// The jingle's climax (`sound`), as the logo comes up.
-pub const JINGLE_S: f32 = 0.2;
+/// The jingle's climax (`sound`), as the logo comes up: 0.3 s after the game
+/// starts (user, 2026-11-02).
+pub const JINGLE_S: f32 = 0.3;
+/// The jingle's cadence, 0.9 s into the climax (user, 2026-11-02; it was
+/// 1.7 s in, at −22 dB, and sounded like a gap), as the logo fades out.
+pub const JINGLE_ISLAND_S: f32 = JINGLE_S + 0.9;
 /// The logo starts to fade out.
-const LOGO_OUT_S: f32 = 1.9;
-/// The jingle's cadence, as the climax dies away and the logo fades out.
-pub const JINGLE_ISLAND_S: f32 = 1.9;
+const LOGO_OUT_S: f32 = JINGLE_ISLAND_S;
 /// The black starts to lift on the island.
-pub const ISLAND_S: f32 = 2.3;
+pub const ISLAND_S: f32 = JINGLE_ISLAND_S + 0.4;
 /// No black left.
 const CLEAR_S: f32 = 3.8;
 /// The title starts to show, and is all there one second later.

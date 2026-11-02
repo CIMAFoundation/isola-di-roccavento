@@ -1,15 +1,17 @@
-//! The game's sounds made in code (user, 2026-10-30): the ambience follows
-//! the simulation. Gulls and cicadas are recordings (`data/sounds`), the game
-//! plays them beside this. Pure DSP, std only:
-//! the game plays [`Ambience`] as an endless stream and the [`Cue`]s as short
-//! clips; `examples/render.rs` writes them to WAV files to listen to.
+//! The game's ambience and cues (user, 2026-10-30): the ambience follows the
+//! simulation. The sea and the cues are made in code; the fire and the wind are
+//! recordings (user, 2026-11-02, `data/sounds`, `tools/sounds/prepare.py`)
+//! that the game decodes and hands over as [`Loop`]s, played here as beds.
+//! Gulls and cicadas are recordings the game plays beside this. Pure DSP, std
+//! only: the game plays [`Ambience`] as an endless stream and the [`Cue`]s as
+//! short clips; `examples/render.rs` writes them to WAV files to listen to.
 //!
 //! Every sound is also shown on screen: the game must stay playable muted
 //! (docs/01-GIOCO.md).
 
 use std::f32::consts::{PI, TAU};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const RATE: u32 = 44_100;
 const SR: f32 = RATE as f32;
@@ -102,98 +104,181 @@ impl Svf {
     }
 }
 
-/// A value that wanders: a new random target every `lo..hi` seconds, reached
-/// smoothly. Gusts, flicker, the swell of the cicadas.
-#[derive(Clone)]
-struct Wander {
-    now: f32,
-    target: f32,
-    left: f32,
-    glide: OnePole,
-    lo: f32,
-    hi: f32,
-}
-
-impl Wander {
-    fn new(lo: f32, hi: f32, glide_hz: f32) -> Wander {
-        Wander { now: 0.5, target: 0.5, left: 0.0, glide: OnePole { a: 1.0 - (-TAU * glide_hz / SR).exp(), y: 0.5 }, lo, hi }
-    }
-    fn run(&mut self, rng: &mut Rng) -> f32 {
-        self.left -= 1.0 / SR;
-        if self.left <= 0.0 {
-            self.left = rng.range(self.lo, self.hi);
-            self.target = rng.unit();
-        }
-        self.now = self.glide.run(self.target);
-        self.now
-    }
-}
-
 /// The levels the game asks for, each 0..1, written from the main thread and
-/// read by the audio thread (lock-free: one `f32` per atomic).
+/// read by the audio thread (lock-free: one `f32` per atomic), and the
+/// recorded beds, handed over once each as the game decodes them.
 #[derive(Default)]
-pub struct Levels([AtomicU32; Layer::COUNT]);
+pub struct Levels {
+    values: [AtomicU32; Layer::COUNT],
+    beds: [OnceLock<Loop>; Bed::COUNT],
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Layer {
-    /// The wind in the trees: the weather's speed, louder from high up.
-    Wind,
-    /// The fire near what the camera looks at.
+    /// The wind in the trees ([`Bed::TreeWind`]).
+    TreeWind,
+    /// The wind over open ground, grass and sea ([`Bed::OpenWind`]).
+    OpenWind,
+    /// How hard the wind blows, 0..1: the wind beds play a little faster
+    /// (higher) when it is strong.
+    Gale,
+    /// A fire burning near what the camera looks at ([`Bed::Fire`]).
     Fire,
+    /// A fire burning hard: the front's roar ([`Bed::Blaze`]).
+    Blaze,
+    /// Where the fire is heard, -1 (left) to 1 (right), 0 in the middle
+    /// (user, 2026-11-02): the two fire beds lean to the side that burns.
+    FirePan,
     /// The surf, near the coast.
     Sea,
     /// The pause: the world holds its breath, muffled and lower.
     Muffle,
     /// The ambience's own volume (the player's choice).
     Volume,
+    /// An important cue is playing: the whole ambience steps 6 dB down, in
+    /// 50 ms, and comes back in about half a second (it must not pump).
+    Duck,
 }
 
 impl Layer {
-    const COUNT: usize = 5;
+    const COUNT: usize = 10;
+}
+
+/// How far [`Layer::Duck`] lowers the ambience: 6 dB.
+pub const DUCK: f32 = 0.5;
+
+/// The recordings the ambience loops (`data/sounds/<file>.mp3`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bed {
+    Fire,
+    Blaze,
+    TreeWind,
+    OpenWind,
+}
+
+impl Bed {
+    pub const ALL: [Bed; 4] = [Bed::Fire, Bed::Blaze, Bed::TreeWind, Bed::OpenWind];
+    const COUNT: usize = 4;
+    /// The file in `data/sounds`, without `.mp3`.
+    pub fn file(self) -> &'static str {
+        match self {
+            Bed::Fire => "fuoco",
+            Bed::Blaze => "fuoco_forte",
+            Bed::TreeWind => "vento_alberi",
+            Bed::OpenWind => "vento_aperto",
+        }
+    }
+    /// The layer that sets its level.
+    fn layer(self) -> Layer {
+        match self {
+            Bed::Fire => Layer::Fire,
+            Bed::Blaze => Layer::Blaze,
+            Bed::TreeWind => Layer::TreeWind,
+            Bed::OpenWind => Layer::OpenWind,
+        }
+    }
+    /// The files are all at -23 LUFS (`prepare.py`); this brings level 1 to
+    /// about the loudness the sounds made in code had at level 1 (fire
+    /// -14 LUFS, wind -13 LUFS; measured with `examples/render.rs`), so the
+    /// game's mix stays where it was.
+    fn gain(self) -> f32 {
+        match self {
+            Bed::Fire | Bed::Blaze => 2.8,
+            Bed::TreeWind | Bed::OpenWind => 2.1,
+        }
+    }
+    /// Whether the wind's strength speeds it up.
+    fn windy(self) -> bool {
+        matches!(self, Bed::TreeWind | Bed::OpenWind)
+    }
 }
 
 impl Levels {
     pub fn set(&self, layer: Layer, v: f32) {
-        self.0[layer as usize].store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        let lo = if matches!(layer, Layer::FirePan) { -1.0 } else { 0.0 };
+        self.values[layer as usize].store(v.clamp(lo, 1.0).to_bits(), Ordering::Relaxed);
     }
     pub fn get(&self, layer: Layer) -> f32 {
-        f32::from_bits(self.0[layer as usize].load(Ordering::Relaxed))
+        f32::from_bits(self.values[layer as usize].load(Ordering::Relaxed))
+    }
+    /// Hands a decoded recording to the ambience; the first one given stays.
+    pub fn set_bed(&self, bed: Bed, l: Loop) {
+        let _ = self.beds[bed as usize].set(l);
+    }
+    pub fn has_bed(&self, bed: Bed) -> bool {
+        self.beds[bed as usize].get().is_some()
+    }
+}
+
+/// What `prepare.py` cuts beyond the loop, in seconds: a margin at each end
+/// (room for the padding an MP3 decoder adds) and the fade from the end of the
+/// loop into its start. Must match `BED_MARGIN_S` and `BED_FADE_S` there.
+pub const BED_MARGIN_S: f32 = 0.25;
+pub const BED_FADE_S: f32 = 4.0;
+
+/// A recording that loops with no seam: mono, 16 bit, at its own rate. The
+/// ambience reads it twice, half a loop apart, for the two ears.
+pub struct Loop {
+    samples: Box<[i16]>,
+    rate: u32,
+}
+
+impl Loop {
+    /// A loop from a decoded bed (mono, at `rate`): the margins dropped, the
+    /// last [`BED_FADE_S`] faded into the start at equal power. `None` if the
+    /// recording is too short.
+    pub fn from_bed(mono: &[f32], rate: u32) -> Option<Loop> {
+        let margin = (BED_MARGIN_S * rate as f32) as usize;
+        let fade = (BED_FADE_S * rate as f32) as usize;
+        let s = mono.get(margin..mono.len().checked_sub(margin)?)?;
+        let n = s.len().checked_sub(fade).filter(|&n| n >= fade)?;
+        let samples = (0..n)
+            .map(|i| {
+                let x = if i < fade {
+                    let r = i as f32 / fade as f32;
+                    s[i] * r.sqrt() + s[n + i] * (1.0 - r).sqrt()
+                } else {
+                    s[i]
+                };
+                (x.clamp(-1.0, 1.0) * 32767.0) as i16
+            })
+            .collect();
+        Some(Loop { samples, rate })
+    }
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+    /// The sample at a fractional position, wrapping.
+    fn at(&self, pos: f64) -> f32 {
+        let n = self.samples.len();
+        let i = pos as usize % n;
+        let w = pos.fract() as f32;
+        let a = f32::from(self.samples[i]);
+        let b = f32::from(self.samples[(i + 1) % n]);
+        (a + (b - a) * w) / 32768.0
     }
 }
 
 /// Frames between reads of [`Levels`] and filter updates.
 const BLOCK: usize = 64;
 
-/// A crackle of the fire: a few clicks of filtered noise, close together.
-#[derive(Clone, Default)]
-struct Crackle {
-    left: usize,
-    amp: f32,
-    decay: f32,
-    hp: Svf,
-    pan: f32,
-    clicks: u8,
-    gap: usize,
-}
-
-/// The ambience of the island, endless and stereo: wind, fire and sea
-/// mixed at the [`Levels`] the game sets.
+/// The ambience of the island, endless and stereo: the recorded beds (fire,
+/// wind) and the sea mixed at the [`Levels`] the game sets.
 pub struct Ambience {
     levels: Arc<Levels>,
     rng: Rng,
     /// Levels as heard: they glide to the asked ones in about a second.
     heard: [f32; Layer::COUNT],
     n: usize,
-    // wind
-    gust: Wander,
-    wind_bp: [Svf; 2],
-    wind_low: [OnePole; 2],
-    whistle: Svf,
-    // fire
-    flicker: Wander,
-    roar_lp: OnePole,
-    roar_bp: Svf,
-    crackles: Vec<Crackle>,
+    /// Where each bed is, in its own samples (each starts at its own place).
+    at: [f64; Bed::COUNT],
+    /// Each bed's step per output frame, set every block.
+    step: [f64; Bed::COUNT],
+    /// The fire's gain in each ear, from [`Layer::FirePan`], set every block.
+    fire_ears: [f32; 2],
     // sea
     waves: [Wave; 2],
     // the pause
@@ -241,14 +326,9 @@ impl Ambience {
             levels,
             heard: [0.0; Layer::COUNT],
             n: 0,
-            gust: Wander::new(1.2, 4.5, 0.35),
-            wind_bp: [Svf::new(500.0, 1.1), Svf::new(560.0, 1.1)],
-            wind_low: [OnePole::new(140.0), OnePole::new(150.0)],
-            whistle: Svf::new(1100.0, 9.0),
-            flicker: Wander::new(0.15, 0.6, 2.0),
-            roar_lp: OnePole::new(180.0),
-            roar_bp: Svf::new(700.0, 0.8),
-            crackles: vec![Crackle::default(); 10],
+            at: std::array::from_fn(|_| f64::from(rng.range(0.0, 1.0e6))),
+            step: [1.0; Bed::COUNT],
+            fire_ears: [1.0; 2],
             waves,
             muffle: [OnePole::new(18_000.0), OnePole::new(18_000.0)],
             rng,
@@ -256,15 +336,31 @@ impl Ambience {
     }
 
     fn block(&mut self) {
-        let glide = 1.0 - (-(BLOCK as f32) / (0.8 * SR)).exp();
+        let glide = |tau: f32| 1.0 - (-(BLOCK as f32) / (tau * SR)).exp();
         for (i, h) in self.heard.iter_mut().enumerate() {
-            let want = f32::from_bits(self.levels.0[i].load(Ordering::Relaxed));
-            *h += glide * (want - *h);
+            let want = f32::from_bits(self.levels.values[i].load(Ordering::Relaxed));
+            let k = if i == Layer::Duck as usize {
+                glide(if want > *h { 0.05 } else { 0.4 })
+            } else if i == Layer::FirePan as usize {
+                // the camera turns quickly: the fire follows in a quarter second
+                glide(0.25)
+            } else {
+                glide(0.8)
+            };
+            *h += k * (want - *h);
         }
-        let g = self.gust.now;
-        self.wind_bp[0].set(320.0 + 650.0 * g, 1.1);
-        self.wind_bp[1].set(360.0 + 700.0 * g, 1.1);
-        self.whistle.set(900.0 + 700.0 * g, 9.0);
+        // equal power, 1 in each ear in the middle; at ±0.8 (the game's
+        // widest) the far ear is at −13 dB and the near one at +3 dB
+        let a = (self.heard[Layer::FirePan as usize] + 1.0) * PI / 4.0;
+        self.fire_ears = [a.cos() * std::f32::consts::SQRT_2, a.sin() * std::f32::consts::SQRT_2];
+        // a strong wind plays its recordings up to 8 % faster (a little higher)
+        let gale = self.heard[Layer::Gale as usize];
+        for b in Bed::ALL {
+            if let Some(l) = self.levels.beds[b as usize].get() {
+                let speed = if b.windy() { 0.96 + 0.12 * gale } else { 1.0 };
+                self.step[b as usize] = f64::from(l.rate) / f64::from(RATE) * f64::from(speed);
+            }
+        }
         let m = self.heard[Layer::Muffle as usize];
         // 18 kHz open, 700 Hz muffled; exponential in between
         let fc = 18_000.0 * (700.0_f32 / 18_000.0).powf(m);
@@ -283,61 +379,26 @@ impl Ambience {
             self.block();
         }
         self.n = self.n.wrapping_add(1);
-        let [wind, fire, sea, muffle, volume] = self.heard;
+        let sea = self.heard[Layer::Sea as usize];
+        let muffle = self.heard[Layer::Muffle as usize];
+        let volume = self.heard[Layer::Volume as usize];
         let rng = &mut self.rng;
         let mut out = [0.0f32; 2];
 
-        // Wind: band-passed noise whose pitch and loudness follow the gusts.
-        let g = self.gust.run(rng);
-        if wind > 0.002 {
-            let amp = 2.5 * wind * (0.25 + 0.75 * g * g);
-            for c in 0..2 {
-                let x = rng.white();
-                out[c] += amp * (0.9 * self.wind_bp[c].run(x).band + 1.6 * self.wind_low[c].run(x));
+        // Fire and wind: the recordings, each ear half a loop from the other.
+        for b in Bed::ALL {
+            let i = b as usize;
+            let Some(l) = self.levels.beds[i].get() else { continue };
+            let level = self.heard[b.layer() as usize];
+            if level > 0.002 {
+                let amp = level * b.gain();
+                let [el, er] = if matches!(b, Bed::Fire | Bed::Blaze) { self.fire_ears } else { [1.0, 1.0] };
+                let half = (l.len() / 2) as f64;
+                out[0] += amp * el * l.at(self.at[i]);
+                out[1] += amp * er * l.at(self.at[i] + half);
             }
-            out[0] += amp * g * g * 0.25 * self.whistle.run(rng.white()).band;
-            out[1] += amp * g * g * 0.25 * self.whistle.ic1;
-        }
-
-        // Fire: a low roar that flickers, and crackles.
-        let fl = self.flicker.run(rng);
-        if fire > 0.002 {
-            let x = rng.white();
-            let roar = fire * (0.5 + 0.7 * fl) * (2.2 * self.roar_lp.run(x) + 0.35 * self.roar_bp.run(x).band);
-            out[0] += roar;
-            out[1] += roar;
-            let rate = 4.0 + 70.0 * fire * (0.6 + 0.8 * fl);
-            if rng.unit() < rate / SR {
-                if let Some(c) = self.crackles.iter_mut().find(|c| c.clicks == 0) {
-                    let big = rng.unit().powi(3);
-                    c.clicks = 1 + (rng.unit() * 4.0) as u8;
-                    c.amp = fire.sqrt() * (0.15 + 0.85 * big);
-                    c.hp = Svf::new(rng.range(1200.0, 4500.0) * (1.0 - 0.6 * big), 0.9);
-                    c.pan = rng.range(-0.8, 0.8);
-                    c.left = 0;
-                    c.gap = 0;
-                }
-            }
-            for c in self.crackles.iter_mut().filter(|c| c.clicks > 0) {
-                if c.gap > 0 {
-                    c.gap -= 1;
-                    continue;
-                }
-                if c.left == 0 {
-                    c.left = (rng.range(0.6, 5.0) * SR / 1000.0) as usize;
-                    c.decay = (-1.0 / c.left as f32 * 4.0).exp();
-                }
-                let y = c.hp.run(rng.white() * c.amp).high;
-                c.amp *= c.decay;
-                out[0] += y * (1.0 - c.pan) * 1.2;
-                out[1] += y * (1.0 + c.pan) * 1.2;
-                c.left -= 1;
-                if c.left == 0 {
-                    c.clicks -= 1;
-                    c.amp *= rng.range(0.4, 1.1);
-                    c.gap = (rng.range(2.0, 25.0) * SR / 1000.0) as usize;
-                }
-            }
+            // it runs on silent too: a level that comes back finds it elsewhere
+            self.at[i] = (self.at[i] + self.step[i]) % l.len() as f64;
         }
 
         // Sea: waves that rise and draw back, each with its fizz.
@@ -356,7 +417,8 @@ impl Ambience {
             }
         }
 
-        let gain = volume * (1.0 - 0.55 * muffle);
+        let duck = self.heard[Layer::Duck as usize];
+        let gain = volume * (1.0 - 0.55 * muffle) * (1.0 - DUCK * duck);
         [soft_clip(gain * self.muffle[0].run(out[0])), soft_clip(gain * self.muffle[1].run(out[1]))]
     }
 }
@@ -580,16 +642,42 @@ mod tests {
     #[test]
     fn silent_when_every_layer_is_off() {
         let levels = Arc::new(Levels::default());
+        levels.set_bed(Bed::Fire, Loop::from_bed(&noise_bed(32_000, 10.0), 32_000).unwrap());
         levels.set(Layer::Volume, 1.0);
         let mut a = Ambience::new(levels, 7);
         assert!((0..RATE).all(|_| a.frame() == [0.0, 0.0]));
     }
 
+    /// A bed of white noise, as `prepare.py` cuts it.
+    fn noise_bed(rate: u32, seconds: f32) -> Vec<f32> {
+        let mut rng = Rng(9);
+        (0..(seconds * rate as f32) as usize).map(|_| 0.1 * rng.white()).collect()
+    }
+
+    #[test]
+    fn a_bed_loops_with_no_seam() {
+        let rate = 32_000;
+        let x: Vec<f32> = (0..rate * 12).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let l = Loop::from_bed(&x, rate).unwrap();
+        let margin = (BED_MARGIN_S * rate as f32) as usize;
+        let fade = (BED_FADE_S * rate as f32) as usize;
+        assert_eq!(l.len(), x.len() - 2 * margin - fade);
+        // the wrap goes on as the recording did: from the end to the sample after it
+        let (end, start) = (l.at((l.len() - 1) as f64), l.at(l.len() as f64));
+        let (a, b) = (x[margin + l.len() - 1], x[margin + l.len()]);
+        assert!((end - a).abs() < 1e-3 && (start - b).abs() < 1e-3, "{end} {start} / {a} {b}");
+        assert!(Loop::from_bed(&x[..rate as usize * 5], rate).is_none());
+    }
+
     #[test]
     fn layers_are_heard_and_bounded() {
-        for layer in [Layer::Wind, Layer::Fire, Layer::Sea] {
+        for layer in [Layer::TreeWind, Layer::OpenWind, Layer::Fire, Layer::Blaze, Layer::Sea] {
             let levels = Arc::new(Levels::default());
+            for b in Bed::ALL {
+                levels.set_bed(b, Loop::from_bed(&noise_bed(32_000, 10.0), 32_000).unwrap());
+            }
             levels.set(Layer::Volume, 1.0);
+            levels.set(Layer::Gale, 1.0);
             levels.set(layer, 1.0);
             let mut a = Ambience::new(levels, 3);
             let x: Vec<f32> = (0..RATE * 8).flat_map(|_| a.frame()).collect();
@@ -597,6 +685,47 @@ mod tests {
             assert!(rms > 0.01, "{layer:?}: rms {rms}");
             assert!(x.iter().all(|s| s.is_finite() && s.abs() <= 1.0), "{layer:?}");
         }
+    }
+
+    #[test]
+    fn the_fire_leans_to_its_side() {
+        let ears = |pan: f32| {
+            let levels = Arc::new(Levels::default());
+            levels.set_bed(Bed::Fire, Loop::from_bed(&noise_bed(32_000, 10.0), 32_000).unwrap());
+            levels.set(Layer::Volume, 0.5);
+            levels.set(Layer::Fire, 1.0);
+            levels.set(Layer::FirePan, pan);
+            let mut a = Ambience::new(levels, 2);
+            (0..RATE * 3).for_each(|_| drop(a.frame()));
+            let x: Vec<[f32; 2]> = (0..RATE * 5).map(|_| a.frame()).collect();
+            let rms = |c: usize| (x.iter().map(|f| f[c] * f[c]).sum::<f32>() / x.len() as f32).sqrt();
+            20.0 * (rms(1) / rms(0)).log10()
+        };
+        assert!(ears(0.0).abs() < 1.0, "{}", ears(0.0));
+        assert!(ears(0.8) > 10.0 && ears(-0.8) < -10.0, "{} {}", ears(0.8), ears(-0.8));
+    }
+
+    #[test]
+    fn ducking_steps_6_db_down_and_comes_back() {
+        let levels = Arc::new(Levels::default());
+        levels.set(Layer::Volume, 0.3);
+        levels.set(Layer::Sea, 1.0);
+        let mut a = Ambience::new(levels.clone(), 4);
+        let mut rms = |a: &mut Ambience, s: f32| {
+            let x: Vec<f32> = (0..(s * SR) as usize).flat_map(|_| a.frame()).collect();
+            (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+        };
+        rms(&mut a, 3.0);
+        let open = rms(&mut a, 20.0);
+        levels.set(Layer::Duck, 1.0);
+        rms(&mut a, 0.2);
+        let ducked = rms(&mut a, 20.0);
+        let db = 20.0 * (ducked / open).log10();
+        assert!((-7.5..-4.5).contains(&db), "{db} dB");
+        levels.set(Layer::Duck, 0.0);
+        rms(&mut a, 2.0);
+        let back = 20.0 * (rms(&mut a, 20.0) / open).log10();
+        assert!(back.abs() < 1.5, "{back} dB");
     }
 
     #[test]
