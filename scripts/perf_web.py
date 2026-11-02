@@ -163,7 +163,7 @@ def open_game(pw, browser_name, site, args, init_script=None):
         page.goto(f'{base}?{args.query}')
         page.wait_for_selector('#play')
         page.click('#play')
-        page.wait_for_function('window.roccaWasm && !document.querySelector("#loading")')
+        page.wait_for_function('!document.querySelector("#loading")')
     else:
         page.goto(f'{base}?playtest=1&{args.query}')
         page.wait_for_function('window.roccaPlaytest?.state && !document.querySelector("#loading")')

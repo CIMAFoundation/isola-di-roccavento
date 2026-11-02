@@ -303,67 +303,6 @@
       const fill = document.querySelector('#fill');
       const status = document.querySelector('#status');
 
-      // A record of the launch, kept on the device (2026-10-31: on an iPhone
-      // the page dies just after the logo, and nothing on screen says where).
-      // Each step goes to localStorage at once; leaving the page closes it.
-      // If the last launch was not closed, the page died: its steps are shown
-      // on top of the intro page, to be photographed.
-      const traceKey = 'rocca_avvio';
-      const born = performance.now();
-      let traceSteps = [];
-      function trace(step) {
-        const mem = window.roccaWasm ? Math.round(window.roccaWasm.exports.memory.buffer.byteLength / 1048576) + ' MiB' : '';
-        // the launch's steps all kept, of the running game the last seconds
-        const line = `${((performance.now() - born) / 1000).toFixed(1)} s ${step} ${mem}`.trim();
-        if (step.startsWith('run ') && traceSteps.length && traceSteps.at(-1).includes(' run ')) {
-          const runs = traceSteps.filter(l => l.includes(' run '));
-          if (runs.length >= 6) traceSteps.splice(traceSteps.indexOf(runs[0]), 1);
-        }
-        traceSteps.push(line);
-        traceSteps = traceSteps.slice(-24);
-        saveTrace();
-      }
-      function saveTrace() {
-        try { localStorage.setItem(traceKey, JSON.stringify({ open: true, steps: traceSteps, logs: traceLogs })); } catch (e) {}
-      }
-      // The console's last messages too (the game's log, WebGL and wgpu
-      // errors): what the Web Inspector would show, for a phone that cannot
-      // be connected to one. Formatting (%c and its styles) is dropped.
-      let traceLogs = [];
-      for (const level of ['log', 'info', 'warn', 'error']) {
-        const original = console[level].bind(console);
-        console[level] = (...args) => {
-          original(...args);
-          try {
-            let text = args.map(a => typeof a === 'string' ? a : (a instanceof Error ? a.message : JSON.stringify(a))).join(' ');
-            if (text.includes('control flow')) return;
-            text = text.replace(/%c/g, '').replace(/\s*(color|background|font-style):[^;]*;?/g, '').replace(/\S*\/registry\/src\/[^/]+\//g, '').replace(/\s+/g, ' ').trim();
-            traceLogs.push(`${((performance.now() - born) / 1000).toFixed(1)} ${level[0].toUpperCase()} ${text.slice(0, 220)}`);
-            traceLogs = traceLogs.slice(-30);
-            saveTrace();
-          } catch (e) {}
-        };
-      }
-      try {
-        const last = JSON.parse(localStorage.getItem(traceKey) || 'null');
-        if (last && last.open && last.steps.length > 1) {
-          const box = document.createElement('pre');
-          box.style.cssText = 'margin:0;padding:10px 14px;background:#fff3cd;color:#5a4300;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap;border-bottom:1px solid #e0c870';
-          box.textContent = '⚠ ' + navigator.userAgent + '\n' + last.steps.join('\n') + (last.logs && last.logs.length ? '\n— console —\n' + last.logs.join('\n') : '');
-          intro.prepend(box);
-        }
-        localStorage.removeItem(traceKey);
-      } catch (e) {}
-      addEventListener('pagehide', () => { try { localStorage.removeItem(traceKey); } catch (e) {} });
-      addEventListener('error', e => trace('error: ' + String(e.message).slice(0, 120)));
-      addEventListener('unhandledrejection', e => { if (!String(e.reason).includes('control flow')) trace('rejection: ' + String(e.reason).slice(0, 120)); });
-      // The game's memory, for the record: the instance is caught as it is made.
-      const instantiate = WebAssembly.instantiate;
-      WebAssembly.instantiate = async (...args) => {
-        const made = await instantiate.apply(WebAssembly, args);
-        window.roccaWasm = made.instance || made;
-        return made;
-      };
 
       // Graphics profile: low on phones and tablets (a coarse primary pointer),
       // medium on a computer. `?q=bassa|media` forces one, for testing. The game
@@ -545,7 +484,6 @@
         // its memory after a reload in the simulator)
         if (leaving) return;
         event.preventDefault();
-        trace('webglcontextlost');
         const message = document.createElement('div');
         message.id = 'loading';
         message.style.pointerEvents = 'auto';
@@ -582,7 +520,6 @@
       async function start() {
         if (started) return;
         started = true;
-        trace('play ' + innerWidth + 'x' + innerHeight + '@' + devicePixelRatio + ' ' + window.roccaProfile);
         document.body.classList.add('playing');
         intro.classList.add('leaving');
         setTimeout(() => intro.remove(), 400);
@@ -605,19 +542,11 @@
           const compiling = retried('game_bg.wasm', () => { loadedBytes = 0; return compile(); });
           if (!lowMemory) return Promise.all([compiling, loadData()]);
           const module = await compiling;
-          trace('wasm');
           await loadData();
-          trace('data');
           return [module];
         })()
           .then(([module]) => {
             status.textContent = roccaText('starting');
-            trace('init');
-            // a line every second while the game runs, frames drawn since the last
-            let frames = 0;
-            const count = () => { frames++; requestAnimationFrame(count); };
-            requestAnimationFrame(count);
-            setInterval(() => { trace('run ' + frames); frames = 0; }, 1000);
             return init({ module_or_path: module });
           }).then(() => { loading.remove(); focusCanvas(); })
           .catch(error => {

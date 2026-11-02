@@ -94,12 +94,13 @@ fn texture(bytes: &[u8], images: &mut Assets<Image>, contexts: &mut EguiContexts
 
 /// A picture in `assets/`: compiled into the desktop binary, with the data
 /// files in the browser (`datafs`), so the wasm stays small (2026-10-30).
+/// `read`, not `take`: every entry into a game loads them again.
 macro_rules! picture {
     ($path:expr) => {{
         #[cfg(not(target_arch = "wasm32"))]
         let bytes: std::borrow::Cow<'static, [u8]> = include_bytes!(concat!("../../../../assets/", $path)).as_slice().into();
         #[cfg(target_arch = "wasm32")]
-        let bytes: std::borrow::Cow<'static, [u8]> = datafs::take(concat!("assets/", $path)).unwrap_or_default().into();
+        let bytes: std::borrow::Cow<'static, [u8]> = datafs::read(concat!("assets/", $path)).unwrap_or_default().into();
         bytes
     }};
 }

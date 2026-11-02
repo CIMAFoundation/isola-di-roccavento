@@ -179,12 +179,13 @@ pub fn atlas() -> &'static Atlas {
 }
 
 /// The atlas image file: compiled into the desktop binary, from the page's
-/// data in the browser.
+/// data in the browser, where it stays: every entry into a game builds the
+/// plants again (`vegetation::spawn`), and a `take` failed the second time.
 pub fn atlas_png() -> std::borrow::Cow<'static, [u8]> {
     #[cfg(not(target_arch = "wasm32"))]
     let bytes: std::borrow::Cow<'static, [u8]> = include_bytes!("../../../assets/models/foliage_atlas.png").as_slice().into();
     #[cfg(target_arch = "wasm32")]
-    let bytes: std::borrow::Cow<'static, [u8]> = datafs::take("assets/models/foliage_atlas.png")
+    let bytes: std::borrow::Cow<'static, [u8]> = datafs::read("assets/models/foliage_atlas.png")
         .expect("assets/models/foliage_atlas.png is not in the page's data")
         .into();
     bytes

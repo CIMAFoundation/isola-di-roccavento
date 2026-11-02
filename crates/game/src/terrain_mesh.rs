@@ -828,7 +828,7 @@ pub fn build(
     // The canopy (`vegetation::canopy`): its cover in the colour's alpha, its
     // kind and brightness beside the normal's x and z (y is rebuilt, it is
     // always up), so the terrain needs no texture more (WebGL2 counts them).
-    let started = std::time::Instant::now();
+    let started = bevy::platform::time::Instant::now();
     let mut canopy = crate::vegetation::canopy::canopy(scn, cols, rows, posting);
     // `ROCCA_CANOPY=0`: the bare ground, for comparisons
     if std::env::var("ROCCA_CANOPY").is_ok_and(|v| v == "0") {
@@ -871,7 +871,7 @@ pub fn build(
 
     // the adaptive meshes, all chunks and levels at once (`terrain_tin`)
     let tin = tin_enabled();
-    let started = std::time::Instant::now();
+    let started = bevy::platform::time::Instant::now();
     let mut tin_meshes = if tin {
         tin_geometry(scn, &shore, &grid, rows, (chunks_x, chunks_y), levels, stride, (TIN_TOL_COARSE_M, KERB_STEP_COARSE_M, TIN_CANDIDATES_COARSE))
     } else {
