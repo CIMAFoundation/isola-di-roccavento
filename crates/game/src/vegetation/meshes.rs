@@ -14,7 +14,11 @@
 //! The colour of a leaf or wood vertex is the model's own shading, halved;
 //! the plant's tint (also halved) multiplies it and the atlas paints it. What
 //! the fire adds (twigs, debris) has absolute colours and points at the
-//! atlas's flat grey.
+//! atlas's flat grey. On the leaves of a lobed stand-in ([`lobed_mesh`]) the
+//! uv is only the corner of the canopy tile: the shader paints the tile over
+//! them (`PLANT_CANOPY`).
+
+use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
@@ -26,7 +30,8 @@ pub const VERTEX_BYTES: u64 = 28;
 pub enum Tier {
     /// The authored model with its leaf cards (desktop, near the camera).
     Full = 0,
-    /// A six-sided crown and a trunk wearing the species' canopy tile.
+    /// A six-sided crown and a trunk wearing the species' canopy tile; in
+    /// the browser the lobed stand-in instead ([`lobed_mesh`]).
     Proxy = 1,
     /// The crown as a bipyramid, for the far distance.
     Far = 2,
@@ -69,6 +74,9 @@ pub struct PlantMesh {
     pub cutout: bool,
     /// Both faces drawn (leaf cards, twigs); a closed crown culls its back.
     pub double_sided: bool,
+    /// Its leaves are painted with the canopy tile by the shader, in three
+    /// projections (`PLANT_CANOPY`): the lobed stand-in.
+    pub canopy: bool,
 }
 
 impl PlantMesh {
@@ -124,6 +132,35 @@ pub fn crown_tone(name: &str) -> f32 {
     let p = proxy_of(name);
     (0.5 * (p.shade_low + p.shade_high)).powf(2.2)
 }
+
+/// `name`'s lobed stand-in, the browser's plant (2026-11-02): the authored
+/// model without the leaf cards, which need a cut-out (on WebGL2 without
+/// MSAA a `discard` with jagged edges, and tile-based GPUs lose their
+/// hidden-surface removal). The trunk and limbs as they are; each crown part
+/// a closed lump, its core (a lumpy icosahedron) grown to the reach of the
+/// part's cards. So a pine keeps its umbrella pads on a forked trunk and a
+/// holm oak its three lobes, where the six-sided proxy is one crown on a
+/// stick. Opaque and single-sided.
+pub fn lobed_mesh(name: &'static str) -> PlantMesh {
+    let mut b = Builder::default();
+    b.lobes(name);
+    let mut m = b.finish(false, false);
+    m.canopy = true;
+    m
+}
+
+/// Size (u, v) of a canopy tile in the atlas: every variety's is the same
+/// (`scripts/build_vegetation_models.py`, `canopy_rect`), and the shader
+/// repeats it over the lobes from its corner.
+pub fn canopy_tile() -> [f32; 2] {
+    let [u0, v0, u1, v1] = crate::models::variety(crate::models::variety_names(crate::models::SPECIES[0])[0]).canopy;
+    [u1 - u0, v1 - v0]
+}
+
+/// How much of its cards' reach a lump of [`lobed_mesh`] fills: the cards'
+/// leaves do not reach their corners, and a lump as wide as their box read
+/// as a fat cushion.
+const LOBE_FILL: f32 = 0.82;
 
 /// What a distant plant keeps of its model: the crown's bounding box, its
 /// tone low and high, and the trunk below it.
@@ -285,6 +322,128 @@ impl Builder {
         }
     }
 
+    /// The lobed stand-in ([`lobed_mesh`]). The leaves of the live model
+    /// come apart in pieces, triangles joined by their vertices: a core is
+    /// a piece painted with the canopy tile, the others are cards, each
+    /// hung round the core it is nearest to. A lump is its core stretched,
+    /// about the middle of its cards' box, to [`LOBE_FILL`] of that box, in
+    /// the cards' tone (the core is the dark inside of the crown). Wood
+    /// hidden inside a lump is left out.
+    fn lobes(&mut self, name: &str) {
+        let m = crate::models::live(name);
+        let [u0, v0, u1, v1] = crate::models::variety(name).canopy;
+        let n = m.positions.len();
+        let at = |i: usize| Vec3::from(m.positions[i]);
+        let shade_of = |i: usize| m.colors[i][1];
+        let on_canopy = |i: usize| {
+            m.uvs.get(i).is_some_and(|uv| (u0 - 1e-3..=u1 + 1e-3).contains(&uv[0]) && (v0 - 1e-3..=v1 + 1e-3).contains(&uv[1]))
+        };
+        let bounds = |vs: &[usize]| {
+            vs.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &i| (lo.min(at(i)), hi.max(at(i))))
+        };
+        // the pieces of the leaves (union-find over their triangles)
+        fn root(of: &mut [usize], mut i: usize) -> usize {
+            while of[i] != i {
+                of[i] = of[of[i]];
+                i = of[i];
+            }
+            i
+        }
+        let mut of: Vec<usize> = (0..n).collect();
+        let tris: Vec<[usize; 3]> = m.indices.chunks_exact(3).map(|t| [t[0] as usize, t[1] as usize, t[2] as usize]).collect();
+        for t in tris.iter().filter(|t| t.iter().all(|&i| !m.wood[i])) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2])] {
+                let (ra, rb) = (root(&mut of, a), root(&mut of, b));
+                of[ra] = rb;
+            }
+        }
+        let mut pieces: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in (0..n).filter(|&i| !m.wood[i]) {
+            let r = root(&mut of, i);
+            pieces.entry(r).or_default().push(i);
+        }
+        struct Part {
+            core: Vec<usize>,
+            centre: Vec3,
+            half: Vec3,
+            /// The box of the core and its cards.
+            lo: Vec3,
+            hi: Vec3,
+            /// The cards' tone: sum and count of their vertices' shade.
+            card_shade: (f32, usize),
+        }
+        let (cores, cards): (Vec<Vec<usize>>, Vec<Vec<usize>>) = pieces.into_values().partition(|p| p.iter().all(|&i| on_canopy(i)));
+        let mut parts: Vec<Part> = cores
+            .into_iter()
+            .map(|core| {
+                let (lo, hi) = bounds(&core);
+                Part { centre: (lo + hi) * 0.5, half: ((hi - lo) * 0.5).max(Vec3::splat(1e-3)), lo, hi, card_shade: (0.0, 0), core }
+            })
+            .collect();
+        for card in &cards {
+            let mid = card.iter().map(|&i| at(i)).sum::<Vec3>() / card.len() as f32;
+            let reach = |p: &Part| ((mid - p.centre) / p.half).length();
+            if let Some(p) = parts.iter_mut().min_by(|a, b| reach(a).total_cmp(&reach(b))) {
+                let (lo, hi) = bounds(card);
+                (p.lo, p.hi) = (p.lo.min(lo), p.hi.max(hi));
+                p.card_shade.0 += card.iter().map(|&i| shade_of(i)).sum::<f32>();
+                p.card_shade.1 += card.len();
+            }
+        }
+        // the whole crown, for the occlusion toward its heart and its bottom
+        let (crown_lo, crown_hi) = parts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(p.lo), hi.max(p.hi)));
+        // each lump: where it stands and how far it reaches (an ellipsoid, to hide the wood inside it)
+        let mut lumps: Vec<(Vec3, Vec3)> = Vec::new();
+        for p in &parts {
+            let centre = (p.lo + p.hi) * 0.5;
+            let reach = (p.hi - p.lo) * 0.5 * LOBE_FILL;
+            let k = reach / p.half;
+            let core_shade = p.core.iter().map(|&i| shade_of(i)).sum::<f32>() / p.core.len() as f32;
+            let tone = if p.card_shade.1 == 0 { 1.0 } else { p.card_shade.0 / p.card_shade.1 as f32 / core_shade.max(1e-3) };
+            let mut index = std::collections::HashMap::new();
+            for &i in &p.core {
+                let q = centre + (at(i) - p.centre) * k;
+                let normal = m.normals.get(i).map(|nm| (Vec3::from(*nm) / k).normalize_or_zero());
+                // halved, and a few percent darker, as the proxies: the
+                // cards let the crown's shade show between them
+                let c = (0.5 * 0.9 * (shade_of(i) * tone).powf(2.2)).min(1.0);
+                let occlusion = crown_occlusion(q, crown_lo, crown_hi);
+                index.insert(i, self.vertex(q, normal, Kind::Leaf, [u0, v0], [c, c, c, occlusion]));
+            }
+            // counter-clockwise seen from outside, as the closed crowns are culled
+            let start = self.indices.len();
+            for t in tris.iter().filter(|t| t.iter().all(|i| index.contains_key(i))) {
+                self.indices.extend(t.iter().map(|i| index[i]));
+            }
+            let volume: f32 = self.indices[start..]
+                .chunks_exact(3)
+                .map(|t| {
+                    let [a, b, c] = [0, 1, 2].map(|k| self.positions[t[k] as usize] - centre);
+                    a.dot(b.cross(c))
+                })
+                .sum();
+            if volume < 0.0 {
+                for t in self.indices[start..].chunks_exact_mut(3) {
+                    t.swap(1, 2);
+                }
+            }
+            lumps.push((centre, reach));
+        }
+        // the trunk and limbs, without what the lumps hide
+        let hidden = |i: usize| lumps.iter().any(|&(c, r)| ((at(i) - c) / r.max(Vec3::splat(1e-3))).length_squared() < 0.81);
+        let mut index = std::collections::HashMap::new();
+        for t in tris.iter().filter(|t| t.iter().all(|&i| m.wood[i]) && !t.iter().all(|&i| hidden(i))) {
+            for &i in t {
+                let v = *index.entry(i).or_insert_with(|| {
+                    let normal = m.normals.get(i).map(|nm| Vec3::from(*nm).normalize_or_zero());
+                    let uv = m.uvs.get(i).copied().unwrap_or(crate::models::atlas().grey);
+                    self.vertex(at(i), normal, Kind::Wood, uv, [0.5, 0.5, 0.5, 0.8])
+                });
+                self.indices.push(v);
+            }
+        }
+    }
+
     /// What fire adds to a plant: its twig skeleton and the debris at its
     /// foot, in absolute colours (sRGB in the bake).
     fn remains(&mut self, piece: &crate::models::Piece) {
@@ -327,7 +486,7 @@ impl Builder {
                 vertices.extend_from_slice(&unorm16(v));
             }
         }
-        PlantMesh { vertices, indices: self.indices.iter().map(|&i| i as u16).collect(), cutout, double_sided }
+        PlantMesh { vertices, indices: self.indices.iter().map(|&i| i as u16).collect(), cutout, double_sided, canopy: false }
     }
 }
 
@@ -372,6 +531,42 @@ mod tests {
                     }
                     _ => assert!(kinds.iter().any(|&k| k == Kind::Leaf.snorm()), "{name} {tier:?}: leaves"),
                 }
+            }
+        }
+    }
+
+    /// The lobed stand-ins: opaque, single-sided and painted by the shader;
+    /// a lump for each crown part of the model and no cards, so fewer
+    /// triangles than the model; their leaves face out, as their normals do
+    /// (the back faces are culled), and stay within the model's reach.
+    #[test]
+    fn lobed_stand_ins_are_closed_lumps_facing_out() {
+        assert!(canopy_tile()[0] > 0.0 && canopy_tile()[1] > 0.0);
+        for name in every_variety() {
+            let [u0, v0, u1, v1] = crate::models::variety(name).canopy;
+            assert!(((u1 - u0) - canopy_tile()[0]).abs() < 1e-4 && ((v1 - v0) - canopy_tile()[1]).abs() < 1e-4, "{name}: a canopy tile of its own size");
+            let m = lobed_mesh(name);
+            assert!(!m.cutout && !m.double_sided && m.canopy);
+            let full = variety_mesh(name, Tier::Full);
+            assert!(m.triangles() < full.triangles(), "{name}: {} triangles for the model's {}", m.triangles(), full.triangles());
+            assert!(m.triangles() >= 20, "{name}: at least a lump");
+            assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
+            let kind = |i: usize| m.vertices[i * VERTEX_BYTES as usize + 15] as i8;
+            let mut leaves = 0;
+            for t in m.indices.chunks_exact(3) {
+                let [a, b, c] = [0, 1, 2].map(|k| t[k] as usize);
+                if kind(a) != Kind::Leaf.snorm() {
+                    continue;
+                }
+                leaves += 1;
+                let face = (m.position(b) - m.position(a)).cross(m.position(c) - m.position(a));
+                let normals = m.normal(a) + m.normal(b) + m.normal(c);
+                assert!(face.dot(normals) > 0.0, "{name}: a lump's face winds against its normals");
+            }
+            assert!(leaves >= 20 && leaves % 20 == 0, "{name}: {leaves} leaf triangles, lumps of 20");
+            for i in 0..m.vertex_count() {
+                let p = m.position(i);
+                assert!(p.y >= -0.5 && p.y <= 1.3 && p.x.abs() <= 1.3 && p.z.abs() <= 1.3, "{name}: {p}");
             }
         }
     }

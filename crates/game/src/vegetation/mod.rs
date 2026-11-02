@@ -87,8 +87,17 @@ pub(crate) struct PlantScene {
     tiles: Vec<Tile>,
     atlas: atlas::Atlas,
     /// A burnt crown is gone and the remains show (desktop); otherwise the
-    /// burnt plant turns all charcoal.
+    /// burnt plant turns all charcoal and its crown shrinks.
     remains: bool,
+    /// Size of a canopy tile in the atlas (`meshes::canopy_tile`), for the
+    /// shader that paints it over the lobed stand-ins.
+    canopy_tile: [f32; 2],
+    /// A thinned plant is not drawn at all, burning or not: each group is
+    /// sorted by the thinning rank and only the share kept is drawn, so the
+    /// thinning saves vertices too (the browser, where nothing else does).
+    /// Elsewhere every plant is drawn and the shader hides the thinned ones
+    /// the fire has not reached.
+    thin_by_count: bool,
 }
 
 pub(crate) struct Tile {
@@ -109,6 +118,17 @@ pub(crate) struct Group {
     count: u32,
     /// Each plant in the scenario frame (x east, y north) and its lag.
     spots: Vec<[f32; 3]>,
+    /// Each plant's thinning rank as the GPU reads it (a byte), ascending
+    /// when the scene thins by count (`PlantScene::thin_by_count`).
+    ranks: Vec<u8>,
+}
+
+impl Group {
+    /// How many of its plants the thinning keeps, when they are sorted by
+    /// their rank: those the shader would show (`seed.x < keep`).
+    pub(crate) fn kept(&self, keep: f32) -> u32 {
+        self.ranks.partition_point(|&r| (r as f32 / 255.0) < keep) as u32
+    }
 }
 
 /// The fire as one group's plants see it: per plant the instant it catches
@@ -215,6 +235,7 @@ fn by_variety(stand: &scatter::Stand) -> BTreeMap<&'static str, Vec<&scatter::In
 static SCENES: AtomicU64 = AtomicU64::new(1);
 
 pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Graphics>) {
+    let started = bevy::platform::time::Instant::now();
     let scn = &sim.scn;
     let w = scn.world;
     let (rows, cols) = (w.fire_rows, w.fire_cols);
@@ -223,6 +244,11 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
     let full = gfx.lod_m > 0.0;
     let far = tile_cells < rows.max(cols);
     let remains = !cfg!(target_arch = "wasm32");
+    // the browser's stand-ins: the crown parts as lumps (`meshes::lobed_mesh`);
+    // they cast their own shadows (2026-11-02: the cheapest crowns stood out
+    // of the lumps and shadowed them in hard notches)
+    let lobes = gfx.lobes;
+    let thin_by_count = !remains;
 
     let mut meshes: Vec<PlantMesh> = Vec::new();
     let mut mesh_of: HashMap<(&'static str, Tier), u32> = HashMap::new();
@@ -238,7 +264,11 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
             plants += stand.inst.len();
             let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             let first = groups.len();
-            for (name, list) in by_variety(&stand) {
+            for (name, mut list) in by_variety(&stand) {
+                if thin_by_count {
+                    // the plants kept by the thinning first (`Group::kept`)
+                    list.sort_by(|a, b| plant_rank(a.base.x, -a.base.z).total_cmp(&plant_rank(b.base.x, -b.base.z)));
+                }
                 let mut tiers = [None; TIERS];
                 for (tier, on) in [
                     (Tier::Full, full),
@@ -249,7 +279,7 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
                 ] {
                     if on {
                         let id = *mesh_of.entry((name, tier)).or_insert_with(|| {
-                            meshes.push(meshes::variety_mesh(name, tier));
+                            meshes.push(if tier == Tier::Proxy && lobes { meshes::lobed_mesh(name) } else { meshes::variety_mesh(name, tier) });
                             meshes.len() as u32 - 1
                         });
                         tiers[tier as usize] = Some(id);
@@ -257,16 +287,19 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
                 }
                 let mut instances = Vec::with_capacity(list.len() * INSTANCE_BYTES as usize);
                 let mut spots = Vec::with_capacity(list.len());
+                let mut ranks = Vec::with_capacity(list.len());
                 for i in &list {
                     // a generous box: the models stand within about a unit of
                     // their foot, a little more in height and in the wind
                     lo = lo.min(i.base - Vec3::new(i.scale.x * 1.3, i.scale.y * 0.5, i.scale.x * 1.3));
                     hi = hi.max(i.base + Vec3::new(i.scale.x * 1.3, i.scale.y * 1.35, i.scale.x * 1.3));
-                    instances.extend_from_slice(&instance(i));
+                    let record = instance(i);
+                    ranks.push(record[28]);
+                    instances.extend_from_slice(&record);
                     let (x, y) = (i.base.x, -i.base.z);
                     spots.push([x, y, plant_lag(x, y)]);
                 }
-                groups.push(Group { tiers, instances, count: list.len() as u32, spots });
+                groups.push(Group { tiers, instances, count: list.len() as u32, spots, ranks });
             }
             tiles.push(Tile { lo, hi, cells, groups: first..groups.len() });
         }
@@ -276,11 +309,12 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
         .map(|g| g.count as usize * g.tiers[if full { 0 } else { 1 }].map_or(0, |m| meshes[m as usize].triangles()))
         .sum();
     info!(
-        "vegetation: {plants} plants in {} tiles, {} groups, {} meshes; {:.2} M triangles at the nearest level",
+        "vegetation: {plants} plants in {} tiles, {} groups, {} meshes; {:.2} M triangles at the nearest level; built in {:.0} ms",
         tiles.len(),
         groups.len(),
         meshes.len(),
         triangles as f32 / 1e6,
+        started.elapsed().as_secs_f32() * 1000.0,
     );
     let fire = groups
         .iter()
@@ -294,6 +328,8 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
         tiles,
         atlas: atlas::atlas(),
         remains,
+        canopy_tile: meshes::canopy_tile(),
+        thin_by_count,
     };
     commands.insert_resource(Vegetation {
         scene: Arc::new(scene),
@@ -387,6 +423,7 @@ pub fn clock(sim: Res<Sim>, time: Res<Time>, mut veg: ResMut<Vegetation>) {
     let to = ((weather.wind_dir_deg + 180.0) as f32).to_radians();
     let strength = (weather.wind_speed_kmh as f32 / 45.0).clamp(0.0, 1.0);
     let remains = if veg.scene.remains { 1.0 } else { 0.0 };
+    let [tile_u, tile_v] = veg.scene.canopy_tile;
     veg.uniform = [
         sim.time_s() as f32,
         PLANT_FLAMING_S,
@@ -397,8 +434,8 @@ pub fn clock(sim: Res<Sim>, time: Res<Time>, mut veg: ResMut<Vegetation>) {
         strength,
         time.elapsed_secs_wrapped(),
         remains,
-        0.0,
-        0.0,
+        tile_u,
+        tile_v,
         0.0,
     ];
 }
@@ -461,11 +498,20 @@ impl Vegetation {
                 instances.extend_from_slice(&record);
             }
             tiles.push(Tile { lo, hi, cells: (0, 0, 0, 0), groups: groups.len()..groups.len() + 1 });
-            groups.push(Group { tiers, instances, count: row.feet.len() as u32, spots: Vec::new() });
+            groups.push(Group { tiers, instances, count: row.feet.len() as u32, spots: Vec::new(), ranks: vec![0; row.feet.len()] });
         }
         let fire = groups.iter().map(|g| GroupFire::new(g.count as usize, 0)).collect();
         let touched = vec![false; tiles.len()];
-        let scene = PlantScene { id: SCENES.fetch_add(1, Ordering::Relaxed), meshes, groups, tiles, atlas: atlas::atlas(), remains: true };
+        let scene = PlantScene {
+            id: SCENES.fetch_add(1, Ordering::Relaxed),
+            meshes,
+            groups,
+            tiles,
+            atlas: atlas::atlas(),
+            remains: true,
+            canopy_tile: meshes::canopy_tile(),
+            thin_by_count: false,
+        };
         Vegetation {
             scene: Arc::new(scene),
             fire,
@@ -498,7 +544,8 @@ impl Vegetation {
     /// The lab's uniforms, as [`clock`] writes the game's: its own clock,
     /// still air, every plant shown, the remains under burnt crowns.
     pub(crate) fn set_lab_clock(&mut self, now: f32, real_s: f32) {
-        self.uniform = [now, PLANT_FLAMING_S, 1.0, 0.0, 0.0, 1.0, 0.0, real_s, 1.0, 0.0, 0.0, 0.0];
+        let [tile_u, tile_v] = self.scene.canopy_tile;
+        self.uniform = [now, PLANT_FLAMING_S, 1.0, 0.0, 0.0, 1.0, 0.0, real_s, 1.0, tile_u, tile_v, 0.0];
     }
 }
 
@@ -519,6 +566,20 @@ mod tests {
         let lags: Vec<f32> = (0..4000).map(|i| plant_lag(at(i).0, at(i).1)).collect();
         let mean = lags.iter().sum::<f32>() / lags.len() as f32;
         assert!((mean - LAG_S / 2.0).abs() < 2.0, "{mean}");
+    }
+
+    /// Thinning by count draws exactly the plants the shader would show: a
+    /// group sorted by rank keeps those whose rank byte is below the share.
+    #[test]
+    fn thinning_by_count_keeps_what_the_shader_shows() {
+        let at = |i: usize| ((i % 50) as f32 * 9.7 + 0.13, (i / 50) as f32 * 13.3 + 0.71);
+        let mut ranks: Vec<u8> = (0..2000).map(|i| (plant_rank(at(i).0, at(i).1) * 255.0).round() as u8).collect();
+        ranks.sort();
+        let group = Group { tiers: [None; TIERS], instances: Vec::new(), count: ranks.len() as u32, spots: Vec::new(), ranks: ranks.clone() };
+        for keep in [0.0f32, 0.2, 0.35, 0.6, 0.999, 1.0] {
+            let shown = ranks.iter().filter(|&&r| r as f32 / 255.0 < keep).count() as u32;
+            assert_eq!(group.kept(keep), shown, "keep {keep}");
+        }
     }
 
     /// Through a real `medium` fire, every plant the front passed long

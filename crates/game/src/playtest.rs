@@ -20,6 +20,12 @@ mod browser {
     pub fn set(key: &str, value: f64) {
         if let Some(b) = bridge() { let _ = js_sys::Reflect::set(&b, &key.into(), &value.into()); }
     }
+    pub fn camera() -> Option<[f32; 5]> {
+        let c = js_sys::Reflect::get(&bridge()?, &"camera".into()).ok()?;
+        if !c.is_object() { return None; }
+        let get = |k: &str| js_sys::Reflect::get(&c, &k.into()).ok()?.as_f64().map(|v| v as f32);
+        Some([get("x")?, get("y")?, get("distance")?, get("yaw")?, get("pitch")?])
+    }
     pub fn begin() { CONTROLS.with(|c| c.borrow_mut().clear()); }
     pub fn control(label: &str, r: &egui::Response, enabled: bool) {
         if bridge().is_none() { return; }
@@ -66,6 +72,16 @@ pub fn begin() {
 pub fn control(label: &str, r: &egui::Response, enabled: bool) {
     #[cfg(target_arch = "wasm32")] browser::control(label, r, enabled);
     #[cfg(not(target_arch = "wasm32"))] let _ = (label, r, enabled);
+}
+/// In automation, a view held still, for screenshots that compare two builds
+/// at the same framing: `roccaPlaytest.camera = {x, y, distance, yaw, pitch}`
+/// (the focus in scenario metres, east and north; radians), every frame while set.
+pub fn camera() -> Option<(scenario::Pos, f32, f32, f32)> {
+    #[cfg(target_arch = "wasm32")]
+    if let Some([x, y, distance, yaw, pitch]) = browser::camera() {
+        return Some((scenario::Pos { x, y }, distance, yaw, pitch));
+    }
+    None
 }
 /// In automation, countdowns advance only when the agent asks to elapse time.
 pub fn delta(normal: f32) -> f32 {

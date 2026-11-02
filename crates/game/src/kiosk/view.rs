@@ -590,6 +590,19 @@ pub fn camera(
     *smooth_h = Some((sf, sg));
     tf.translation.y = tf.translation.y.max(sg);
     tf.look_at(orbit.focus, Vec3::Y);
+    // automation holds the view still (`playtest::camera`), placed exactly as
+    // `snap::hold` places it: before and after pictures of two builds at the
+    // same framing
+    if let Some((p, distance, yaw, pitch)) = crate::playtest::camera() {
+        kiosk.cut = None;
+        kiosk.fade = 0.0;
+        orbit.focus = crate::frame::to_bevy(p, terrain.height_at(p));
+        (orbit.distance, orbit.yaw, orbit.pitch) = (distance.max(20.0), yaw, pitch.clamp(-1.553, -0.05));
+        let dir = Vec3::new(orbit.yaw.sin() * orbit.pitch.cos(), -orbit.pitch.sin(), orbit.yaw.cos() * orbit.pitch.cos());
+        tf.translation = orbit.focus + dir * orbit.distance;
+        tf.translation.y = tf.translation.y.max(terrain.height_at(crate::frame::to_world(tf.translation)) + 4.0);
+        tf.look_at(orbit.focus, Vec3::Y);
+    }
     if let Some(dof) = dof.as_mut() {
         dof.focal_distance = tf.translation.distance(orbit.focus);
     }

@@ -17,6 +17,10 @@
 // the cut-out pass, where the leaf cards are cut; elsewhere the crown chars
 // and slumps, `plant_common.wesl`). What the fire adds (the twig skeleton,
 // ash and fallen wood) shows where the front has passed.
+//
+// The lobed stand-ins of the browser (`PLANT_CANOPY`, `meshes::lobed_mesh`)
+// have no leaf cards: their lumps are painted with the species' canopy
+// tile, repeated over the plant in three projections.
 
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
 import bevy_pbr::render::mesh_view_types;
@@ -43,7 +47,13 @@ struct PlantOut {
     // x: what the vertex is; y: burn (-1 standing, 0..1 burning, 2 burnt);
     // z: occlusion; w: the climb (`Placed::climb`)
     @location(4) info: vec4<f32>,
+    // where the canopy tile is read, in tiles, on the plant at rest
+    @if(PLANT_CANOPY) @location(5) canopy: vec3<f32>,
 }
+
+// Canopy tiles per height of the plant: on a 25 m pine a tile is 4 m of
+// crown, on a 4 m shrub 0.7 m.
+const CANOPY_REPEAT: f32 = 6.0;
 
 @vertex
 fn vertex(v: PlantVertex) -> PlantOut {
@@ -65,7 +75,32 @@ fn vertex(v: PlantVertex) -> PlantOut {
     // no two plants of a stand quite the same tone
     out.albedo = albedo * (0.9 + 0.2 * v.seed.z);
     out.info = vec4<f32>(kind, p.burn, v.color.a, p.climb);
+    @if(PLANT_CANOPY) {
+        // on the plant at rest, so the leaves stay put as the crown sways;
+        // no two plants of a variety alike
+        out.canopy = p.rest / max(v.size.y, 0.1) * CANOPY_REPEAT + vec3<f32>(v.seed.y, v.seed.z, v.seed.y * 0.6 + v.seed.z * 0.8) * 9.0;
+    }
     return out;
+}
+
+// One projection of the canopy tile: the tile in mirrored repeat (0 to 1
+// and back over two tiles), so it meets itself without a seam; the
+// gradients those of the unfolded coordinate, so the mips follow the
+// distance and not the folds.
+fn canopy_side(corner: vec2<f32>, q: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+    let size = plants.look.yz;
+    let m = 1.0 - abs(1.0 - 2.0 * fract(q * 0.5));
+    return textureSampleGrad(atlas, atlas_sampler, corner + m * size, dx * size, dy * size);
+}
+
+// The canopy tile over a lump, as a crown's leaves would be seen from
+// above and from the sides: three projections blended by the normal `n`.
+fn canopy_texel(corner: vec2<f32>, p: vec3<f32>, n: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> vec4<f32> {
+    let a = n * n;
+    let w = a * a / max(dot(a, a), 1.0e-6);
+    return canopy_side(corner, p.xz, dx.xz, dy.xz) * w.y
+         + canopy_side(corner, p.xy, dx.xy, dy.xy) * w.z
+         + canopy_side(corner, p.zy, dx.zy, dy.zy) * w.x;
 }
 
 // --- fire ----------------------------------------------------------------
@@ -175,7 +210,14 @@ fn foliage_light(albedo: vec3<f32>, n: vec3<f32>, world: vec3<f32>, frag: vec4<f
 @fragment
 fn fragment(in: PlantOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // the texel and the derivatives first, in uniform control flow
-    let tex = textureSample(atlas, atlas_sampler, in.uv);
+    var tex = textureSample(atlas, atlas_sampler, in.uv);
+    @if(PLANT_CANOPY) {
+        let cdx = dpdx(in.canopy);
+        let cdy = dpdy(in.canopy);
+        if kind_leaf(in.info.x) {
+            tex = canopy_texel(in.uv, in.canopy, normalize(in.normal), cdx, cdy);
+        }
+    }
     let tex_width = fwidth(tex.a);
     let p = in.world;
     let px_m = max(length(dpdx(p)), length(dpdy(p)));

@@ -137,7 +137,40 @@ Chiamate WebGL sul titolo: da 3571 a 3009 per frame, per 77 draw call.
 
 **Dati.** I file del territorio (`data/scenarios/rocca_ventosa`, `data/behaviours`, `fuels_eu12.json`; dal 2026-10-30 anche `data/sounds`, 0,65 MB di MP3) non sono più nel `.wasm`. `build_web.sh` li comprime in gzip in `target/web/data/` e scrive `data/manifest.json` (percorso, URL con hash del contenuto, byte). La pagina scarica in parallelo il `.wasm` (compilato in streaming) e i file, li mette in `window.roccaData` e solo allora avvia il gioco; `datafs` li legge di lì (`crates/datafs`). Se il browser ha `DecompressionStream` (Chrome 80, Safari 16.4, Firefox 113) decomprime lui; altrimenti i byte restano gzip (`window.roccaDataGzip`) e li decomprime il wasm (`flate2`, a ogni lettura). Ogni file sta in Cache Storage (`rocca-data`) con l'URL con hash: una nuova build del codice non fa riscaricare i dati, e viceversa. Dati: 27 file, 4,5 MB gzip (15,9 MB grezzi). Con la decompressione nel browser restano in memoria JS circa 16 MB; con quella nel wasm solo i 4,5 MB compressi. Le due strade non sono state provate entrambe su un browser vecchio.
 
-**Profilo.** La pagina sceglie `window.roccaProfile` e `quality::Graphics::from_env` lo legge: **`bassa`** (`Graphics::WEB`, il profilo di sotto) su telefoni e tablet (puntatore primario grossolano, `(pointer: coarse)`, o `userAgentData.mobile`); **`media`** (`Graphics::WEB_MEDIA`) su computer: come `WEB` più ombre del sole (2 cascate, 1024), terreno a passo 2 e vegetazione 0,05. `?q=bassa` o `?q=media` forzano il profilo, per le prove; `?gfx=` lo corregge come `KIOSK_GFX` sul desktop (es. `?gfx=veg=0,terrain_stride=8`). I tetti del fuoco, il mare e la risoluzione del suolo restano uguali nei due profili. Dal 2026-10-21 su computer il livello è **adattivo** (`adaptive.rs`, vedi `TODO.md`): parte da `WEB_TOP` (`WEB_MEDIA` con ombre da 3 cascate, 2048) e scende se i frame sono lenti; `?q=` lo spegne. Verificato in Chrome su desktop con entrambi i valori di `?q=` (parte, grafica a vista); **non misurati gli FPS** (dal 2026-10-20 il terreno web usa colore e normale per vertice, senza le texture `ground_*`: WebGL2 ha 16 unità texture, vedi `TODO.md`) e non provato su un telefono vero.
+**Profilo.** La pagina sceglie `window.roccaProfile` e `quality::Graphics::from_env` lo legge: **`bassa`** (`Graphics::WEB`, il profilo di sotto) su telefoni e tablet (puntatore primario grossolano, `(pointer: coarse)`, o `userAgentData.mobile`); **`media`** (`Graphics::WEB_MEDIA`) su computer: come `WEB` più ombre del sole (2 cascate, 1024), terreno a passo 2 e vegetazione 0,08 (0,05 fino al 2026-11-02). `?q=bassa` o `?q=media` forzano il profilo, per le prove; `?gfx=` lo corregge come `KIOSK_GFX` sul desktop (es. `?gfx=veg=0,terrain_stride=8`). I tetti del fuoco, il mare e la risoluzione del suolo restano uguali nei due profili. Dal 2026-10-21 su computer il livello è **adattivo** (`adaptive.rs`, vedi `TODO.md`): parte da `WEB_TOP` (`WEB_MEDIA` con ombre da 3 cascate, 2048, e vegetazione 0,14) e scende se i frame sono lenti; `?q=` lo spegne. Verificato in Chrome su desktop con entrambi i valori di `?q=` (parte, grafica a vista); **non misurati gli FPS** (dal 2026-10-20 il terreno web usa colore e normale per vertice, senza le texture `ground_*`: WebGL2 ha 16 unità texture, vedi `TODO.md`) e non provato su un telefono vero.
+
+## Vegetazione più fitta, a lobi (2026-11-02)
+
+Richiesta dell'utente: «più densità e resa grafica, senza perdere performances possibilmente» (branch `piante-ios`).
+
+- **Piante a lobi** (`vegetation::meshes::lobed_mesh`; `Graphics::lobes`, acceso nei profili web; `?gfx=-lobes` torna alle proxy per i confronti). La proxy di prima era una chioma a sei facce sul riquadro delle foglie del modello, con la tessera della chioma stirata e specchiata faccia per faccia: da vicino un ombrello sfaccettato a raggiera, da sopra una stella. Ora ogni pianta è il modello autoriale senza le carte di foglie, che vorrebbero il ritaglio (su WebGL2 senza MSAA un `discard` a bordi seghettati, e le GPU a tile del telefono perdono la rimozione delle superfici nascoste): tronco e rami come sono, e ogni parte della chioma un grumo chiuso, il suo nucleo (un icosaedro irregolare) allargato all'82 % dell'ingombro delle sue carte (`LOBE_FILL`), nel tono delle carte. Un pino tiene i pad a ombrello sul tronco biforcuto, un leccio i suoi tre lobi. Opaco, una faccia, niente `discard` né blending: 65 triangoli per pianta in media (la proxy 28). Il desktop non cambia (`lobes` spento: le sue proxy restano oltre `lod_m`).
+- **La tessera dipinta dallo shader** (`PLANT_CANOPY` in `plants.wesl`): la tessera della chioma della specie ripetuta sulla pianta (6 volte sulla sua altezza) in tre proiezioni sfumate con la normale, specchiata a ogni ripetizione (niente cuciture), mip scelte dal gradiente della coordinata non ripiegata (`textureSampleGrad`). Coordinate sulla pianta ferma, prima del vento (le foglie non scorrono sulla chioma che ondeggia), spostate per pianta. Tre letture di texture per frammento di chioma, nessun attributo in più per vertice oltre la coordinata.
+- **Chiome bruciate:** senza i resti (sul web non ci sono) la chioma carbonizzata resta ristretta al 40 % verso il tronco (`plant_common.wesl`): un ciuffo nero tra i rami nudi, non più una palla nera grande come la chioma viva.
+- **Densità:** telefono (`WEB`) 0,025 → 0,05 (4197 → 8366 piante); computer con `?q=media` 0,05 → 0,08 (8366 → 13 283); cima della scala adattiva dei computer (`WEB_TOP`) 0,10 → 0,14 (16 700 → 23 400). Costruzione della vegetazione in Chromium: 20–40 ms prima, 30–45 ms dopo.
+- **Il diradamento risparmia vertici** (`PlantScene::thin_by_count`, solo web): ogni gruppo è ordinato per il rango del diradamento e si disegnano solo le piante tenute (`Group::kept`). La grafica adattiva, che dirada al 60, 35 e 20 % (anche sul telefono), ora toglie davvero vertici: prima lo shader scartava le piante diradate dopo averne calcolato i vertici. Unica differenza: sul web una pianta diradata non compare più quando brucia (sul desktop sì, come prima).
+- **Ombre** (computer): i lobi proiettano la propria ombra.
+
+Misure (headless, nessuna finestra; `scripts/perf_web.py`, ora con `--viewport`, `--dpr` e `shots`). CPU per frame in WebKit, 10 s dopo 25 s di assestamento, misure alternate prima/dopo (A/B/A/B; due per parte, quattro per il titolo sul computer), in ms, media / p95 (WebKit dà il tempo al millisecondo); il rumore tra due misure uguali è del 5–10 %:
+
+| | telefono `q=bassa`, titolo | telefono, partita | computer `q=media` 1440×900, titolo | computer, partita |
+| --- | ---: | ---: | ---: | ---: |
+| prima | 4,56 / 8 | 4,39 / 6–7 | 5,56 / 9–10 | 5,20 / 7 |
+| dopo | 4,50 / 8 | 4,36 / 6–7 | 5,67 / 9–10 | 5,26 / 7 |
+
+WebGL per frame (Chromium, titolo, 120 frame): chiamate e draw invariati (telefono 2969 → 2982 chiamate, 75,5 draw istanziate; computer 4485 → 4486, 119), sempre 33 draw di piante per passata. Cambiano i vertici (indici × istanze): piante del telefono 0,35 → 1,63 milioni per frame, su 1,14 → 2,42 milioni dell'intera scena; computer `q=media` 1,39 → 5,17 milioni (passata principale e ombre). Memoria: per pianta 40 byte sulla GPU e circa 53 sulla CPU (record, fuoco, posizione, rango), cioè +0,2 e +0,2 MB sul telefono; le mesh a lobi 33 × ~2 KB. La memoria wasm resta quella riservata all'avvio (320 MiB).
+
+Immagini prima/dopo alla stessa inquadratura: `roccaPlaytest.camera = {x, y, distance, yaw, pitch}` tiene ferma la camera con `?playtest=1` (`playtest::camera`, piazzata come `snap::hold`), `perf_web.py shots` la usa.
+
+Provato e scartato:
+- ombre dalla chioma più economica (`Tier::Far`, la bipiramide) per risparmiare vertici nelle cascate: spuntava dai lobi e li segnava di intaccature nere a spigoli dritti;
+- la tessera una volta per lobo, dalle uv autoriali del nucleo: stirata, «plastica», come il nucleo grande del 2026-11-01;
+- il tempo GPU con `EXT_disjoint_timer_query_webgl2` in Chromium (ANGLE su Metal): lo stesso con zero piante e con 10 milioni di triangoli, la misura non vede il lavoro della GPU.
+
+Misurati per una decisione dell'utente, non accesi:
+- **erba vicina** (`?gfx=cover=22`, profilo del telefono): ciuffi d'erba veri davanti alla camera nelle viste basse (titolo, zoom in partita), niente nelle viste alte; 1 draw e 442 mila vertici per frame quando c'è (quanto il terreno), +180 chiamate WebGL, una texture riscritta ogni 0,25 s; CPU per frame 4,28 e 5,60 ms contro 4,39 e 4,29 (titolo, la camera del regista va e viene dal suolo). `near_cover` è in modifica in un'altra sessione;
+- **modelli autoriali vicino alla camera** (`?gfx=lod=1400`, computer): sul web l'isola è un riquadro solo, quindi tutte le piante passano alle carte ritagliate; senza MSAA il ritaglio è un `discard` a bordi seghettati e le chiome sembrano rade e scure; 3,55 milioni di vertici per passata contro 2,59 dei lobi. Senza l'MSAA (alpha to coverage, oggi spento sul web) non conviene.
+
+**Non provato su un iPhone vero.** Il rischio è la GPU del telefono: i vertici per frame raddoppiano (opachi, senza `discard` né blending, a un pixel per pixel CSS). Se i frame passano i 24 ms la scala adattiva dirada le piante e ora ne toglie anche i vertici. Da provare in HTTPS con `?gfx=veg=0.025` (la densità di prima) e `?gfx=-lobes` (le proxy) per separare i due costi.
 
 ## Lingua (2026-10-21)
 
@@ -170,8 +203,9 @@ Con `KIOSK_ADAPT=1` a 7838×4898 il controllore ha spento la profondità di camp
 ## Telefono e budget grafico (2026-10-15)
 
 La versione web usa un profilo leggero anche sui computer: terreno a 20 m,
-vegetazione al 2,5% con sagome semplificate (le mesh dettagliate e le chiome
-nascoste non vengono allocate), mare a 60 m vicino all'isola e 600 m al largo.
+vegetazione al 5 % (2,5 % fino al 2026-11-02) con le piante a lobi, opache e senza
+carte di foglie (vedi «Vegetazione più fitta, a lobi»), mare a 60 m vicino
+all'isola e 600 m al largo.
 Niente ombre, HDR, profondità di campo, bloom o MSAA. Il canvas ha la densità
 dello schermo, al massimo 2× (`web_input::backing_scale`; fino al 2026-11-02 un
 pixel per pixel CSS, un terzo per lato su un iPhone), e la scena 3D vi si disegna
