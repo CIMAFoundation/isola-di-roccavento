@@ -120,7 +120,9 @@ impl RoadNetwork {
                 let id = *index.entry(k).or_insert_with(|| {
                     let p = Pos { x: v[0], y: v[1] };
                     net.nodes.push(p);
-                    net.elev.push(scn.terrain.height_at(p));
+                    // the published ground: the road grading is drawn, not simulated
+                    // (`scenario::grade`, until the user decides otherwise)
+                    net.elev.push(scn.terrain.raw_height_at(p));
                     net.adjacency.push(Vec::new());
                     (net.nodes.len() - 1) as NodeId
                 });

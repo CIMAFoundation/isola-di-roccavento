@@ -24,6 +24,8 @@ serde.workspace = true
 serde_json.workspace = true
 # vertices packed in one copy (`streamed_mesh`); already in the tree through Bevy
 bytemuck = "1"
+# the terrain's adaptive mesh (`terrain_tin`)
+spade = "2.13"
 bevy = { version = "0.20", default-features = false }
 # Only for the timestamp queries of `bench.rs` (QuerySet, RenderPassTimestampWrites are not
 # re-exported by bevy::render::render_resource). Same major as Bevy uses.

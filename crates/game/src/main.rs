@@ -61,6 +61,7 @@ mod sim;
 mod sound;
 mod streamed_mesh;
 mod terrain_mesh;
+mod terrain_tin;
 mod textures;
 mod ui;
 mod near_cover;
@@ -382,7 +383,7 @@ fn kiosk_systems(app: &mut App) {
                 .after(kiosk::step)
                 .run_if(in_state(AppState::Playing)),
             (
-                fire_view::update_overlay,
+                fire_view::update_fire_map,
                 fire_view::update_flames,
                 (vegetation::burn, vegetation::clock),
                 buildings::damage,

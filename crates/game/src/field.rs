@@ -3,25 +3,20 @@
 //! The CA computes on a 20 m raster, but nothing says the fire has to be
 //! *drawn* on one — and if it is, the result looks like a spreadsheet: square
 //! flame fronts, staircase scar edges, whole blocks of trees igniting in
-//! lockstep. Every renderer here samples the fire through this module instead,
-//! which bilinearly interpolates the cell fields and warps the sample position
-//! with value noise, so the visible boundary meanders at a scale finer than
-//! the grid it came from.
+//! lockstep. The renderers on the CPU sample the fire through this module
+//! instead, which bilinearly interpolates the cell fields; the scar on the
+//! ground does the same in the terrain's shader, from the fire map
+//! (`fire_view::update_fire_map`, `shaders/fire_ground.wesl`), with the sample
+//! warped by ~7 m of value noise so the boundary meanders at a scale finer
+//! than the grid it came from.
 //!
 //! This is a rendering device and nothing more: the model is unchanged, and no
 //! decision — exposure, intervention, agent behaviour — is ever taken from
 //! these interpolated values.
 
-use fire::CellFire;
 use scenario::{Pos, World};
 
-/// Amplitude of the domain warp, in metres. Around a third of a cell: enough
-/// to hide the raster, small enough that the drawn perimeter still matches
-/// where the model says the fire is.
-const WARP_M: f32 = 7.0;
-
 pub struct FireField<'a> {
-    pub state: &'a [CellFire],
     pub arrival: &'a [i32],
     pub intensity: &'a [f32],
     /// Cells a crew on foot has cleared to bare ground.
@@ -59,25 +54,8 @@ impl<'a> FireField<'a> {
         )
     }
 
-    /// Noise-warped position, so interpolated boundaries are ragged rather
-    /// than smoothly rounded — a fire edge is neither square nor a spline.
-    pub fn warp(&self, p: Pos) -> Pos {
-        Pos {
-            x: p.x + (noise(p.x * 0.045, p.y * 0.045, 11) - 0.5) * 2.0 * WARP_M,
-            y: p.y + (noise(p.x * 0.045, p.y * 0.045, 29) - 0.5) * 2.0 * WARP_M,
-        }
-    }
-
-    /// How burnt this point is, in `[0, 1]`: 1 deep inside the burn, 0 in
-    /// untouched fuel, continuous across the boundary.
-    pub fn burnt_fraction(&self, p: Pos) -> f32 {
-        let (idx, tx, ty) = self.corners(p);
-        let v = |i: usize| f32::from(self.state[i] != CellFire::Unburnt);
-        bilinear(v(idx[0]), v(idx[1]), v(idx[2]), v(idx[3]), tx, ty)
-    }
-
     /// How much of this point is cleared ground, in `[0, 1]`, continuous
-    /// across the edge of the line like [`Self::burnt_fraction`].
+    /// across the edge of the line.
     pub fn cleared_fraction(&self, p: Pos) -> f32 {
         let (idx, tx, ty) = self.corners(p);
         let v = |i: usize| f32::from(self.cleared[i]);

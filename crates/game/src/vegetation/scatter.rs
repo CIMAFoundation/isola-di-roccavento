@@ -74,7 +74,7 @@ pub enum Species {
 }
 
 impl Species {
-    fn of_fuel(fuel: i32) -> Option<Species> {
+    pub(super) fn of_fuel(fuel: i32) -> Option<Species> {
         Some(match fuel {
             1..=3 => Species::Grass,
             4..=6 => Species::Broadleaf,

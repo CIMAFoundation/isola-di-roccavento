@@ -8,8 +8,9 @@
 //!
 //! Four things are drawn:
 //!
-//! - a **ground overlay** on a half-cell lattice, carrying the analytical
-//!   layers (intensity, arrival time, spread probability);
+//! - the **scar and the glowing band** on the ground, by the terrain's own
+//!   pixel shader (`shaders/fire_ground.wesl`) from the fire map written here
+//!   ([`update_fire_map`]);
 //! - **flames**, only in the flaming band behind the front — a cell burns for
 //!   20 minutes but flames for a few, and drawing the whole burning area as
 //!   flame is what makes CA fire look like a spreading blob;
@@ -23,57 +24,25 @@
 use bevy::prelude::*;
 use bevy::pbr::{FogFalloff, DistanceFog};
 use bevy::camera::Exposure;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::asset::RenderAssetUsages;
 use fire::exposure::flame_length_m;
 use fire::CellFire;
 use scenario::Pos;
 
 use crate::field::{noise, FireField};
 use crate::streamed_mesh::{push_vertex, Shape, Streamed, StreamedFrame};
-use crate::fire_shader::{FireGroundMaterial, FireMaterial, SmokeMaterial};
+use crate::fire_shader::{FireMaterial, SmokeMaterial};
 use crate::sim::Sim;
 use crate::textures;
 
-/// Which layer the ground overlay shows. Flames, smoke and embers are always
-/// drawn: the analytical layers annotate the fire, they do not replace it.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FireLayer {
-    #[default]
-    Flames,
-    Hazard,
-}
-
-#[cfg(test)]
-impl FireLayer {
-    pub const ALL: [FireLayer; 2] = [FireLayer::Flames, FireLayer::Hazard];
-}
-
-/// Overlay rebuild throttle. At high time acceleration the generation advances
-/// several times per frame, and the overlay is the one mesh here big enough
-/// for that to cost anything.
-const OVERLAY_MIN_INTERVAL_S: f32 = 0.15;
-
-/// Overlay samples per fire cell along each axis. 2 gives a 10 m lattice,
-/// which with the domain warp is enough to hide the raster completely.
-const OVERLAY_SUBDIV: usize = if cfg!(target_arch = "wasm32") { 1 } else { 2 };
-
-/// Above this many cells across, drop to one sample per cell — a fire that
-/// large is being viewed from far enough away that the edge detail is lost
-/// anyway, and the vertex count would not be.
-const OVERLAY_SUBDIV_MAX_SPAN: usize = 280;
+/// Fire map rewrite throttle (`update_fire_map`). At high time acceleration
+/// the generation advances several times per frame.
+const FIRE_MAP_MIN_INTERVAL_S: f32 = 0.15;
 
 /// How long a cell actually *flames* after the front arrives. The model keeps
 /// a cell alight for 20 minutes (`fire::BURNOUT_S`), which is residence time
 /// including smouldering; the flaming zone of a real fire is a band of tens of
 /// metres, not the whole burnt area.
 const FLAMING_S: f32 = 900.0;
-
-/// How long ground stays visibly incandescent after the front passes. Much
-/// shorter than the burn-out window: past this it is a scar with smoke over
-/// it, not a glowing surface. Keeping this tight is what stops the overlay
-/// from looking like orange fog painted over the hillside.
-const GLOWING_S: f32 = 1100.0;
 
 /// Caps, all of them per-frame geometry budgets rather than physical limits.
 const MAX_FLAME_CELLS: usize = if cfg!(target_arch = "wasm32") { 600 } else { 3_500 };
@@ -95,19 +64,14 @@ const SPOT_FLI_REF: f32 = 10_000.0;
 const SPOT_FLI_EXPONENT: f32 = 1.0 / 3.0;
 const SPOT_ANISOTROPY: f32 = 5.0;
 
-#[derive(Component)]
-pub struct FireOverlay;
-
 #[derive(Resource)]
 pub struct FireView {
-    overlay: Handle<Mesh>,
     /// Rewritten every frame in place (`streamed_mesh`): tongues, billboards.
     flames: Streamed,
     smoke_mesh: Streamed,
     sparks: Streamed,
     last_generation: u64,
-    last_layer: FireLayer,
-    since_overlay: f32,
+    since_fire_map: f32,
     smoke: Vec<Particle>,
     embers: Vec<Particle>,
     seed: u64,
@@ -157,11 +121,8 @@ pub fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut smoke_materials: ResMut<Assets<SmokeMaterial>>,
     mut fire_materials: ResMut<Assets<FireMaterial>>,
-    mut ground_materials: ResMut<Assets<FireGroundMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    sim: Res<crate::sim::Sim>,
 ) {
-    let overlay = meshes.add(empty_mesh());
     let flames = Streamed::new(&mut meshes, TONGUE, false);
     let smoke_mesh = Streamed::new(&mut meshes, BILLBOARD, true);
     let sparks = Streamed::new(&mut meshes, BILLBOARD, false);
@@ -170,13 +131,6 @@ pub fn setup(
     let puff_tex = images.add(textures::puff());
     let spark_tex = images.add(textures::spark());
 
-    // A shader material: the overlay's own colour already carries the glow
-    // flag (red channel > 1.0), so the fragment shader only needs to animate
-    // it. See `crate::fire_shader`.
-    let overlay_mat = ground_materials.add(FireGroundMaterial {
-        road_mask: Some(crate::ground_mask::ROAD_MASK),
-        mask_rect: Vec4::new(1.0 / sim.scn.world.width_m, 1.0 / sim.scn.world.height_m, 0.0, 0.0),
-    });
     // Shader materials, additive: flames and embers are light, not surfaces.
     // Vertex colours run above 1.0 so the camera's bloom pass catches them,
     // and the fragment shader domain-warps the texture lookup so the flame
@@ -187,12 +141,6 @@ pub fn setup(
     // as it crosses the terrain's shadow line.
     let smoke_mat = smoke_materials.add(SmokeMaterial { texture: puff_tex });
 
-    commands.spawn((
-        (Mesh3d(overlay.clone()), MeshMaterial3d(overlay_mat)),
-        FireOverlay,
-        bevy::camera::visibility::NoFrustumCulling,
-        bevy::light::NotShadowCaster,
-    ));
     commands.spawn((
         (Mesh3d(flames.handle.clone()), MeshMaterial3d(flame_mat)),
         // Mesh vertices change every frame; Bevy's cached bounds do not.
@@ -212,15 +160,12 @@ pub fn setup(
         bevy::light::NotShadowCaster,
     ));
 
-    commands.init_resource::<FireLayer>();
     commands.insert_resource(FireView {
-        overlay,
         flames,
         smoke_mesh,
         sparks,
         last_generation: u64::MAX,
-        last_layer: FireLayer::Flames,
-        since_overlay: OVERLAY_MIN_INTERVAL_S,
+        since_fire_map: FIRE_MAP_MIN_INTERVAL_S,
         smoke: Vec::new(),
         embers: Vec::new(),
         seed: 0x5EED_1E55,
@@ -229,22 +174,6 @@ pub fn setup(
         tongues_key: (u64::MAX, 0),
         last_flame_verts: 0,
     });
-}
-
-/// A mesh that draws nothing: one degenerate triangle with every attribute the
-/// materials read. A mesh without vertices is not uploaded (Bevy's mesh
-/// allocator warns about it every frame) and the prepass pipelines choke on it.
-fn empty_mesh() -> Mesh {
-    let mut m = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
-    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 3]);
-    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; 3]);
-    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; 3]);
-    m.insert_indices(Indices::U32(vec![0, 1, 2]));
-    m
 }
 
 /// Clear the drifting particles when the sim restarts.
@@ -263,277 +192,48 @@ pub fn reset(mut restarted: MessageReader<crate::sim::SimRestarted>, mut view: R
     view.embers.clear();
 }
 
-// --- ground overlay --------------------------------------------------------
+// --- fire map -------------------------------------------------------------
 
-pub fn update_overlay(
+/// Writes what the fire did into the fire map the terrain's shader draws the
+/// scar and the glow from (`shaders/fire_ground.wesl`): the meadow's texture,
+/// one texel per fire cell, linearly filtered, so a sample interpolates as
+/// [`FireField`] does. g: burnt (any state but unburnt); b: the arrival time
+/// against now, times g (filtered, b / g is [`FireField::arrival`]'s mean
+/// over the burnt corners); a: cut by the crews. r, the meadow, is left alone.
+pub fn update_fire_map(
     sim: Res<Sim>,
-    layer: Res<FireLayer>,
     time: Res<Time>,
     mut view: ResMut<FireView>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
-    view.since_overlay += time.delta_secs();
-    let layer = *layer;
-    let stale = sim.generation != view.last_generation || layer != view.last_layer;
-    if !stale || view.since_overlay < OVERLAY_MIN_INTERVAL_S {
+    view.since_fire_map += time.delta_secs();
+    if sim.generation == view.last_generation || view.since_fire_map < FIRE_MAP_MIN_INTERVAL_S {
         return;
     }
+    let Some(mut image) = images.get_mut(&crate::ground_mask::GRASS_MAP) else { return };
+    let Some(data) = image.data.as_mut() else { return };
     view.last_generation = sim.generation;
-    view.last_layer = layer;
-    view.since_overlay = 0.0;
-
-    let now = sim.time_s() as f32;
-    match overlay_lattice(&sim, layer, now) {
-        Some(o) => {
-            let mut mesh = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            );
-            let n = o.positions.len();
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, o.positions);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; n]);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, o.colors);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; n]);
-            mesh.insert_indices(Indices::U32(o.indices));
-            let _ = meshes.insert(&view.overlay, mesh);
-        }
-        None => {
-            let _ = meshes.insert(&view.overlay, empty_mesh());
-        }
-    }
-}
-
-/// Overlay geometry on a shared vertex lattice: only the vertices used by a
-/// quad with some coverage are kept, and the indices refer to them.
-struct OverlayData {
-    positions: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
-    indices: Vec<u32>,
-}
-
-fn overlay_lattice(sim: &Sim, layer: FireLayer, now: f32) -> Option<OverlayData> {
-    let scn = &sim.scn;
-    let w = scn.world;
-    let hazard = sim.fire.hazard().as_slice();
-    let field = FireField {
-        state: sim.fire.state(),
-        arrival: sim.fire.arrival_times(),
-        intensity: sim.fire.intensity(),
-        cleared: sim.fire.cleared(),
-        world: w,
-    };
-
-    // Work over the touched region only: the overlay is a lattice, but it is a
-    // lattice over the fire, not over Liguria.
-    let (r0, r1, c0, c1) = touched_bounds(sim, hazard, layer)?;
-    let span = (r1 - r0).max(c1 - c0);
-    let subdiv = if span > OVERLAY_SUBDIV_MAX_SPAN {
-        1
-    } else {
-        OVERLAY_SUBDIV
-    };
-    let step = w.cellsize / subdiv as f32;
-
-    let nx = (c1 - c0) * subdiv + 1;
-    let ny = (r1 - r0) * subdiv + 1;
-
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(nx * ny);
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(nx * ny);
-
-    for iy in 0..ny {
-        for ix in 0..nx {
-            let p = Pos {
-                x: (c0 * subdiv + ix) as f32 * step,
-                y: w.height_m - (r0 * subdiv + iy) as f32 * step,
-            };
-            let warped = field.warp(p);
-            let color = sample_color(layer, &field, hazard, warped, now);
-            // Lift the whole overlay slightly and let hot ground sit higher,
-            // so a flaming edge is never buried under the scar beside it.
-            let lift = 0.5 + 1.2 * color[3].min(1.0) * f32::from(color[0] > 1.0);
-            positions.push([p.x, scn.terrain.height_at(p) + lift, -p.y]);
-            colors.push(color);
-        }
-    }
-
-    // Keep the quads with any coverage; remap the lattice vertices they use.
-    let mut remap = vec![u32::MAX; nx * ny];
-    let mut out = OverlayData {
-        positions: Vec::new(),
-        colors: Vec::new(),
-        indices: Vec::new(),
-    };
-    for iy in 0..ny.saturating_sub(1) {
-        for ix in 0..nx.saturating_sub(1) {
-            let quad = [
-                iy * nx + ix,
-                iy * nx + ix + 1,
-                (iy + 1) * nx + ix + 1,
-                (iy + 1) * nx + ix,
-            ];
-            if quad.iter().all(|&i| colors[i][3] < 0.02) {
-                continue;
-            }
-            let mut q = [0u32; 4];
-            for (slot, &i) in q.iter_mut().zip(quad.iter()) {
-                if remap[i] == u32::MAX {
-                    remap[i] = out.positions.len() as u32;
-                    out.positions.push(positions[i]);
-                    out.colors.push(colors[i]);
-                }
-                *slot = remap[i];
-            }
-            out.indices
-                .extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
-        }
-    }
-    Some(out)
-}
-
-/// Row/col bounds of everything the overlay might draw, padded by one cell so
-/// the feathered edge has somewhere to fade into.
-fn touched_bounds(
-    sim: &Sim,
-    hazard: &[f32],
-    layer: FireLayer,
-) -> Option<(usize, usize, usize, usize)> {
+    view.since_fire_map = 0.0;
     let w = sim.scn.world;
-    let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
-    for (i, state) in sim.fire.state().iter().enumerate() {
-        let touched = *state != CellFire::Unburnt
-            || sim.fire.cleared()[i]
-            || (layer == FireLayer::Hazard && hazard[i] > 0.01);
-        if !touched {
-            continue;
-        }
-        let (r, c) = (i / w.fire_cols, i % w.fire_cols);
-        r0 = r0.min(r);
-        r1 = r1.max(r);
-        c0 = c0.min(c);
-        c1 = c1.max(c);
-    }
-    if r0 == usize::MAX {
-        return None;
-    }
-    Some((
-        r0.saturating_sub(1),
-        (r1 + 2).min(w.fire_rows - 1),
-        c0.saturating_sub(1),
-        (c1 + 2).min(w.fire_cols - 1),
-    ))
-}
-
-fn sample_color(
-    layer: FireLayer,
-    field: &FireField,
-    hazard: &[f32],
-    p: Pos,
-    now: f32,
-) -> [f32; 4] {
-    // Coverage feathered around the half-burnt contour: this is what turns a
-    // staircase of cell edges into a burn perimeter. The band is narrow —
-    // widen it and the perimeter stops being a perimeter and becomes a haze.
-    let cover = ((field.burnt_fraction(p) - 0.42) / 0.20).clamp(0.0, 1.0);
-    if cover <= 0.0 && layer == FireLayer::Flames {
-        // Fuel a crew has cleared: bare earth, with the same grain as the
-        // ash so the strip does not read as a painted road.
-        let bare = ((field.cleared_fraction(p) - 0.42) / 0.20).clamp(0.0, 1.0);
-        if bare > 0.0 {
-            let grain = 0.8
-                + 0.4
-                    * (0.6 * noise(p.x / 17.0, p.y / 17.0, 0x31)
-                        + 0.4 * noise(p.x / 6.0, p.y / 6.0, 0x32));
-            return [0.36 * grain, 0.28 * grain, 0.19 * grain, bare * 0.95];
+    let now = sim.time_s() as f32;
+    let (state, arrival, cleared) = (sim.fire.state(), sim.fire.arrival_times(), sim.fire.cleared());
+    let f16 = crate::terrain_mesh::f16_bits;
+    for r in 0..w.fire_rows {
+        for c in 0..w.fire_cols {
+            let i = r * w.fire_cols + c;
+            let burnt = state[i] != CellFire::Unburnt;
+            // half floats: ages past ~16 h all read as long cold
+            let since = match (burnt, arrival[i]) {
+                (false, _) => 0.0,
+                (true, i32::MIN) => -60_000.0,
+                (true, t) => (t as f32 - now).clamp(-60_000.0, 0.0),
+            };
+            let at = ((w.fire_rows - 1 - r) * w.fire_cols + c) * 8;
+            data[at + 2..at + 4].copy_from_slice(&f16(f32::from(burnt)).to_le_bytes());
+            data[at + 4..at + 6].copy_from_slice(&f16(since).to_le_bytes());
+            data[at + 6..at + 8].copy_from_slice(&f16(f32::from(cleared[i])).to_le_bytes());
         }
     }
-    if cover <= 0.0 && layer != FireLayer::Hazard {
-        return [0.0, 0.0, 0.0, 0.0];
-    }
-
-    let [r, g, b, a] = match layer {
-        FireLayer::Flames => {
-            let age = field.arrival(p).map(|t| now - t).unwrap_or(0.0).max(0.0);
-            // Incandescent only just behind the front, then straight to scar.
-            // The glow is squared twice so the bright band is genuinely a
-            // band, not a gradient across the whole burn.
-            // Squared, over ~18 minutes: at the play camera's 2-3 km a band
-            // of a few minutes (cubed, 7 min; tried) is under a pixel and the
-            // front read as a smudge.
-            let glow = (1.0 - age / GLOWING_S).clamp(0.0, 1.0).powi(2);
-            let embers = (1.0 - age / (GLOWING_S * 4.0)).clamp(0.0, 1.0);
-            // Char and ash, at a scale the CA has no opinion about: a burn is
-            // never one flat tone, and without this the scar reads as paint.
-            let ash = 0.72
-                + 0.85
-                    * (0.6 * noise(p.x / 23.0, p.y / 23.0, 0x77)
-                        + 0.4 * noise(p.x / 8.0, p.y / 8.0, 0x88));
-            [
-                (0.085 + 0.10 * embers) * ash + 2.4 * glow,
-                0.065 * ash + 0.70 * glow * glow,
-                0.060 * ash + 0.06 * glow,
-                cover * 0.95,
-            ]
-        }
-        FireLayer::Hazard => {
-            let scar = cover;
-            let risk = bilinear_hazard(field, hazard, p) * (1.0 - scar);
-            if risk > 0.01 {
-                let c = hazard_color(risk);
-                [c[0], c[1], c[2], (0.25 + 0.6 * risk.sqrt()).min(0.9)]
-            } else if scar > 0.0 {
-                // The scar stays, dimmed: risk ahead of the front is only
-                // legible against where the fire has already been.
-                [0.10, 0.09, 0.09, scar * 0.7]
-            } else {
-                [0.0, 0.0, 0.0, 0.0]
-            }
-        }
-    };
-    [r, g, b, a]
-}
-
-/// The hazard field shares the fire grid, so it interpolates the same way.
-fn bilinear_hazard(field: &FireField, hazard: &[f32], p: Pos) -> f32 {
-    let w = field.world;
-    let fx = (p.x / w.cellsize - 0.5).clamp(0.0, (w.fire_cols - 1) as f32);
-    let fy = ((w.height_m - p.y) / w.cellsize - 0.5).clamp(0.0, (w.fire_rows - 1) as f32);
-    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
-    let x1 = (x0 + 1).min(w.fire_cols - 1);
-    let y1 = (y0 + 1).min(w.fire_rows - 1);
-    let (tx, ty) = (fx.fract(), fy.fract());
-    let v = |r: usize, c: usize| hazard[r * w.fire_cols + c];
-    let top = v(y0, x0) * (1.0 - tx) + v(y0, x1) * tx;
-    let bot = v(y1, x0) * (1.0 - tx) + v(y1, x1) * tx;
-    top * (1.0 - ty) + bot * ty
-}
-
-pub(crate) fn hazard_color(p: f32) -> [f32; 3] {
-    ramp(
-        p.clamp(0.0, 1.0).sqrt(),
-        &[
-            (0.00, [0.25, 0.45, 0.85]),
-            (0.45, [0.95, 0.90, 0.30]),
-            (1.00, [1.00, 0.20, 0.10]),
-        ],
-    )
-}
-
-/// Piecewise-linear colour ramp over sorted stops.
-fn ramp(t: f32, stops: &[(f32, [f32; 3])]) -> [f32; 3] {
-    let t = t.clamp(stops[0].0, stops[stops.len() - 1].0);
-    for pair in stops.windows(2) {
-        let (t0, c0) = pair[0];
-        let (t1, c1) = pair[1];
-        if t <= t1 {
-            let k = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
-            return [
-                c0[0] + (c1[0] - c0[0]) * k,
-                c0[1] + (c1[1] - c0[1]) * k,
-                c0[2] + (c1[2] - c0[2]) * k,
-            ];
-        }
-    }
-    stops[stops.len() - 1].1
 }
 
 /// Rows per flame tongue ribbon.
@@ -715,7 +415,6 @@ pub fn update_flames(
     let up = Vec3::Y;
 
     let field = FireField {
-        state: sim.fire.state(),
         arrival: sim.fire.arrival_times(),
         intensity: sim.fire.intensity(),
         cleared: sim.fire.cleared(),
@@ -1233,69 +932,6 @@ fn hash01(x: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-
-    /// What the previous overlay builder made: four private vertices per quad.
-    #[derive(Default)]
-    struct LegacyMesh {
-        positions: Vec<[f32; 3]>,
-        normals: Vec<[f32; 3]>,
-        colors: Vec<[f32; 4]>,
-        uvs: Vec<[f32; 2]>,
-        indices: Vec<u32>,
-    }
-
-    /// The previous overlay builder: four private vertices per kept quad.
-    fn legacy(sim: &Sim, layer: FireLayer, now: f32) -> Option<LegacyMesh> {
-        let scn = &sim.scn;
-        let w = scn.world;
-        let hazard = sim.fire.hazard().as_slice();
-        let field = FireField {
-            state: sim.fire.state(),
-            arrival: sim.fire.arrival_times(),
-            intensity: sim.fire.intensity(),
-            cleared: sim.fire.cleared(),
-            world: w,
-        };
-        let (r0, r1, c0, c1) = touched_bounds(sim, hazard, layer)?;
-        let span = (r1 - r0).max(c1 - c0);
-        let subdiv = if span > OVERLAY_SUBDIV_MAX_SPAN { 1 } else { OVERLAY_SUBDIV };
-        let step = w.cellsize / subdiv as f32;
-        let nx = (c1 - c0) * subdiv + 1;
-        let ny = (r1 - r0) * subdiv + 1;
-        let mut mesh = LegacyMesh::default();
-        let mut colors = Vec::with_capacity(nx * ny);
-        let mut positions = Vec::with_capacity(nx * ny);
-        for iy in 0..ny {
-            for ix in 0..nx {
-                let p = Pos {
-                    x: (c0 * subdiv + ix) as f32 * step,
-                    y: w.height_m - (r0 * subdiv + iy) as f32 * step,
-                };
-                let color = sample_color(layer, &field, hazard, field.warp(p), now);
-                let lift = 0.5 + 1.2 * color[3].min(1.0) * f32::from(color[0] > 1.0);
-                positions.push([p.x, scn.terrain.height_at(p) + lift, -p.y]);
-                colors.push(color);
-            }
-        }
-        for iy in 0..ny.saturating_sub(1) {
-            for ix in 0..nx.saturating_sub(1) {
-                let quad = [iy * nx + ix, iy * nx + ix + 1, (iy + 1) * nx + ix + 1, (iy + 1) * nx + ix];
-                if quad.iter().all(|&i| colors[i][3] < 0.02) {
-                    continue;
-                }
-                let base = mesh.positions.len() as u32;
-                for i in quad {
-                    mesh.positions.push(positions[i]);
-                    mesh.normals.push([0.0, 1.0, 0.0]);
-                    mesh.colors.push(colors[i]);
-                    mesh.uvs.push([0.5, 0.5]);
-                }
-                mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-            }
-        }
-        Some(mesh)
-    }
 
     /// The tongue's rows from the angle sums are the ones of the old formula
     /// (a sine per row and wave, a power per row), to float rounding.
@@ -1322,60 +958,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn shared_lattice_draws_the_same_triangles() {
-        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
-        let mut sim = Sim::new(&data, "medium", 2).unwrap();
-        let mut next = 30 * 60;
-        while !sim.is_over() && sim.time_s() < 240 * 60 {
-            sim.game.step().unwrap();
-            if sim.time_s() >= next {
-                next += 30 * 60;
-                check(&sim);
-            }
-        }
-        check(&sim);
-    }
-
-    fn check(sim: &Sim) {
-        let now = sim.time_s() as f32;
-        for layer in FireLayer::ALL {
-            let t0 = std::time::Instant::now();
-            let old = legacy(sim, layer, now);
-            let t_old = t0.elapsed();
-            let t1 = std::time::Instant::now();
-            let new = overlay_lattice(sim, layer, now);
-            let t_new = t1.elapsed();
-            let (Some(old), Some(new)) = (old, new) else {
-                assert!(old_none_matches(layer, sim));
-                continue;
-            };
-            assert_eq!(old.indices.len(), new.indices.len());
-            for (a, b) in old.indices.chunks(3).zip(new.indices.chunks(3)) {
-                for (&i, &j) in a.iter().zip(b) {
-                    assert_eq!(old.positions[i as usize], new.positions[j as usize]);
-                    assert_eq!(old.colors[i as usize], new.colors[j as usize]);
-                }
-            }
-            if layer == FireLayer::Flames {
-                eprintln!(
-                    "T+{:>3} min {:?}: old {} verts {:.1} ms | new {} verts {:.1} ms | {} tris",
-                    sim.time_s() / 60,
-                    layer,
-                    old.positions.len(),
-                    t_old.as_secs_f64() * 1e3,
-                    new.positions.len(),
-                    t_new.as_secs_f64() * 1e3,
-                    new.indices.len() / 3
-                );
-            }
-        }
-    }
-
-    fn old_none_matches(layer: FireLayer, sim: &Sim) -> bool {
-        let hazard = sim.fire.hazard().as_slice();
-        touched_bounds(sim, hazard, layer).is_none()
     }
 }
