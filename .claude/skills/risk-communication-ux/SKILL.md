@@ -91,10 +91,50 @@ numeri, il verdetto di un personaggio, un consiglio per riprovare, la classifica
 messaggi ufficiali per i cittadini, «Riprova» e «Nuova partita». Non si attribuiscono
 cause agli ordini senza una traccia che le dimostri.
 
-## 7. Verifica
+## 7. Leggibilità, accessibilità e risposta agli eventi
+
+- **Scala, non pixel fissi:** l'interfaccia si àncora ai bordi e agli angoli e si scala da
+  una risoluzione di riferimento (es. 1920×1080). Per le forme diverse (ultrawide,
+  telefono verticale) si sceglie una regola: si allarga lo spazio e gli angoli restano
+  agli angoli.
+- **Testo:** circa 18 px a 1080p come minimo su computer, di più per schermi visti da
+  lontano; un'opzione **«testo più grande»** che regge fino al 200 %. Le traduzioni sono
+  più lunghe dell'italiano (tedesco, finlandese): i contenitori si adattano al testo, e
+  si controlla almeno una lingua lunga.
+- **Margini sicuri** su telefono (notch, angoli arrotondati) e su TV.
+- **Lo stato non si dice solo col colore:** verde/giallo/rosso del borgo vanno con una
+  forma o un'icona (spunta, fiamma, timer), per chi non distingue rosso e verde.
+- **Lampeggi e scosse:** brevi, rari, solo per gli eventi importanti, e con un'opzione
+  «meno lampeggi / meno movimento» nelle impostazioni. Nessun lampeggio rapido a tutto
+  schermo.
+- **Risposta agli eventi a livelli:** ogni evento ha un livello (piccolo, medio, grande)
+  che fissa insieme suono (`serious-game-audio`), animazione, durata e se la camera si
+  muove. Le animazioni esagerano per poco e tornano a riposo, con un'uscita morbida (non
+  lineare), e non bloccano mai l'input. Si muovono la grafica e la camera, mai lo stato del
+  gioco.
+- **Schermate come pila:** intro, tutorial, partita, impostazioni, finale si impilano;
+  la schermata in cima riceve l'input, «Indietro»/Esc toglie quella in cima. Meglio di una
+  serie di flag booleani.
+- **Focus:** ogni schermata che si apre ha un elemento già selezionato, così il gamepad
+  (o la tastiera) non resta bloccato; mouse e focus convivono, e cambiare dispositivo non
+  lascia mai il giocatore senza cursore. I suggerimenti dei comandi seguono l'ultimo
+  dispositivo usato.
+- **L'interfaccia si aggiorna quando il dato cambia**, non ricostruendo ogni testo a ogni
+  frame.
+
+## 8. Verifica
 
 Ogni modifica visiva si guarda in immagine: screenshot di stati arbitrari, senza giocare
 (in Roccavento `KIOSK_SNAP`: vedi `CLAUDE.md`). Si scatta **anche non nadirale**, da più
 angoli, e con la UI spenta (`ui=0,marks=0,iso=0`) quando si giudica la scena. Si
-controllano desktop e telefono, verticale e orizzontale. Le schermate di riferimento di
-Roccavento sono descritte in `docs/01-GIOCO.md` §6.
+controllano desktop e telefono, verticale e orizzontale, almeno una lingua lunga e il
+testo grande; una prova si fa con il solo gamepad. Nel resoconto si dice quali
+risoluzioni sono state davvero provate. Le schermate di riferimento di Roccavento sono
+descritte in `docs/01-GIOCO.md` §6.
+
+---
+
+Fonte del §7: adattato da `game-ui-ux`, `game-feel` e `input-systems` di
+[awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills)
+(© 2026 Abhishek Barali e contributori, Apache-2.0); la soglia del testo vi è citata dalle
+Xbox Accessibility Guidelines (101). Nessun testo copiato.

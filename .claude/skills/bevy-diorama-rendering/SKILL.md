@@ -44,6 +44,12 @@ e deve girare anche su un computer meno potente e nel browser.
   dal blending (alfa non premoltiplicato) o dal campionamento della texture. Le particelle
   tonde o ovali si disegnano nel pixel shader, senza texture. Prima si conta, poi si riduce:
   spesso ne basta il 25 %.
+- **Shader WGSL, controlli generici:** validare il sorgente con `naga` prima di avviare
+  il gioco; normalizzare normali e direzioni nel pixel shader (l'interpolazione le
+  accorcia); preferire `mix`/`step`/`smoothstep`/`clamp` ai rami che dipendono dal pixel;
+  mai `smoothstep` con i bordi invertiti (`1.0 - smoothstep(a, b, x)`); `discard` solo
+  come uscita anticipata, perché spegne l'early-Z e costa sulle GPU dei telefoni; tempo e
+  coordinate grandi in precisione piena, se no sfarfallano su WebGL2.
 
 ## 3. Vegetazione e fuoco
 
@@ -74,6 +80,13 @@ e deve girare anche su un computer meno potente e nel browser.
   inquadrature sceniche dei punti d'interesse. Angoli bassi che esaltano l'effetto
   diorama, transizioni in dissolvenza nei cambi bruschi, movimenti lenti e poco frequenti.
   La quota si filtra perché non segua le micro variazioni del terreno.
+- **Movimento indipendente dagli FPS:** smorzamento esponenziale (`1 - exp(-k·dt)`), non un
+  `lerp` a fattore fisso; la camera si aggiorna dopo che i bersagli si sono mossi, se no
+  trema di un frame. Sui salti voluti (clic su un avviso, riavvio) si azzera lo
+  smorzamento o si usa una transizione breve.
+- **Inclinazione limitata** in entrambi i versi, e sensibilità del trascinamento
+  indipendente dalla dimensione della finestra. Una eventuale scossa si somma per ultima,
+  sopra l'inseguimento, e decade (rumore liscio, non valori casuali a ogni frame).
 - **Pausa tattica:** si desaturano gli elementi non di gioco, di poco.
 
 ## 5. Qualità e prestazioni
@@ -93,8 +106,15 @@ e deve girare anche su un computer meno potente e nel browser.
 
 ## 6. Esempio: Isola di Roccavento
 
-Bevy 0.14. Shader in `crates/game/src/shaders/*.wgsl` (`flat` per i segni,
+Bevy 0.20 (codice di gioco e prestazioni: `bevy-game-code`). Shader in `crates/game/src/shaders/*.wgsl` (`flat` per i segni,
 `forecast_zone`, `reach_zone`, `route_line`, `tape`, `water`, `flame`, `fire_ground`,
 `near_cover`, `sky`). Livelli in `crates/game/src/quality.rs`. Modelli Blender in
 `scripts/build_*_models.py`. Trappole aggiornate nella sezione «Trappole note» di
 `CLAUDE.md`.
+
+---
+
+Le note su camera e shader WGSL dei §2 e §4 adattano `camera-systems` e
+`shader-programming` di
+[awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills)
+(© 2026 Abhishek Barali e contributori, Apache-2.0). Nessun testo copiato.
