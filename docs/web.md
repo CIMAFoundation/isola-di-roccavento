@@ -102,7 +102,7 @@ Da provare sull'iPhone: `http://192.168.1.82:8766/`. **Non provato su un iPhone 
 
 WebKit attiva «Enhanced Security» per le navigazioni HTTP verso host non locali; gli indirizzi privati come 192.168.x.x non sono esenti ([WebKit PR 78725](https://github.com/WebKit/WebKit/pull/78725)). Il processo resta del gruppo della pagina: una navigazione da script verso una pagina HTTPS (GitHub Pages) è finita nello stesso processo senza JIT. Il limite di memoria della pagina è 1536 MB, con o senza Enhanced Security (`runningboardd`).
 
-**Conseguenza:** games.cimafoundation.org, oggi solo in HTTP, su iPhone con Safari è decine di volte più lento. Servono il certificato e un redirect HTTP → HTTPS fatto dal server, non da uno script nella pagina. GitHub Pages è già in HTTPS.
+**Conseguenza:** in HTTP l'iPhone con Safari è decine di volte più lento. GitHub Pages è in HTTPS, e dal 2026-11-02 anche games.cimafoundation.org (certificato Let's Encrypt valido, redirect HTTP → HTTPS fatto dal server). Il 2026-11-02 l'utente ha provato la build `8bc95c3` da GitHub Pages: «funziona benissimo».
 
 **Non verificato:**
 
@@ -145,14 +145,38 @@ Il gioco segue la prima lingua supportata tra quelle preferite del browser (`nav
 
 **Pagina introduttiva tradotta (2026-10-30, richiesta dell'utente):** stessa regola del gioco: `?lang=` > scelta salvata (`rocca_ventosa_lingua`, condivisa con il gioco) > lingua del browser > inglese. Un selettore 🌐 nell'intestazione cambia lingua alla pagina e al gioco. Testi (anche caricamento, errori, nome, toast della ROM) in `tools/i18n/landing.py`, che genera `web/i18n.js` (`python3 tools/i18n/landing.py` dopo ogni modifica); «Gioca», «Come ti chiami?», «Continua» vengono dai cataloghi del gioco. La pagina passa sempre la lingua al gioco in `window.roccaLang`. Con `?lang=tlh` la pagina resta in inglese e il gioco va in klingon. Traduzioni automatiche, non riviste. **Non vista nel browser**: provata la logica con node (de-AT→de, ja→en, pt-BR→pt, scelta salvata, tlh).
 
+## Risoluzione adattiva (2026-11-02)
+
+Richiesta dell'utente: «la risoluzione adattativa per andare almeno a 30 fps sia in desktop che in web». La scena 3D si disegna a una quota della risoluzione dello schermo, per lato (`Graphics::render_scale`), e si allarga prima degli effetti: interfaccia, testi ed effetti restano a piena risoluzione. `render_scale.rs` mette sulla camera il `MainPassResolutionOverride` di Bevy (prepass, opaco e trasparente nell'angolo in alto a sinistra della vista) e subito dopo il main pass lo allarga a tutta la vista con un filtro bilineare (`Core3dSystems::EarlyPostProcess`, `shaders/upscale.wesl`).
+
+- **Chi la muove:** la scala di `adaptive`, su desktop e web: 0,85 subito dopo la profondità di campo, 0,7 dopo le ombre ridotte, 0,6 senza ombre, poi 0,5 e 0,4 in fondo. Scende sotto i ~42 fps (mediana di 2 s), risale con una prova dopo 12 s sopra i ~55.
+- **Una discesa che non accorcia i frame si annulla:** se tre gradini sotto l'ultimo che ha reso almeno l'8 % i frame sono lunghi come prima, il livello torna lassù e non si riprova finché i frame non peggiorano di un quarto. Il tempo va altrove (la CPU, o un browser che tiene la pagina a 30 Hz, come l'iPhone in risparmio energetico), e scendere ancora sfocherebbe e diraderebbe e basta. Tre gradini e non uno: la leva che aiuta può stare più in basso (a un Chromium senza GPU piante e risoluzione non davano niente; le ombre sì).
+- **Macchine lentissime:** i frame oltre 0,25 s erano sempre «intoppi» (scheda nascosta, finestra trascinata) e non contavano; un Chromium senza GPU disegnava il titolo a 1 fps e il livello non si muoveva mai. Ora, se durano più di 2 s di fila, contano. Il controllore gira solo a partita caricata e riparte da capo a ogni nuova partita.
+- **Web:** il canvas ha la densità dello schermo, al massimo 2× (`web_input::backing_scale`; prima 1×, un terzo per lato su un iPhone). I testi sono nitidi; la scena parte da 2× e scende se serve (0,5 equivale alla risoluzione di prima).
+- **Sotto 1** la profondità di campo è spenta (legge la profondità a piena risoluzione), e con Mario la quota torna 1 (il contorno legge maschera e profondità a piena risoluzione).
+- Il gradino salvato ha cambiato nome (`grafica_auto2.txt`, `rocca_ventosa_grafica_auto2`): la scala ha più gradini e un indice vecchio cadrebbe altrove.
+- **Forzarla:** `KIOSK_GFX=scale=0.5`; sul web `?q=bassa&gfx=scale=0.5` (solo `?q=` spegne l'adattiva). `KIOSK_ADAPT=1` la tiene accesa anche con `KIOSK_SNAP`, senza toccare il gradino salvato.
+
+Misure (M4 Pro, finestra nascosta 6400×4000, partita a T+150 sull'incendio, «alta» senza profondità di campo, `KIOSK_SNAP_BENCH=8`):
+
+| quota | GPU | fps |
+|---|---|---|
+| 1 | 17,2 ms | 54 |
+| 0,7 | 14,4 ms | 67 |
+| 0,5 | 10,1 ms | 98 |
+
+Con `KIOSK_ADAPT=1` a 7838×4898 il controllore ha spento la profondità di campo, portato la scena a 0,85 e diradato le piante, poi dopo 40 s di margine è risalito di un gradino: 48 fps di media.
+
 ## Telefono e budget grafico (2026-10-15)
 
 La versione web usa un profilo leggero anche sui computer: terreno a 20 m,
 vegetazione al 2,5% con sagome semplificate (le mesh dettagliate e le chiome
 nascoste non vengono allocate), mare a 60 m vicino all'isola e 600 m al largo.
-Niente ombre, HDR, profondità di campo, bloom o MSAA. Il canvas disegna un pixel
-per pixel CSS anche sui display Retina; gli input sono normalizzati alla stessa
-scala. Le mesh statiche di terreno e mare rilasciano la copia CPU
+Niente ombre, HDR, profondità di campo, bloom o MSAA. Il canvas ha la densità
+dello schermo, al massimo 2× (`web_input::backing_scale`; fino al 2026-11-02 un
+pixel per pixel CSS, un terzo per lato su un iPhone), e la scena 3D vi si disegna
+alla quota che il frame time permette (sezione «Risoluzione adattiva»); gli input
+sono normalizzati in pixel CSS. Le mesh statiche di terreno e mare rilasciano la copia CPU
 dopo il caricamento sulla GPU, anche nella versione locale, a geometria e resa
 invariate. I ritratti conservano invece la copia CPU: bevy_egui richiede che
 l'immagine resti negli asset per mantenere la texture registrata.
@@ -205,9 +229,9 @@ python3 -m http.server 8765 --directory target/web      # http://localhost:8765
 
 Con `CARGO_TARGET_DIR` impostato il sito va in `$CARGO_TARGET_DIR/web`. Da Bevy 0.20 (2026-10-21): Rust 1.97.1 (`rust-toolchain.toml`), `wasm-bindgen-cli` 0.2.129 (stessa versione di `Cargo.lock`, anche in `pages.yml`), `getrandom` 0.2 con `js` e 0.4 con `wasm_js` per il target wasm, `strip = "symbols"` nel profilo `wasm-release` (senza, il `.wasm` pesava 126 MB; ora 61 MB, `wasm-opt` non installato). Provato in Chrome headless solo con `q=bassa` fino al titolo.
 
-Pubblicazione: `.github/workflows/pages.yml` costruisce e pubblica su GitHub Pages a ogni push su `main`, `settimana-protezione-civile` o `nuovo-gioco`. Indirizzo: https://cimafoundation.github.io/isola-di-roccavento/ (repository `CIMAFoundation/isola-di-roccavento` dal 2026-10-30; in futuro games.cimafoundation.org/isola-di-roccavento)
+Pubblicazione: `.github/workflows/pages.yml` costruisce e pubblica su GitHub Pages a ogni push su `main` o `settimana-protezione-civile` (`nuovo-gioco` è stato unito a `main` e cancellato il 2026-11-02). Indirizzo: https://cimafoundation.github.io/isola-di-roccavento/ (repository `CIMAFoundation/isola-di-roccavento` dal 2026-10-30); da `main` anche https://games.cimafoundation.org/isola-di-roccavento/
 
-**games.cimafoundation.org/isola-di-roccavento** (2026-10-30): hosting CIMA su Ergonet (`web-lnx345.ergonet.host`, 149.3.144.47); la radice FTP dell'utente `cima-games` è la radice di games.cimafoundation.org (c'era la pagina segnaposto di Ergonet). Da `main`, `pages.yml` copia `target/web` con `lftp mirror --reverse --delete` in FTPS (porta 21, certificato `*.ergonet.host` verificato: per questo l'host è `web-lnx345.ergonet.host` e non l'IP) nella cartella `isola-di-roccavento` (variabile `DEPLOY_DIR` del repository per cambiarla). Secret: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PASSWORD`. L'SFTP sulla porta 2201 accetta solo chiavi e non è usato. Il passo è `continue-on-error`: se fallisce, GitHub Pages esce lo stesso. Il server mandava `game_bg.wasm` senza tipo MIME e il gioco non partiva (2026-10-30): `build_web.sh` scrive un `.htaccess` con `AddType application/wasm .wasm` e `index.html` compila il file intero quando il tipo manca. **Aperto:** certificato HTTPS per games.cimafoundation.org (oggi copre solo `*.ergonet.host`).
+**games.cimafoundation.org/isola-di-roccavento** (2026-10-30): hosting CIMA su Ergonet (`web-lnx345.ergonet.host`, 149.3.144.47); la radice FTP dell'utente `cima-games` è la radice di games.cimafoundation.org (c'era la pagina segnaposto di Ergonet). Da `main`, `pages.yml` copia `target/web` con `lftp mirror --reverse --delete` in FTPS (porta 21, certificato `*.ergonet.host` verificato: per questo l'host è `web-lnx345.ergonet.host` e non l'IP) nella cartella `isola-di-roccavento` (variabile `DEPLOY_DIR` del repository per cambiarla). Secret: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PASSWORD`. L'SFTP sulla porta 2201 accetta solo chiavi e non è usato. Il passo è `continue-on-error`: se fallisce, GitHub Pages esce lo stesso. Il server mandava `game_bg.wasm` senza tipo MIME e il gioco non partiva (2026-10-30): `build_web.sh` scrive un `.htaccess` con `AddType application/wasm .wasm` e `index.html` compila il file intero quando il tipo manca. Dal 2026-11-02 il sito risponde in HTTPS con un certificato valido (Let's Encrypt, scade il 2027-01-28) e il server reindirizza l'HTTP con un 301; dopo il push di `8bc95c3` serviva lo stesso wasm di Pages (il primo download subito dopo il caricamento era troncato, i quattro successivi interi).
 
 **Versione provata (2026-10-15):** `crates/game/build.rs` registra il commit della compilazione (`GAME_COMMIT`, con `-modificato` se l'albero non è pulito; in CI è quello pubblicato). Compare sul titolo («versione xxxxxxxx») e il pulsante «Dai un feedback» lo scrive da solo nella domanda «Versione del gioco» del Google Form (`entry.2126742218`).
 

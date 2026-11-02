@@ -2,7 +2,7 @@ name: Publish the browser build
 
 on:
   push:
-    branches: [main, settimana-protezione-civile, nuovo-gioco]
+    branches: [main, settimana-protezione-civile]
   workflow_dispatch:
 
 permissions:

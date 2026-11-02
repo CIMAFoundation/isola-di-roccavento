@@ -41,6 +41,7 @@ mod playtest;
 mod adaptive;
 mod quality;
 mod quality_live;
+mod render_scale;
 mod record;
 mod flat;
 mod fonts;
@@ -126,7 +127,11 @@ fn main() -> anyhow::Result<()> {
                 if let Some(s) = std::env::var("KIOSK_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
                     r = r.with_scale_factor_override(s);
                 }
-                if cfg!(target_arch = "wasm32") { r = r.with_scale_factor_override(1.0); }
+                // the browser: the canvas at its own density, at most 2x (`web_input`)
+                #[cfg(target_arch = "wasm32")]
+                {
+                    r = r.with_scale_factor_override(web_input::backing_scale());
+                }
                 r
             },
             mode: kiosk::window_mode(),
@@ -234,6 +239,7 @@ fn main() -> anyhow::Result<()> {
     app.add_plugins(sound::SoundPlugin);
     app.add_plugins(horizon::HorizonPlugin);
     app.add_plugins(godrays::GodRaysPlugin);
+    app.add_plugins(render_scale::RenderScalePlugin);
     app.add_plugins(vegetation::PlantRenderPlugin);
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);
@@ -244,7 +250,9 @@ fn main() -> anyhow::Result<()> {
     app.add_systems(PostUpdate, quality_live::msaa_on_new_cameras);
     if let Some(a) = auto {
         app.insert_resource(a);
-        app.add_systems(Update, adaptive::adapt);
+        // not while loading: those long frames are no measure of the machine
+        app.add_systems(Update, adaptive::adapt.run_if(in_state(AppState::Playing)));
+        app.add_systems(OnEnter(AppState::Playing), adaptive::resettle);
     }
     let exit = app.run();
     #[cfg(target_arch = "wasm32")]
@@ -317,8 +325,9 @@ fn setup_scene(
     if gfx.bloom {
         camera.insert(Bloom { intensity: 0.20, ..Bloom::NATURAL });
     }
-    // The depth prepass is there for the depth of field only.
-    if gfx.dof {
+    // The depth prepass is there for the depth of field only, which reads the
+    // depth at screen resolution: off while the scene is scaled (`render_scale`).
+    if gfx.dof && render_scale::whole(gfx.render_scale) {
         camera.insert((
             bevy::core_pipeline::prepass::DepthPrepass,
             bevy::post_process::dof::DepthOfField {

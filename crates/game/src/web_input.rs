@@ -1,12 +1,26 @@
 //! Winit's web pointer coordinates use the browser DPR, even when Bevy's
 //! backing canvas uses a scale-factor override. Normalize before both Bevy
-//! and egui read them, so a 1x canvas has CSS-pixel hit targets on a 3x phone.
+//! and egui read them, so a canvas at its own scale ([`backing_scale`]) has
+//! CSS-pixel hit targets on a 3x phone.
 //! bevy_egui 0.43 takes the pointer from the `WindowEvent` stream, not from
 //! `CursorMoved`: both are rescaled (2026-10-29: egui was off by the DPR).
 use bevy::ecs::message::MessageCursor;
 use bevy::input::touch::TouchInput;
 use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent, WindowResized};
+
+/// Canvas pixels per CSS pixel: the screen's density, at most [`MAX_BACKING`].
+/// Until 2026-11-02 the canvas had one pixel per CSS pixel (a third of an
+/// iPhone's per side); now the interface is drawn at up to 2x and the scene
+/// at the share the frame time allows (`render_scale`, `adaptive`).
+pub fn backing_scale() -> f32 {
+    let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio() as f32);
+    dpr.clamp(1.0, MAX_BACKING)
+}
+
+/// 2x keeps the text sharp on a phone; 3x would colour 2.25 times the pixels
+/// in every full-screen pass for little.
+const MAX_BACKING: f32 = 2.0;
 
 pub fn normalize(
     mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>,
@@ -19,14 +33,19 @@ pub fn normalize(
     mut window_reader: Local<MessageCursor<WindowEvent>>,
 ) {
     let Ok((entity, mut window)) = windows.single_mut() else { return };
-    // WebKit's ResizeObserver reports CSS size × browser DPR even with our
-    // 1x override. Keep rendering, egui layout and input in CSS pixels after
-    // every resize (including rotation and Safari's changing browser bars).
+    // WebKit's ResizeObserver reports CSS size × browser DPR whatever our
+    // override. Keep the canvas at CSS size × our scale, and egui layout and
+    // input in CSS pixels, after every resize (including rotation and
+    // Safari's changing browser bars).
     if let Some(canvas) = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("rocca"))
     {
-        let (width, height) = (canvas.client_width() as u32, canvas.client_height() as u32);
+        let s = window.resolution.scale_factor();
+        let (width, height) = (
+            (canvas.client_width() as f32 * s).round() as u32,
+            (canvas.client_height() as f32 * s).round() as u32,
+        );
         if width > 0 && height > 0
             && (window.physical_width(), window.physical_height()) != (width, height)
         {

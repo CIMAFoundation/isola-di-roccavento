@@ -65,6 +65,11 @@ pub struct Graphics {
     /// Share of the plants built that are shown; changes while the game runs
     /// (`adaptive` thins the forest before it takes the shadows away).
     pub veg_keep: f32,
+    /// Share of the screen's resolution, per side, the 3D scene is drawn at
+    /// (1 = all of it): the scene is then scaled up before the post effects
+    /// and the interface stays sharp (`render_scale`). Changes while the game
+    /// runs: `adaptive` lowers it when the frames get slow.
+    pub render_scale: f32,
 }
 
 impl Graphics {
@@ -85,6 +90,7 @@ impl Graphics {
         terrain_stride: 1,
         cover_m: if cfg!(target_arch = "wasm32") { 0.0 } else { 45.0 },
         veg_keep: 1.0,
+        render_scale: 1.0,
     };
     pub const MEDIA: Graphics = Graphics {
         dof: false,
@@ -213,6 +219,10 @@ impl Graphics {
         if cfg!(target_arch = "wasm32") {
             return !web_forced();
         }
+        // KIOSK_ADAPT=1 keeps it on even then: to watch it in a snapshot run
+        if std::env::var("KIOSK_ADAPT").as_deref() == Ok("1") {
+            return true;
+        }
         let off = |k: &str| std::env::var_os(k).is_some();
         if off("KIOSK_QUALITY") || off("KIOSK_GFX") || off("KIOSK_SNAP") || std::env::var("KIOSK_ADAPT").as_deref() == Ok("0") {
             return false;
@@ -244,6 +254,7 @@ impl Graphics {
                 ("veg", Some(v)) => self.vegetation = v.max(0.0),
                 ("cover", Some(m)) => self.cover_m = m.max(0.0),
                 ("cover", None) => self.cover_m = if on { Graphics::ALTA.cover_m } else { 0.0 },
+                ("scale", Some(s)) => self.render_scale = s.clamp(0.25, 1.0),
                 _ => warn!("KIOSK_GFX: «{item}» non riconosciuto"),
             }
         }
@@ -254,7 +265,7 @@ impl Graphics {
         // the plant density and the terrain stride apply only at launch, and
         // the antialiasing is chosen apart, so they are not compared
         let same = |p: &Graphics| {
-            Graphics { vegetation: self.vegetation, terrain_stride: self.terrain_stride, cover_m: self.cover_m, veg_keep: self.veg_keep, msaa: self.msaa, smaa: self.smaa, ..*p } == *self
+            Graphics { vegetation: self.vegetation, terrain_stride: self.terrain_stride, cover_m: self.cover_m, veg_keep: self.veg_keep, render_scale: self.render_scale, msaa: self.msaa, smaa: self.smaa, ..*p } == *self
         };
         [("alta", &Graphics::ALTA), ("media", &Graphics::MEDIA), ("bassa", &Graphics::BASSA)]
             .into_iter()
@@ -362,15 +373,17 @@ fn web_forced() -> bool {
     false
 }
 
-/// The adaptive rung the last run settled on (0 = the top).
+/// The adaptive rung the last run settled on (0 = the top). The `2` in the
+/// names: the ladder gained its resolution rungs on 2026-11-02, so a rung
+/// saved before would land on another level.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn saved_step() -> Option<usize> {
-    std::fs::read_to_string(saved_path().with_file_name("grafica_auto.txt")).ok()?.trim().parse().ok()
+    std::fs::read_to_string(saved_path().with_file_name("grafica_auto2.txt")).ok()?.trim().parse().ok()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_step(step: usize) {
-    let p = saved_path().with_file_name("grafica_auto.txt");
+    let p = saved_path().with_file_name("grafica_auto2.txt");
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -379,13 +392,13 @@ pub fn save_step(step: usize) {
 
 #[cfg(target_arch = "wasm32")]
 pub fn saved_step() -> Option<usize> {
-    web_sys::window()?.local_storage().ok()??.get_item("rocca_ventosa_grafica_auto").ok()??.parse().ok()
+    web_sys::window()?.local_storage().ok()??.get_item("rocca_ventosa_grafica_auto2").ok()??.parse().ok()
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn save_step(step: usize) {
     if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = s.set_item("rocca_ventosa_grafica_auto", &step.to_string());
+        let _ = s.set_item("rocca_ventosa_grafica_auto2", &step.to_string());
     }
 }
 

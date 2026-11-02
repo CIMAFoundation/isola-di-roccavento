@@ -50,7 +50,7 @@ Dati: `data/scenarios/rocca_ventosa/`, con territorio e `game.json`: stazioni, s
 
 ### Altre sessioni nello stesso repository
 
-Spesso più sessioni Claude lavorano in parallelo sullo stesso checkout (oggi il branch `nuovo-gioco`).
+Spesso più sessioni Claude lavorano in parallelo sullo stesso checkout (oggi `main`; `nuovo-gioco` è stato unito e cancellato il 2026-11-02).
 
 - Prima di mettere file in stage, guardare `git diff`: **non committare modifiche altrui**. Se un file è misto, chiedere alla sessione che lo sta modificando, o all'utente.
 - Coordinarsi con `ListAgents` e `SendMessage`: chi tocca cosa, chi committa per primo.
@@ -71,7 +71,8 @@ scripts/build_web.sh                               # versione browser (docs/web.
 Variabili utili del gioco (prefisso storico `KIOSK_`):
 
 - `KIOSK_WINDOWED=1 KIOSK_SIZE=1600x1000 KIOSK_SCALE=1`: finestra e dimensioni.
-- `KIOSK_QUALITY=alta|media|bassa`, `KIOSK_GFX`: livello grafico.
+- `KIOSK_QUALITY=alta|media|bassa`, `KIOSK_GFX`: livello grafico (`KIOSK_GFX=scale=0.5`: la scena 3D a metà risoluzione per lato; sul web `?gfx=scale=0.5`).
+- `KIOSK_ADAPT=1`: la grafica adattiva, risoluzione compresa, anche con `KIOSK_SNAP`, senza toccare il gradino salvato: per vederla lavorare con `KIOSK_SNAP_BENCH` (righe `grafica adattiva` nel log).
 - `KIOSK_FPS=1`: misura degli FPS.
 - `KIOSK_MEMORY=risparmio|normale`: forza o spegne la scena leggera per macchine con poca memoria (`memory.rs`; da sola scatta con RAM ≤ 8 GiB o dopo un avvio non terminato).
 - `KIOSK_PIANTE=1`: al posto del gioco, il laboratorio del fuoco sulle piante (`veg_lab.rs`): ogni varietà in fila, colonne che prendono fuoco a intervalli, cursore del tempo. `KIOSK_PIANTE_SNAP=<png>` salva una foto senza finestra (con `KIOSK_PIANTE_ROW`, `KIOSK_PIANTE_T`, `KIOSK_PIANTE_STEP`).
@@ -151,6 +152,7 @@ Sono costate tempo e non si vedono dal codice. Prima di fidarsi, verificare che 
   - i segni vanno alzati sopra la chioma (+20 m o più);
   - un `Material` personalizzato non riceve la nebbia;
   - il depth prepass non deve coprire più del main pass: dove il prepass scrive una profondità e il main pass lascia il campione scoperto (alpha to coverage, `discard`), dietro non si disegna più nulla e resta il colore di sfondo, grigio, che sfarfalla muovendo la camera (2026-11-02). Per questo le mesh ritagliate delle piante restano fuori dal prepass;
+  - con la scena disegnata più piccola (`render_scale` < 1, risoluzione adattiva, 2026-11-02) il main pass occupa solo l'angolo in alto a sinistra della vista e viene allargato dopo: ciò che legge la profondità a risoluzione dello schermo non coincide più. La profondità di campo si spegne sotto 1 e Mario riporta la scala a 1; uno shader nuovo che ricava coordinate di schermo da `view.viewport` deve usare `view.main_pass_viewport`;
   - Bevy toglie di colpo l'ombra del sole alla fine dell'ultima cascata: la sfumatura sta in `scene_light::shadow_reach` e la leggono terreno e strutture (`faded_shadow::apply_pbr_lighting_faded`), piante e `scene_shade` (2026-11-02). Un materiale nuovo illuminato con l'`apply_pbr_lighting` di Bevy riporta la linea.
 - **Riavvio:** vanno ripuliti gli stati del rendering che si ricordano qualcosa (case annerite, particelle di fumo, chiavi dei segni). Tutto il resto si ricalcola da `Sim` a ogni frame.
 - **Scorciatoie da tastiera:** devono rispettare `egui` `wants_keyboard_input()`, altrimenti scattano mentre si scrive il nome.

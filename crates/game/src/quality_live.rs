@@ -52,7 +52,9 @@ pub fn apply_live(
             (false, true) => { cam.remove::<Bloom>(); }
             _ => {}
         }
-        match (gfx.dof, has_dof) {
+        // the depth of field reads the depth at screen resolution: not while
+        // the scene is drawn smaller (`render_scale`)
+        match (gfx.dof && crate::render_scale::whole(gfx.render_scale), has_dof) {
             (true, false) => {
                 cam.insert((
                     DepthPrepass,

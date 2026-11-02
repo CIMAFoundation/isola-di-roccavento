@@ -2,7 +2,7 @@ name: Desktop builds
 
 on:
   push:
-    branches: [main, settimana-protezione-civile, nuovo-gioco]
+    branches: [main, settimana-protezione-civile]
     tags: ['v*']
   workflow_dispatch:
 

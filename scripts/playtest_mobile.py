@@ -66,6 +66,8 @@ def main():
             gpu = ['--enable-gpu'] + (['--use-angle=metal'] if sys.platform == 'darwin' else [])
             browser = getattr(pw, args.browser).launch(headless=True, executable_path=args.browser_executable, args=gpu if args.browser == 'chromium' else [])
             page = browser.new_page(viewport={'width': 390, 'height': 844}, device_scale_factor=3, is_mobile=True, has_touch=True, locale='it-IT')
+            # canvas pixels per CSS pixel: the density, at most 2 (`web_input::backing_scale`)
+            BACKING = 2
             page.add_init_script(MUTE)
             page.set_default_timeout(120000)
             page.on('pageerror', lambda e: errors.append(str(e)) if 'Using exceptions for control flow' not in str(e) else None)
@@ -115,14 +117,14 @@ def main():
                 # The tutorial reserves part of the camera viewport for its
                 # sidebar; check the entire canvas backing buffer instead.
                 size = page.locator('#rocca').evaluate('c => [c.width, c.height]')
-                assert size == [w, h], size
+                assert size == [w * BACKING, h * BACKING], size
             def advance(seconds):
                 page.evaluate('s => window.roccaPlaytest.advance_s = s', seconds)
                 page.wait_for_function('window.roccaPlaytest.advance_s === 0'); frames()
             try:
                 page.goto(f'http://127.0.0.1:{server.server_port}/?playtest=1')
                 page.wait_for_function('window.roccaPlaytest?.state && !document.querySelector("#loading")')
-                frames(); assert state()['camera']['pixels'] == [390, 844]
+                frames(); assert state()['camera']['pixels'] == [390 * BACKING, 844 * BACKING]
                 assert page.evaluate('window.roccaDataGzip === true'), 'Phone data should stay compressed'
                 assert page.evaluate('Object.values(window.roccaData).every(b => b[0] === 31 && b[1] === 139)'), 'Phone store must contain gzip bytes'
                 snap('01-title-portrait')
