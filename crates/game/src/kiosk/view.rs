@@ -89,8 +89,11 @@ fn fit_distance(camera: &Camera, sim: &Sim, focus: Vec3, yaw: f32, pitch: f32) -
             })
         })
     };
-    // Not projected yet (first frames): every test would fail; wait.
-    camera.world_to_viewport(&GlobalTransform::default(), Vec3::NEG_Z).ok()?;
+    // Not projected yet (first frames): every test would fail; wait. The
+    // probe stands well past the near plane (on the web up to 50 m,
+    // `camera::web_near_plane`): 1 m ahead it never projected, and the
+    // opening never began.
+    camera.world_to_viewport(&GlobalTransform::default(), Vec3::NEG_Z * 1000.0).ok()?;
     let (mut lo, mut hi) = (MIN_DIST * 4.0, MAX_DIST);
     if !fits(hi) {
         return Some(hi);

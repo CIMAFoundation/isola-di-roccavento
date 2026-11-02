@@ -249,6 +249,8 @@ fn main() -> anyhow::Result<()> {
     app.add_systems(Update, quality_live::apply_live.run_if(resource_changed::<quality::Graphics>.and_then(not(resource_added::<quality::Graphics>))));
     // MSAA is per camera since Bevy 0.15: every camera takes the profile's.
     app.add_systems(PostUpdate, quality_live::msaa_on_new_cameras);
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(PostUpdate, camera::web_near_plane.before(bevy::camera::CameraUpdateSystems));
     if let Some(a) = auto {
         app.insert_resource(a);
         // not while loading: those long frames are no measure of the machine
