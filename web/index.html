@@ -72,6 +72,10 @@
       .card .n { display: inline-grid; place-items: center; width: 32px; height: 32px; margin-bottom: 12px; border-radius: 50%; background: var(--blue); color: #fff; font-weight: 800; font-size: 15px; }
       .card h3 { font-size: 21px; line-height: 1.25; color: var(--navy); }
       .card p { margin-top: 10px; font-size: 16px; color: #44566b; }
+      .gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 22px; }
+      .gallery a { display: block; overflow: hidden; border-radius: 14px; box-shadow: 0 2px 4px #06264a10, 0 14px 32px #06264a1c; }
+      .gallery img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; transition: transform .4s ease; }
+      .gallery a:hover img, .gallery a:focus-visible img { transform: scale(1.04); }
       .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: center; }
       .split img { width: 100%; height: auto; border-radius: 18px; box-shadow: 0 24px 56px #06264a30; }
       .split ul { margin: 22px 0 0; padding: 0; list-style: none; }
@@ -92,11 +96,13 @@
         .shot .inset { left: 10px; bottom: -22px; width: 48%; }
         .hero { padding-bottom: 80px; }
           .cards { grid-template-columns: 1fr; }
+        .gallery { grid-template-columns: repeat(2, 1fr); gap: 14px; }
         section.block { padding: 60px 0; }
         .brand span { display: none; }
         .top a.ext { display: none; }
       }
-      @media (prefers-reduced-motion: reduce) { #intro, #play, .play { transition: none; } }
+      @media (max-width: 560px) { .gallery { grid-template-columns: 1fr; } }
+      @media (prefers-reduced-motion: reduce) { #intro, #play, .play, .gallery img { transition: none; } }
       #game, #loading { visibility: hidden; }
       body.playing #game, body.playing #loading { visibility: visible; }
     </style>
@@ -144,7 +150,7 @@
         <div class="wrap">
           <div class="cards">
             <article class="card">
-              <img src="./img/scena-borgo.jpg" data-alt="alt1" alt="Il fuoco che avanza sulla collina sopra la strada costiera dell’isola" loading="lazy" width="1400" height="875">
+              <img src="./img/scena-borgo.jpg" data-alt="alt1" alt="Il sole della sera filtra tra gli alberi; sul crinale bruciano altri alberi" loading="lazy" width="1400" height="875">
               <div><span class="n">1</span><h3 data-t="h1">Leggi l’incendio</h3><p data-t="p1">Vento, vegetazione e pendenza decidono dove va il fuoco. Tu devi anticiparlo.</p></div>
             </article>
             <article class="card">
@@ -155,6 +161,20 @@
               <img src="./img/tattica-evacua.jpg" data-alt="alt3" alt="La scheda di un borgo con il pulsante Evacua e le strade chiuse dal fuoco" loading="lazy" width="1208" height="755">
               <div><span class="n">3</span><h3 data-t="h3">Metti in salvo i borghi</h3><p data-t="p3">Evacuare troppo presto o troppo tardi ha un costo. Alla fine scopri quanto hai salvato.</p></div>
             </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="block">
+        <div class="wrap">
+          <div class="kicker" data-t="from_game">Dal gioco</div>
+          <div class="gallery">
+            <a href="./img/galleria-carbonizzati.jpg" target="_blank"><img src="./img/galleria-carbonizzati.jpg" data-alt="g1" alt="Alberi carbonizzati in controluce e una fila di fiamme sul pendio sotto la rocca" loading="lazy" width="1200" height="750"></a>
+            <a href="./img/galleria-versante.jpg" target="_blank"><img src="./img/galleria-versante.jpg" data-alt="g2" alt="Il fuoco scende sul versante illuminato verso le case di un borgo" loading="lazy" width="1200" height="750"></a>
+            <a href="./img/galleria-torre.jpg" target="_blank"><img src="./img/galleria-torre.jpg" data-alt="g3" alt="Il sole dietro la torre della rocca e, in primo piano, la vegetazione che brucia" loading="lazy" width="1200" height="750"></a>
+            <a href="./img/galleria-autobotti.jpg" target="_blank"><img src="./img/galleria-autobotti.jpg" data-alt="g4" alt="Due autobotti bagnano il fronte del fuoco davanti a un borgo" loading="lazy" width="1200" height="750"></a>
+            <a href="./img/galleria-pendio.jpg" target="_blank"><img src="./img/galleria-pendio.jpg" data-alt="g5" alt="Il fronte del fuoco sul pendio, il fumo sopra l’area bruciata e le autobotti sulla strada" loading="lazy" width="1200" height="750"></a>
+            <a href="./img/galleria-tornanti.jpg" target="_blank"><img src="./img/galleria-tornanti.jpg" data-alt="g6" alt="Un’autobotte sui tornanti sotto un borgo di collina, con il fuoco in arrivo" loading="lazy" width="1200" height="750"></a>
           </div>
         </div>
       </section>

@@ -520,7 +520,9 @@ pub fn hold(view: Res<SnapView>, sim: Res<Sim>, mut cam: Query<(&mut OrbitCamera
         orbit.yaw = y;
     }
     if let Some(p) = view.pitch {
-        orbit.pitch = p.clamp(-1.553, -0.05);
+        // up to 34° upward: from low on a slope, the eye looks up at what
+        // stands over it (the focus higher than the eye, against the sun)
+        orbit.pitch = p.clamp(-1.553, 0.6);
     }
     orbit.focus.y = sim.scn.terrain.height_at(crate::frame::to_world(orbit.focus));
     let dir = Vec3::new(orbit.yaw.sin() * orbit.pitch.cos(), -orbit.pitch.sin(), orbit.yaw.cos() * orbit.pitch.cos());
@@ -550,6 +552,9 @@ pub fn hide_marks(
                 With<super::marks::ClosedMark>,
                 With<super::marks::TeamMark>,
                 With<super::pins::Pin>,
+                // the teams' cut lines and order rings: yellow ribbons over the scene
+                With<crate::units::WorkOverlay>,
+                With<crate::units::OrderMarker>,
             )>,
         ),
     >,

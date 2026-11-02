@@ -73,7 +73,8 @@ fn aim(
     sun: Res<crate::sky::SunState>,
     cams: Query<(Entity, &Camera, &GlobalTransform, Option<&GodRays>), With<OrbitCamera>>,
 ) {
-    let alta = gfx.level() == Some("alta") && !cfg!(target_arch = "wasm32");
+    // «alta» even without the depth of field (`KIOSK_GFX=-dof`, the snapshots)
+    let alta = crate::quality::Graphics { dof: true, ..*gfx }.level() == Some("alta") && !cfg!(target_arch = "wasm32");
     for (e, cam, gt, had) in &cams {
         let rays = alta.then(|| {
             let at = gt.translation() + sun.direction * 10_000.0;

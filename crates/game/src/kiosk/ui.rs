@@ -247,7 +247,8 @@ pub fn draw(
     }
     }
     let mut pad_h = 0.0;
-    if pads.iter().next().is_some() {
+    // a pad left plugged in stays out of the snapshots (`KIOSK_SNAP`)
+    if pads.iter().next().is_some() && std::env::var_os("KIOSK_SNAP").is_none() {
         pad_h = pad_help(ctx, k, &sim) + 8.0;
         if matches!(k.phase, Phase::Tutorial | Phase::Gioco) {
             pad_list(ctx, k, &sim);
