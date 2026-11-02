@@ -336,11 +336,10 @@ fn web_profile() -> Option<String> {
     None
 }
 
-/// A parameter of the page's address (`?audio=0&gfx=veg=0`), to switch parts
-/// of the game off on a device that cannot be inspected (2026-10-31, an iPhone
-/// whose page dies as the game starts). Always `None` on the desktop.
+/// A parameter of the page's address (`?gfx=veg=0`, see [`Graphics::from_env`]).
+/// Always `None` on the desktop.
 #[cfg(target_arch = "wasm32")]
-pub fn web_param(name: &str) -> Option<String> {
+fn web_param(name: &str) -> Option<String> {
     let location = js_sys::Reflect::get(&js_sys::global(), &"location".into()).ok()?;
     let search = js_sys::Reflect::get(&location, &"search".into()).ok()?.as_string()?;
     let search = js_sys::decode_uri_component(&search).ok()?.as_string()?;
@@ -348,13 +347,8 @@ pub fn web_param(name: &str) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn web_param(_: &str) -> Option<String> {
+fn web_param(_: &str) -> Option<String> {
     None
-}
-
-/// `web_param(name)` is `0`: that part is switched off.
-pub fn web_off(name: &str) -> bool {
-    web_param(name).as_deref() == Some("0")
 }
 
 /// The page forced a profile with `?q=`.

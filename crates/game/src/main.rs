@@ -24,7 +24,6 @@ mod fire_shader;
 mod fire_view;
 mod forecast_view;
 mod forecast_zone;
-mod gpu_memory;
 mod reach_zone;
 mod frame;
 mod kiosk;
@@ -220,25 +219,14 @@ fn main() -> anyhow::Result<()> {
     if kiosk::snap::bench_s().is_some() {
         app.add_plugins(bench::BenchPlugin);
     }
-    app.add_plugins(gpu_memory::GpuMemoryPlugin);
     app.add_plugins(streamed_mesh::StreamedMeshPlugin);
     #[cfg(target_arch = "wasm32")]
     app.add_plugins(web_gpu::WebGpuPlugin);
     app.add_plugins(mario::MarioPlugin);
     app.add_plugins(pad::PadPlugin);
-    // `?audio=0`, `?orizzonte=0`, `?raggi=0` in the browser switch these off
-    // (the sound's output stays: Mario's plugin registers a source of its own)
-    if quality::web_off("audio") {
-        app.init_resource::<sound::AudioPrefs>();
-    } else {
-        app.add_plugins(sound::SoundPlugin);
-    }
-    if !quality::web_off("orizzonte") {
-        app.add_plugins(horizon::HorizonPlugin);
-    }
-    if !quality::web_off("raggi") {
-        app.add_plugins(godrays::GodRaysPlugin);
-    }
+    app.add_plugins(sound::SoundPlugin);
+    app.add_plugins(horizon::HorizonPlugin);
+    app.add_plugins(godrays::GodRaysPlugin);
     app.add_plugins(vegetation::PlantRenderPlugin);
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);

@@ -27,7 +27,7 @@ bytemuck = "1"
 bevy = { version = "0.20", default-features = false }
 # Only for the timestamp queries of `bench.rs` (QuerySet, RenderPassTimestampWrites are not
 # re-exported by bevy::render::render_resource). Same major as Bevy uses.
-wgpu = { version = "30", default-features = false, features = ["counters"] }
+wgpu = { version = "30", default-features = false }
 bevy_egui = { version = "0.43.1", default-features = false, features = ["open_url", "default_fonts", "render"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
