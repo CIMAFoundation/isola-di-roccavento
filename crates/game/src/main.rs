@@ -101,7 +101,7 @@ fn main() -> anyhow::Result<()> {
     // a machine short of memory builds a lighter scene (see `memory`)
     #[cfg(not(target_arch = "wasm32"))]
     match memory::begin(quality::Graphics::chosen()) {
-        Some(memory::Short::Crash) if std::env::var_os("KIOSK_QUALITY").is_none() => gfx = quality::Graphics::RISPARMIO,
+        Some(memory::Short::Forced) if std::env::var_os("KIOSK_QUALITY").is_none() => gfx = quality::Graphics::RISPARMIO,
         Some(_) => gfx = gfx.lighter(),
         None => {}
     }
@@ -257,8 +257,6 @@ fn main() -> anyhow::Result<()> {
     let exit = app.run();
     #[cfg(target_arch = "wasm32")]
     let _ = exit;
-    #[cfg(not(target_arch = "wasm32"))]
-    memory::end();
     #[cfg(not(target_arch = "wasm32"))]
     if let bevy::app::AppExit::Error(code) = exit {
         std::process::exit(i32::from(code.get()));

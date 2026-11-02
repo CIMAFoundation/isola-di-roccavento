@@ -410,7 +410,6 @@ fn saved() -> Option<String> {
 /// Remember the level for the next launch. A failure is reported, never fatal.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save(level: &str) -> Result<(), String> {
-    crate::memory::forget();
     let p = saved_path();
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("grafica: {e}"))?;
