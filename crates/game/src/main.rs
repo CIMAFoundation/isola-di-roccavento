@@ -65,6 +65,8 @@ mod ui;
 mod near_cover;
 mod units;
 mod vegetation;
+#[cfg(not(target_arch = "wasm32"))]
+mod veg_lab;
 mod visual_scale;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_state;
@@ -88,6 +90,11 @@ use crate::sim::Sim;
 pub struct DataPath(pub std::path::PathBuf);
 
 fn main() -> anyhow::Result<()> {
+    // `KIOSK_PIANTE=1`: the plants' fire, plant by plant, instead of the game
+    #[cfg(not(target_arch = "wasm32"))]
+    if veg_lab::wanted() {
+        return veg_lab::run();
+    }
     let data = std::env::var("ROCCA_DATA").unwrap_or_else(|_| "data".to_string());
     let mut gfx = quality::Graphics::from_env();
     // a machine short of memory builds a lighter scene (see `memory`)
@@ -401,8 +408,8 @@ fn map_camera_allowed(mario: Res<mario::Playground>) -> bool {
 /// The film look on top of the tone mapper. With TonyMcMapface it added
 /// contrast and saturation (it washes bright, saturated colours out, flames
 /// included: salmon instead of orange); since 2026-11-01 the tone mapper is
-/// AcesFitted (user's choice, compared in `veg_lab` on main), contrasty and
-/// saturated of itself, and the grading is neutral: on top of it the sea went navy.
+/// AcesFitted (user's choice, compared in `veg_lab`), contrasty and saturated
+/// of itself, and the grading is neutral: on top of it the sea went navy.
 fn grading() -> bevy::render::view::ColorGrading {
     bevy::render::view::ColorGrading::default()
 }

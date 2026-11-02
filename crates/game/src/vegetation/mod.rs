@@ -54,7 +54,7 @@ pub use render::PlantRenderPlugin;
 /// How long a plant flames after the fire reaches it, in simulated seconds.
 /// Well short of the cell's 20-minute burn-out: the crown goes fast, the
 /// ground under it keeps smouldering.
-const PLANT_FLAMING_S: f32 = 240.0;
+pub(crate) const PLANT_FLAMING_S: f32 = 240.0;
 
 /// The longest lag of a plant behind the interpolated front: even two shrubs
 /// a metre apart do not catch at the same instant.
@@ -418,6 +418,86 @@ impl Vegetation {
     /// The tactical view's greying (`tactical.rs`).
     pub fn set_tactical(&mut self, amount: f32) {
         self.tactical = amount;
+    }
+}
+
+/// A row of the plant lab (`veg_lab`): one variety, its plants' feet (Bevy
+/// frame), their crown width and height (m) and yaw.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct LabRow {
+    pub name: &'static str,
+    pub feet: Vec<Vec3>,
+    pub size: Vec3,
+    pub yaw: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Vegetation {
+    /// The plant lab's scene (`veg_lab`): each row a tile of its own, the
+    /// authored models at any distance, and their remains. No plant is
+    /// thinned, none catches until [`Vegetation::set_lab_ignitions`] says when.
+    pub(crate) fn lab(rows: &[LabRow]) -> Vegetation {
+        let mut meshes = Vec::new();
+        let (mut groups, mut tiles) = (Vec::new(), Vec::new());
+        for row in rows {
+            let mut tiers = [None; TIERS];
+            for tier in [Tier::Full, Tier::Proxy, Tier::RemainsNear, Tier::RemainsFar] {
+                meshes.push(meshes::variety_mesh(row.name, tier));
+                tiers[tier as usize] = Some(meshes.len() as u32 - 1);
+            }
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            let mut instances = Vec::with_capacity(row.feet.len() * INSTANCE_BYTES as usize);
+            for foot in &row.feet {
+                lo = lo.min(*foot - Vec3::new(row.size.x * 1.3, row.size.y * 0.5, row.size.x * 1.3));
+                hi = hi.max(*foot + Vec3::new(row.size.x * 1.3, row.size.y * 1.35, row.size.x * 1.3));
+                let mut record = [0u8; INSTANCE_BYTES as usize];
+                for (k, v) in [foot.x, foot.y, foot.z, row.yaw, row.size.x, row.size.y].into_iter().enumerate() {
+                    record[4 * k..4 * k + 4].copy_from_slice(&v.to_le_bytes());
+                }
+                // the atlas' own colours (multipliers 1, stored halved), always
+                // shown (rank 0), the middle shade
+                record[24..32].copy_from_slice(&[128, 128, 128, 128, 0, 128, 128, 0]);
+                instances.extend_from_slice(&record);
+            }
+            tiles.push(Tile { lo, hi, cells: (0, 0, 0, 0), groups: groups.len()..groups.len() + 1 });
+            groups.push(Group { tiers, instances, count: row.feet.len() as u32, spots: Vec::new() });
+        }
+        let fire = groups.iter().map(|g| GroupFire::new(g.count as usize, 0)).collect();
+        let touched = vec![false; tiles.len()];
+        let scene = PlantScene { id: SCENES.fetch_add(1, Ordering::Relaxed), meshes, groups, tiles, atlas: atlas::atlas(), remains: true };
+        Vegetation {
+            scene: Arc::new(scene),
+            fire,
+            touched,
+            uniform: [0.0; 12],
+            // the full models however far the camera goes
+            lod_m: f32::MAX,
+            keep: 1.0,
+            tactical: 0.0,
+            drawn_at: None,
+            drawn_cleared: 0,
+            since: 0.0,
+        }
+    }
+
+    /// When each plant of row `r` catches, in simulated seconds: every one
+    /// of them does.
+    pub(crate) fn set_lab_ignitions(&mut self, r: usize, at: &[f32]) {
+        let Some(fire) = self.fire.get_mut(r) else { return };
+        if at.len() != fire.state.len() {
+            return;
+        }
+        fire.state = Arc::new(at.iter().map(|&t| [t, 0.0]).collect());
+        let mut caught: Vec<u32> = (0..at.len() as u32).collect();
+        caught.sort_by(|&a, &b| at[a as usize].total_cmp(&at[b as usize]));
+        fire.caught = Arc::new(caught);
+        fire.version += 1;
+    }
+
+    /// The lab's uniforms, as [`clock`] writes the game's: its own clock,
+    /// still air, every plant shown, the remains under burnt crowns.
+    pub(crate) fn set_lab_clock(&mut self, now: f32, real_s: f32) {
+        self.uniform = [now, PLANT_FLAMING_S, 1.0, 0.0, 0.0, 1.0, 0.0, real_s, 1.0, 0.0, 0.0, 0.0];
     }
 }
 
