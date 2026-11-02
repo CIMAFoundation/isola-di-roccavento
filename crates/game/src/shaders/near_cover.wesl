@@ -108,8 +108,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     let sea_ok = select(0.0, 1.0, shore < -6.0);
     let road_ok = smoothstep(0.0, 1.2, road_d) * (1.0 - smoothstep(0.25, 0.45, road.b));
 
-    // Density as a share of cells that grow anything, thinned with distance
-    // (blades also widen with distance, so the cover keeps its mass).
+    // Density as a share of cells that grow anything.
     let h0 = ground_h(tuft.x, -tuft.y);
     let d_eye = distance(vec3<f32>(tuft.x, h0, -tuft.y), view.world_position.xyz);
     let patch_n = value_noise(tuft * 0.09 + 3.0);
@@ -117,17 +116,20 @@ fn vertex(v: Vertex) -> VertexOutput {
     var dens = cv.r;
     dens = dens * (0.8 + 0.5 * patch_n) * (0.85 + 0.3 * fine_n);
     let keep = f32(r.z < dens) * sea_ok * road_ok;
-    // This ring's band of distance from the eye. Each ring fades out over the
-    // last stretch below its upper edge as the next fades in, by dithering, so
-    // the density stays even.
+    // This ring's band of distance from the eye. Over the last stretch below
+    // its outer edge (0.6..1 of it) a ring dissolves into the next. Each blade
+    // dissolves at its own distance (`fade_at`), over a short stretch, with a
+    // per-pixel threshold in the fragment shader: at any moment only a few
+    // blades are part-drawn, the rest whole, and no blade changes shape as the
+    // camera moves (blades that shrank as their ring gave way looked as if
+    // they sprouted out of the ground).
     let lo = params.fire.z;
     let hi = params.fire.w;
     let fade_out = 1.0 - smoothstep(0.6 * hi, hi, d_eye);
     let fade_in = select(smoothstep(0.6 * lo, lo, d_eye), 1.0, lo <= 0.0);
-    // not a coin toss per blade: a blade shrinks to nothing as its ring gives
-    // way, each at its own moment (`rb.z`), so nothing pops as the camera moves
-    let grow = clamp((fade_out * fade_in - 0.4 * rb.z) / 0.6, 0.0, 1.0);
-    let thin = f32(grow > 0.01);
+    let fade_at = rnd3(wc, 5u + k * 13u).x * 0.85;
+    let dissolve = clamp((fade_out * fade_in - fade_at) / 0.15, 0.0, 1.0);
+    let thin = f32(dissolve > 0.001);
 
     // Fire: 0 untouched, ~0.5 burning, 1 burnt, 0.78 cleared to bare ground.
     let burnt = smoothstep(0.9, 1.0, cv.a);
@@ -156,11 +158,9 @@ fn vertex(v: Vertex) -> VertexOutput {
         let h_tuft = mix(0.40, 0.95, patch_n) * (0.6 + 0.8 * r.z) * 1.3 * min(pow(scale, 0.6), 2.4);
         var h = h_tuft * (0.55 + 0.6 * rb.z);
         // blades of burnt ground are a few centimetres of stubble
-        h = mix(h, 0.05, burnt) * mix(1.0, 0.7, scorch) * grow;
+        h = mix(h, 0.05, burnt) * mix(1.0, 0.7, scorch);
         // wide enough to be a pixel from where the camera is
-        // a width that depends on the ring only: one that followed the distance to
-        // the eye would swell and shrink as the camera moves
-        let w = 0.06 * scale * (1.0 - 0.7 * t) * grow;
+        let w = 0.06 * scale * (1.0 - 0.7 * t);
         let dir = vec2<f32>(cos(ang), sin(ang));
         let tang = vec2<f32>(-dir.y, dir.x);
         // the blades fan out over the cell, which grows with the ring
@@ -212,12 +212,18 @@ fn vertex(v: Vertex) -> VertexOutput {
     // scorch browns, burnt blackens
     col = mix(col, col * vec3<f32>(0.55, 0.34, 0.16), scorch);
     col = mix(col, vec3<f32>(0.035, 0.03, 0.028), burnt);
-    out.color = vec4<f32>(col, 1.0);
+    out.color = vec4<f32>(col, dissolve);
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
+    // a blade dissolving between two rings (see the vertex stage):
+    // interleaved gradient noise, a threshold per pixel even at every scale
+    let ign = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))));
+    if ign >= in.color.a {
+        discard;
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     // base colour from the vertex stage; the material's base colour is white
     pbr_input.material.base_color = vec4<f32>(in.color.rgb, 1.0);

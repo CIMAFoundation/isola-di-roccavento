@@ -20,7 +20,8 @@
 //! | `iso`    | `0`: no isochrones (lines and labels)                                |
 //! | `marks`  | `0`: no team, order, hex, road or flag marks on the map              |
 //! | `ui`     | `0`: no interface at all (panels, labels, buttons)                   |
-//! | `mario`  | `1`: Mario beside the fire, turned to the camera (needs `pause=1`)   |
+//! | `mario`  | `1`: Mario beside the fire, turned to the camera (needs `pause=1`); `<x>:<y>`: there instead |
+//! | `walk`   | `1`: with `mario`, he runs straight ahead instead of posing (for `rec`) |
 //! | `live`   | `1`: the world keeps running (×300) instead of freezing at the shot  |
 //! | `opening`| real seconds into the opening sequence, held (with `phase=title`)     |
 //! | `rec`    | seconds of video with sound instead of a picture: `<name>.mp4` (`record`) |
@@ -84,6 +85,10 @@ struct State {
     pitch: Option<f32>,
     hide: SnapHide,
     mario: bool,
+    /// `mario=<x>:<y>`: where Mario starts instead of beside the fire.
+    mario_at: Option<Vec2>,
+    /// `walk=1`: Mario runs ahead instead of posing (to film the ground going by).
+    walk: bool,
     live: bool,
     opening: Option<f32>,
     rec: Option<f32>,
@@ -138,7 +143,11 @@ fn parse(spec: &str) -> Vec<State> {
                     "iso" => st.hide.iso = v == "0",
                     "marks" => st.hide.marks = v == "0",
                     "ui" => st.hide.ui = v == "0",
-                    "mario" => st.mario = v == "1",
+                    "mario" => {
+                        st.mario_at = v.split_once(':').and_then(|(x, y)| Some(Vec2::new(x.parse().ok()?, y.parse().ok()?)));
+                        st.mario = v == "1" || st.mario_at.is_some();
+                    }
+                    "walk" => st.walk = v == "1",
                     "live" => st.live = v == "1",
                     "opening" => st.opening = v.parse().ok(),
                     "rec" => st.rec = v.parse().ok(),
@@ -404,7 +413,7 @@ pub fn drive(
         p.waited = 0.0;
         p.base = None;
         if st.mario {
-            mario.request_start_for_snapshot(false);
+            mario.request_start_for_snapshot(false, st.mario_at, st.walk);
         }
     }
     p.waited += dt;

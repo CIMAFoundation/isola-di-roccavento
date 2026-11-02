@@ -71,6 +71,10 @@ ownership e cleanup con ROM locale); `cargo test -p game --release mario`
 Screenshot riproducibile della modalità: `KIOSK_SNAP=out/mario
 KIOSK_SNAP_SPEC='name=rocca,phase=pianifica,mario=1' cargo run -p game
 --release`. Il campo `mario=1` è solo nativo; il programma salva il PNG e termina.
+`mario=<x>:<y>` mette Mario in quel punto (metri, est e nord) invece che accanto
+al fuoco; `walk=1` lo fa correre dritto invece di mettersi in posa (con `rec=`,
+per filmare il terreno che scorre). Un solo stato con Mario per avvio: il
+secondo lo spegne invece di riavviarlo (2026-11-02).
 
 ## Passatempi (2026-10-20, richiesta dell'utente)
 

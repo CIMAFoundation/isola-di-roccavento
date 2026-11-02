@@ -178,6 +178,10 @@ pub struct Playground {
     awaiting_rom: bool,
     /// `KIOSK_SNAP` `mario=1`: start beside the fire, then turn to the camera.
     snapshot: bool,
+    /// `mario=<x>:<y>`: start there (world metres, east and north) instead.
+    snapshot_at: Option<Vec2>,
+    /// `walk=1`: run ahead instead of posing.
+    snapshot_walk: bool,
     snapshot_time: f32,
     /// For `play`: where Mario stands (None while he is not out), and what he
     /// did this frame. Read-only for the game: nothing here reaches `Game`.
@@ -196,16 +200,18 @@ impl Default for Playground {
             snapshot_wing_cap: false, choose_position: false, relocating: false,
             confirm_position: false, cancel_position: false, error: None,
             health: 0, wing_cap: false, message: "", awaiting_rom: false,
-            snapshot: false, snapshot_time: 0., pos: None, punched: false,
+            snapshot: false, snapshot_at: None, snapshot_walk: false, snapshot_time: 0., pos: None, punched: false,
             engaged: false, greeted_unit: None, victory: false, cues: Vec::new() }
     }
 }
 
 impl Playground {
-    pub(crate) fn request_start_for_snapshot(&mut self, wing_cap: bool) {
+    pub(crate) fn request_start_for_snapshot(&mut self, wing_cap: bool, at: Option<Vec2>, walk: bool) {
         self.toggle = true;
         self.snapshot_wing_cap = wing_cap;
         self.snapshot = true;
+        self.snapshot_at = at;
+        self.snapshot_walk = walk;
         self.snapshot_time = 0.;
     }
     /// Mario is standing, turned to the camera: the picture can be taken.
@@ -820,7 +826,11 @@ fn drive(
         let demo = std::env::var_os("MARIO_DEMO").is_some();
         let beside_fire = demo || mode.snapshot;
         let rocca = if beside_fire { None } else { rocca_start(&sim) };
-        let base = if beside_fire {
+        let base = if let Some(at) = mode.snapshot_at.filter(|_| mode.snapshot) {
+            let p = scenario::Pos { x: at.x, y: at.y };
+            runtime.demo_fire = crate::frame::to_bevy(p, sim.scn.terrain.height_at(p));
+            runtime.demo_fire
+        } else if beside_fire {
             // Stand just outside the eastern edge of the actual burning front.
             let fire = sim.fire.active_cells().iter()
                 .map(|&c| sim.scn.world.centre_of(c))
@@ -1159,10 +1169,12 @@ fn drive(
         // walk towards the camera, stop facing it, strike the victory pose
         let before = mode.snapshot_time;
         mode.snapshot_time += dt;
-        if before < 2.2 && mode.snapshot_time >= 2.2 {
+        if before < 2.2 && mode.snapshot_time >= 2.2 && !mode.snapshot_walk {
             runtime.engine.as_mut().unwrap().victory_pose();
         }
-        stick = if (1.3..1.9).contains(&mode.snapshot_time) { Vec2::new(0., 1.) } else { Vec2::ZERO };
+        stick = if (1.3..1.9).contains(&mode.snapshot_time) { Vec2::new(0., 1.) }
+            else if mode.snapshot_walk && mode.snapshot_time > 2.2 { Vec2::new(0., -1.) }
+            else { Vec2::ZERO };
     }
     let engage = pressed(GamepadButton::LeftThumb)
         || keyboard_free && controls.keys.just_pressed(KeyCode::KeyF);
