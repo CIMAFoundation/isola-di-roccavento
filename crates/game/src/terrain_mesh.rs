@@ -417,6 +417,13 @@ fn ground_color(scn: &Scenario, sea: &crate::ground_mask::SeaGrid, elev: f32, sl
 }
 
 
+/// From where to where (metres from the eye) the canopy on the ground turns
+/// from the shade under the real plants to the crowns' colour. The browser
+/// draws few plants, so its painted canopy comes closer.
+fn canopy_fade(gfx: &crate::quality::Graphics) -> [f32; 2] {
+    if gfx.vegetation <= 0.15 { [80.0, 320.0] } else { [300.0, 900.0] }
+}
+
 /// Layer of the terrain's shadow casters: the sun sees it (it is on the sun's
 /// layers, see `main.rs`), the camera does not. A [`VisibilityRange`] entity is
 /// never queued as a shadow caster (the light's views are not in the range
@@ -439,7 +446,7 @@ const LEVELS: [usize; 3] = [1, 2, 4];
 /// neighbouring chunks are drawn at different strides.
 const SKIRT: f32 = 0.6;
 
-fn f16_bits(x: f32) -> u16 {
+pub(crate) fn f16_bits(x: f32) -> u16 {
     let b = x.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
     let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
@@ -544,6 +551,203 @@ fn level_mesh(
     mesh
 }
 
+/// Whether the terrain is an adaptive mesh (`terrain_tin`); `ROCCA_TIN=0`
+/// draws the regular grid, for comparisons.
+pub fn tin_enabled() -> bool {
+    std::env::var("ROCCA_TIN").map_or(true, |v| v != "0")
+}
+
+/// Tolerance of each level's adaptive mesh, metres: no DEM sample is farther
+/// from the surface. The browser's single level (base stride 4) is coarser.
+const TIN_TOL_M: [f32; 3] = [0.2, 0.8, 3.0];
+const TIN_TOL_COARSE_M: f32 = 2.0;
+/// Spacing of the kerb vertices by level, metres (none on the farthest).
+const KERB_STEP_M: [f32; 3] = [4.0, 8.0, 0.0];
+const KERB_STEP_COARSE_M: f32 = 10.0;
+/// DEM samples per refinement sample in the browser (1: every 5 m sample).
+const TIN_CANDIDATES_COARSE: usize = 2;
+
+/// Both edges of every road's level bench (`scenario::grade`), every `step`
+/// metres, as vertices on the shaped ground; in base-grid units.
+fn kerbs(scn: &Scenario, shore: &ShoreField, posting: f32, step: f32) -> Vec<crate::terrain_tin::Fixed> {
+    let t = &scn.terrain;
+    let Some(grade) = &t.grade else { return Vec::new() };
+    let mut out = Vec::new();
+    for road in &scn.vectors.roads {
+        if !(road.drivable || road.track) || road.line.len() < 2 {
+            continue;
+        }
+        let flat = scenario::grade::flat_half_width(road.drivable);
+        // resample the centreline
+        let mut pts: Vec<[f32; 2]> = vec![road.line[0]];
+        for w in road.line.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+            let n = (len / step).ceil().max(1.0) as usize;
+            for k in 1..=n {
+                let u = k as f32 / n as f32;
+                pts.push([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u]);
+            }
+        }
+        for i in 0..pts.len() {
+            let (a, b) = (pts[i.saturating_sub(1)], pts[(i + 1).min(pts.len() - 1)]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-3 {
+                continue;
+            }
+            for side in [-1.0f32, 1.0] {
+                let p = [pts[i][0] - dy / len * flat * side, pts[i][1] + dx / len * flat * side];
+                // not inside another stretch's bench (junctions, the inside of bends)
+                if grade.near(p).iter().any(|&k| {
+                    let s = &grade.segs[k as usize];
+                    s.nearest(p).0 < s.flat - 0.4
+                }) {
+                    continue;
+                }
+                let q = Pos { x: p[0], y: p[1] };
+                let z = cliff_elev(scn, shore, q, t.height_at(q));
+                let n = t.normal_at(q);
+                out.push(crate::terrain_tin::Fixed { c: p[0] / posting, r: (t.height_m - p[1]) / posting, z, n: [n[0], n[1], -n[2]] });
+            }
+        }
+    }
+    out
+}
+
+/// Every chunk's adaptive mesh at every level, keyed by (chunk x, chunk y,
+/// level index); natively on all cores.
+///
+/// The mesh is refined against the full-resolution DEM (5 m) whatever the
+/// base stride: with a coarser base (the browser's 20 m) the grid saw the
+/// ground only every fourth sample, and plants, engines and houses, which
+/// stand on `height_at`, floated or sank by metres (3 m at the 90th
+/// percentile, test `coarse_terrain_error`). The chunk edges stay on the base
+/// grid, so neighbouring chunks still share them.
+fn tin_geometry(
+    scn: &Scenario,
+    shore: &ShoreField,
+    grid: &Grid,
+    rows: usize,
+    (chunks_x, chunks_y): (usize, usize),
+    levels: &[usize],
+    stride: usize,
+    (coarse_tol, coarse_kerb, coarse_cand): (f32, f32, usize),
+) -> std::collections::HashMap<(usize, usize, usize), crate::terrain_tin::ChunkGeometry> {
+    let t = &scn.terrain;
+    let cols = grid.cols;
+    let coarse = levels.len() == 1;
+    // `s`: base-grid samples per refinement sample (the stride, or the stride
+    // over the browser's candidate spacing)
+    let cand = if stride == 1 { 1 } else { coarse_cand.clamp(1, stride) };
+    let s = stride / cand;
+    let fine_posting = t.posting * cand as f32;
+    // kerbs per level, in full-resolution samples, binned by chunk
+    let mut fixed: Vec<std::collections::HashMap<(usize, usize), Vec<crate::terrain_tin::Fixed>>> = Vec::new();
+    for k in 0..levels.len() {
+        let step = if coarse { coarse_kerb } else { KERB_STEP_M[k] };
+        let mut bins: std::collections::HashMap<(usize, usize), Vec<_>> = Default::default();
+        if step > 0.0 {
+            for p in kerbs(scn, shore, fine_posting, step) {
+                let span = (CHUNK * s) as f32;
+                let (cx, cy) = ((p.c / span).floor() as usize, (p.r / span).floor() as usize);
+                if cx >= chunks_x || cy >= chunks_y {
+                    continue;
+                }
+                let (c0, r0) = (cx * CHUNK, cy * CHUNK);
+                let (ncx, ncy) = (CHUNK.min(cols - 1 - c0), CHUNK.min(rows - 1 - r0));
+                let (lo_c, hi_c, lo_r, hi_r) = ((c0 * s) as f32, ((c0 + ncx) * s) as f32, (r0 * s) as f32, ((r0 + ncy) * s) as f32);
+                // strictly inside, clear of the shared edge
+                let m = 0.3;
+                if p.c > lo_c + m && p.c < hi_c - m && p.r > lo_r + m && p.r < hi_r - m {
+                    bins.entry((cx, cy)).or_default().push(p);
+                }
+            }
+        }
+        fixed.push(bins);
+    }
+    let mut jobs = Vec::new();
+    for cy in 0..chunks_y {
+        for cx in 0..chunks_x {
+            let (c0, r0) = (cx * CHUNK, cy * CHUNK);
+            let (ncx, ncy) = (CHUNK.min(cols - 1 - c0), CHUNK.min(rows - 1 - r0));
+            if ncx < 1 || ncy < 1 {
+                continue;
+            }
+            let under = (r0..=r0 + ncy).all(|r| (c0..=c0 + ncx).all(|c| grid.elev[r * cols + c] < SUBMERGED_M));
+            let used = if under { 1 } else { levels.len() };
+            for k in 0..used {
+                jobs.push((cx, cy, k));
+            }
+        }
+    }
+    let full = crate::terrain_tin::GridView { cols, rows, c_off: 0, r_off: 0, posting: grid.posting, elev: &grid.elev, normal: Some(&grid.normal) };
+    let build = |&(cx, cy, k): &(usize, usize, usize)| {
+        let (c0, r0) = (cx * CHUNK, cy * CHUNK);
+        let (ncx, ncy) = (CHUNK.min(cols - 1 - c0), CHUNK.min(rows - 1 - r0));
+        let origin = [(c0 as f32 + ncx as f32 * 0.5) * grid.posting, (r0 as f32 + ncy as f32 * 0.5) * grid.posting - t.height_m];
+        let f = levels[k];
+        let tol = if coarse { coarse_tol } else { TIN_TOL_M[k] };
+        let kerb = fixed[k].get(&(cx, cy)).map_or(&[][..], |v| &v[..]);
+        let skirt = SKIRT * f as f32 * grid.posting;
+        let g = if s == 1 {
+            crate::terrain_tin::chunk(&full, (c0, r0), (ncx, ncy), f, kerb, tol, origin, t.height_m, skirt)
+        } else {
+            // the chunk's window of the full-resolution DEM, shaped as the grid
+            let (fc0, fr0, w, h) = (c0 * s, r0 * s, ncx * s + 1, ncy * s + 1);
+            let mut elev = Vec::with_capacity(w * h);
+            for r in fr0..fr0 + h {
+                for c in fc0..fc0 + w {
+                    let p = Pos { x: c as f32 * fine_posting, y: t.height_m - r as f32 * fine_posting };
+                    let (dc, dr) = ((c * cand).min(t.cols - 1), (r * cand).min(t.rows - 1));
+                    elev.push(cliff_elev(scn, shore, p, t.elev[dr * t.cols + dc]));
+                }
+            }
+            let view = crate::terrain_tin::GridView { cols: w, rows: h, c_off: fc0, r_off: fr0, posting: fine_posting, elev: &elev, normal: None };
+            crate::terrain_tin::chunk(&view, (fc0, fr0), (ncx * s, ncy * s), f * s, kerb, tol, origin, t.height_m, skirt)
+        };
+        ((cx, cy, k), g)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = match TIN_WORKERS.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => std::thread::available_parallelism().map_or(4, |n| n.get()),
+            n => n,
+        };
+        let out = std::sync::Mutex::new(std::collections::HashMap::new());
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(job) = jobs.get(i) else { break };
+                    let (key, g) = build(job);
+                    out.lock().unwrap().insert(key, g);
+                });
+            }
+        });
+        out.into_inner().unwrap()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        jobs.iter().map(build).collect()
+    }
+}
+
+/// Threads building the adaptive meshes (0: all cores). The tests set 1 to
+/// time what the browser does on its one thread.
+#[cfg(not(target_arch = "wasm32"))]
+static TIN_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn geometry_mesh(g: crate::terrain_tin::ChunkGeometry) -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, g.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, g.normals);
+    mesh.insert_indices(Indices::U32(g.indices));
+    mesh.compress_indices();
+    mesh
+}
+
 /// The shaped heightfield and its normals at the base stride.
 struct Grid {
     cols: usize,
@@ -616,12 +820,25 @@ pub fn build(
             let n = [n[0], n[1], -n[2]];
             grid.elev.push(elev);
             grid.normal.push(n);
-            for v in [n[0], n[1], n[2], 0.0] {
-                normal_px.extend_from_slice(&f16_bits(v).to_le_bytes());
-            }
             let col = ground_color(scn, &sea, elev, n[1], p, shore_d);
             colour_px.extend(col.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
             colour_px.push(255);
+        }
+    }
+    // The canopy (`vegetation::canopy`): its cover in the colour's alpha, its
+    // kind and brightness beside the normal's x and z (y is rebuilt, it is
+    // always up), so the terrain needs no texture more (WebGL2 counts them).
+    let started = std::time::Instant::now();
+    let mut canopy = crate::vegetation::canopy::canopy(scn, cols, rows, posting);
+    // `ROCCA_CANOPY=0`: the bare ground, for comparisons
+    if std::env::var("ROCCA_CANOPY").is_ok_and(|v| v == "0") {
+        canopy.cover.fill(0.0);
+    }
+    info!("terrain: canopy in {:.2} s", started.elapsed().as_secs_f32());
+    for (i, n) in grid.normal.iter().enumerate() {
+        colour_px[i * 4 + 3] = (canopy.cover[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+        for v in [n[0], n[2], canopy.kind[i], canopy.light[i]] {
+            normal_px.extend_from_slice(&f16_bits(v).to_le_bytes());
         }
     }
     let colour_tex = images.add(ground_texture(cols, rows, colour_px, TextureFormat::Rgba8UnormSrgb));
@@ -635,20 +852,34 @@ pub fn build(
     );
 
     let _ = images.insert(&crate::ground_mask::ROAD_MASK, mask.image);
-    let material = materials.add(TerrainMaterial::new(
+    let mut terrain_material = TerrainMaterial::new(
         mask.rect,
         tex_rect,
         crate::ground_mask::ROAD_MASK,
         crate::ground_mask::GRASS_MAP,
         colour_tex,
         normal_tex,
-    ));
+    );
+    terrain_material.set_canopy(canopy.colours, canopy_fade(gfx));
+    let material = materials.add(terrain_material);
 
     let levels: &[usize] = if stride >= 4 { &LEVELS[..1] } else { &LEVELS };
     // distances at which each level hands over to the next
     let cuts = [LOD1_M, LOD2_M];
     let (chunks_x, chunks_y) = ((cols - 1).div_ceil(CHUNK), (rows - 1).div_ceil(CHUNK));
     let (mut count, mut submerged, mut tris) = (0, 0, [0usize; 3]);
+
+    // the adaptive meshes, all chunks and levels at once (`terrain_tin`)
+    let tin = tin_enabled();
+    let started = std::time::Instant::now();
+    let mut tin_meshes = if tin {
+        tin_geometry(scn, &shore, &grid, rows, (chunks_x, chunks_y), levels, stride, (TIN_TOL_COARSE_M, KERB_STEP_COARSE_M, TIN_CANDIDATES_COARSE))
+    } else {
+        Default::default()
+    };
+    if tin {
+        info!("terrain: adaptive meshes in {:.2} s", started.elapsed().as_secs_f32());
+    }
 
     for cy in 0..chunks_y {
         for cx in 0..chunks_x {
@@ -667,7 +898,10 @@ pub fn build(
             // a hidden chunk keeps only the finest level
             let used = if under { &levels[..1] } else { levels };
             for (k, &f) in used.iter().enumerate() {
-                let mesh = level_mesh(&grid, (c0, r0), (ncx, ncy), f, origin, t.height_m);
+                let mesh = match tin_meshes.remove(&(cx, cy, k)) {
+                    Some(g) => geometry_mesh(g),
+                    None => level_mesh(&grid, (c0, r0), (ncx, ncy), f, origin, t.height_m),
+                };
                 tris[k] += mesh.indices().map_or(0, |i| i.len() / 3);
                 let mesh = meshes.add(mesh);
                 let mut chunk = commands.spawn((
@@ -726,6 +960,176 @@ pub fn cell_ground(scn: &Scenario, c: Cell) -> (Pos, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How far the browser's terrain (base stride 4) sits from `height_at`,
+    /// where plants, engines and houses stand: the old 20 m grid against the
+    /// adaptive mesh at a few tolerances. A table, not a check:
+    /// `cargo test --release -p game coarse_terrain_error -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn coarse_terrain_error() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(scn) = Scenario::load(&dir) else { return };
+        let shore = ShoreField::new(&scn);
+        let t = &scn.terrain;
+        let stride = 4;
+        let shaped = |p: Pos| cliff_elev(&scn, &shore, p, t.height_at(p));
+        let (cols, rows, posting) = ((t.cols - 1) / stride + 1, (t.rows - 1) / stride + 1, t.posting * stride as f32);
+        let mut elev = vec![0.0; cols * rows];
+        let mut normal = vec![[0.0, 1.0, 0.0]; cols * rows];
+        for r in 0..rows {
+            for c in 0..cols {
+                let p = Pos { x: c as f32 * posting, y: t.height_m - r as f32 * posting };
+                elev[r * cols + c] = shaped(p);
+                let m = t.normal_at(p);
+                normal[r * cols + c] = [m[0], m[1], -m[2]];
+            }
+        }
+        // land points only: the sea floor is under opaque water
+        let pts: Vec<Pos> = (0..40_000u32)
+            .map(|k| Pos { x: 100.0 + (k as f32 * 0.618_034).fract() * 7800.0, y: 100.0 + (k as f32 * 0.754_878).fract() * 7800.0 })
+            .filter(|p| t.height_at(*p) > 2.0)
+            .collect();
+        let report = |label: &str, errs: &mut Vec<f32>| {
+            errs.sort_by(|a, b| a.total_cmp(b));
+            let q = |f: f32| errs[((errs.len() - 1) as f32 * f) as usize];
+            eprintln!("{label}: p50 {:.2} p90 {:.2} p99 {:.2} max {:.2} m", q(0.5), q(0.9), q(0.99), q(1.0));
+        };
+        // the old grid: two triangles per 20 m square, split as `level_mesh` does
+        let mut errs: Vec<f32> = pts
+            .iter()
+            .map(|p| {
+                let (fc, fr) = (p.x / posting, (t.height_m - p.y) / posting);
+                let (c, r) = (fc.floor() as usize, fr.floor() as usize);
+                let (u, v) = (fc - c as f32, fr - r as f32);
+                let h = |dc: usize, dr: usize| elev[(r + dr) * cols + c + dc];
+                // triangles (i, down, right) and (right, down, down+1)
+                let z = if u + v <= 1.0 { h(0, 0) + (h(1, 0) - h(0, 0)) * u + (h(0, 1) - h(0, 0)) * v } else { h(1, 1) + (h(0, 1) - h(1, 1)) * (1.0 - u) + (h(1, 0) - h(1, 1)) * (1.0 - v) };
+                (z - shaped(*p)).abs()
+            })
+            .collect();
+        report("grid 20 m", &mut errs);
+        let grid = Grid { cols, posting, elev, normal };
+        let (chunks_x, chunks_y) = ((cols - 1).div_ceil(CHUNK), (rows - 1).div_ceil(CHUNK));
+        for (tol, step, cand) in [(2.0, 10.0, 1), (3.0, 10.0, 1), (2.0, 10.0, 2), (3.0, 10.0, 2)] {
+            TIN_WORKERS.store(1, std::sync::atomic::Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            let meshes = tin_geometry(&scn, &shore, &grid, rows, (chunks_x, chunks_y), &[1], stride, (tol, step, cand));
+            let took = started.elapsed().as_secs_f32();
+            let mut errs = Vec::new();
+            let mut tris_total = 0;
+            for (&(cx, cy, _), g) in &meshes {
+                let (c0, r0) = (cx * CHUNK, cy * CHUNK);
+                let (ncx, ncy) = (CHUNK.min(cols - 1 - c0), CHUNK.min(rows - 1 - r0));
+                let origin = [(c0 as f32 + ncx as f32 * 0.5) * posting, (r0 as f32 + ncy as f32 * 0.5) * posting - t.height_m];
+                // back to world metres (x east, z = -north), skirts dropped
+                let tris: Vec<[[f32; 3]; 3]> = g
+                    .indices
+                    .chunks(3)
+                    .map(|i| [i[0], i[1], i[2]].map(|v| { let q = g.positions[v as usize]; [q[0] + origin[0], q[1], q[2] + origin[1]] }))
+                    .filter(|[a, b, c]| ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])).abs() > 1e-6)
+                    .collect();
+                tris_total += tris.len();
+                let (x0, x1) = (c0 as f32 * posting, (c0 + ncx) as f32 * posting);
+                let (y1, y0) = (t.height_m - r0 as f32 * posting, t.height_m - (r0 + ncy) as f32 * posting);
+                let cell = 40.0;
+                let nb = (((x1 - x0) / cell).ceil() as usize, ((y1 - y0) / cell).ceil() as usize);
+                let mut buckets = vec![Vec::new(); nb.0 * nb.1];
+                for (k, [a, b, c]) in tris.iter().enumerate() {
+                    let (lx, hx) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
+                    let (ly, hy) = ((-a[2]).min(-b[2]).min(-c[2]), (-a[2]).max(-b[2]).max(-c[2]));
+                    for j in (((ly - y0) / cell).floor().max(0.0) as usize)..=(((hy - y0) / cell).floor().max(0.0) as usize).min(nb.1 - 1) {
+                        for i in (((lx - x0) / cell).floor().max(0.0) as usize)..=(((hx - x0) / cell).floor().max(0.0) as usize).min(nb.0 - 1) {
+                            buckets[j * nb.0 + i].push(k);
+                        }
+                    }
+                }
+                for p in pts.iter().filter(|p| p.x >= x0 && p.x < x1 && p.y >= y0 && p.y < y1) {
+                    let (x, z) = (p.x, -p.y);
+                    let (i, j) = ((((p.x - x0) / cell) as usize).min(nb.0 - 1), (((p.y - y0) / cell) as usize).min(nb.1 - 1));
+                    for &k in &buckets[j * nb.0 + i] {
+                        let [a, b, c] = tris[k];
+                        let det = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+                        let l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / det;
+                        let l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / det;
+                        let l3 = 1.0 - l1 - l2;
+                        if l1 >= -1e-5 && l2 >= -1e-5 && l3 >= -1e-5 {
+                            let e = (l1 * a[1] + l2 * b[1] + l3 * c[1] - shaped(*p)).abs();
+                            errs.push(e);
+                            break;
+                        }
+                    }
+                }
+            }
+            report(&format!("tin tol {tol} kerbs {step} m candidates every {} m ({tris_total} triangles, {took:.2} s on one thread)", 5 * cand), &mut errs);
+        }
+    }
+
+    /// The adaptive mesh stays on the ground everything else stands on
+    /// (`height_at`, shaped like the mesh): within the tolerance almost
+    /// everywhere, and on the road kerbs and centreline within centimetres.
+    #[test]
+    fn the_adaptive_mesh_follows_the_ground_and_the_roads() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(scn) = Scenario::load(&dir) else { return };
+        let shore = ShoreField::new(&scn);
+        let t = &scn.terrain;
+        let shaped = |p: Pos| cliff_elev(&scn, &shore, p, t.height_at(p));
+        // a chunk of hillside with a highway across it
+        let (cx, cy) = (7usize, 5usize);
+        let (c0, r0, n) = (cx * CHUNK, cy * CHUNK, CHUNK);
+        let mut elev = vec![0.0; t.cols * t.rows];
+        let mut normal = vec![[0.0, 1.0, 0.0]; t.cols * t.rows];
+        for r in r0..=r0 + n {
+            for c in c0..=c0 + n {
+                let p = Pos { x: c as f32 * t.posting, y: t.height_m - r as f32 * t.posting };
+                elev[r * t.cols + c] = cliff_elev(&scn, &shore, p, t.elev[r * t.cols + c]);
+                let m = t.normal_at(p);
+                normal[r * t.cols + c] = [m[0], m[1], -m[2]];
+            }
+        }
+        let view = crate::terrain_tin::GridView { cols: t.cols, rows: t.rows, c_off: 0, r_off: 0, posting: t.posting, elev: &elev, normal: Some(&normal) };
+        let inside = |k: &crate::terrain_tin::Fixed| k.c > c0 as f32 + 0.3 && k.c < (c0 + n) as f32 - 0.3 && k.r > r0 as f32 + 0.3 && k.r < (r0 + n) as f32 - 0.3;
+        let kerb: Vec<_> = kerbs(&scn, &shore, t.posting, KERB_STEP_M[0]).into_iter().filter(inside).collect();
+        assert!(kerb.len() > 100, "the chunk has roads ({})", kerb.len());
+        let g = crate::terrain_tin::chunk(&view, (c0, r0), (n, n), 1, &kerb, TIN_TOL_M[0], [0.0, 0.0], t.height_m, 3.0);
+        // the mesh's height at a world point (brute force over the triangles)
+        let tris: Vec<[[f32; 3]; 3]> = g.indices.chunks(3).map(|i| [g.positions[i[0] as usize], g.positions[i[1] as usize], g.positions[i[2] as usize]]).collect();
+        let mesh_at = |p: Pos| -> Option<f32> {
+            let (x, z) = (p.x, -p.y);
+            for [a, b, c] in &tris {
+                let det = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+                if det.abs() < 1e-6 {
+                    continue; // a skirt
+                }
+                let l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / det;
+                let l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / det;
+                let l3 = 1.0 - l1 - l2;
+                if l1 >= -1e-5 && l2 >= -1e-5 && l3 >= -1e-5 {
+                    return Some(l1 * a[1] + l2 * b[1] + l3 * c[1]);
+                }
+            }
+            None
+        };
+        let mut errs = Vec::new();
+        for k in 0..3000u32 {
+            let (u, v) = ((k as f32 * 0.618_034).fract(), (k as f32 * 0.754_878).fract());
+            let p = Pos { x: (c0 as f32 + 1.0 + u * (n as f32 - 2.0)) * t.posting, y: t.height_m - (r0 as f32 + 1.0 + v * (n as f32 - 2.0)) * t.posting };
+            errs.push((mesh_at(p).expect("covered") - shaped(p)).abs());
+        }
+        errs.sort_by(|a, b| a.total_cmp(b));
+        let (p50, p99) = (errs[errs.len() / 2], errs[errs.len() * 99 / 100]);
+        let mut on_road = Vec::new();
+        for k in &kerb {
+            let p = Pos { x: k.c * t.posting, y: t.height_m - k.r * t.posting };
+            on_road.push((mesh_at(p).unwrap() - shaped(p)).abs());
+        }
+        on_road.sort_by(|a, b| a.total_cmp(b));
+        let road99 = on_road[on_road.len() * 99 / 100];
+        eprintln!("tin: {} triangles; off the mesh p50 {p50:.3} p99 {p99:.3} max {:.3} m; kerbs p99 {road99:.3} m", tris.len(), errs[errs.len() - 1]);
+        assert!(p99 < 0.35, "p99 {p99}");
+        assert!(road99 < 0.02, "kerbs {road99}");
+    }
 
     /// The cliffs are shaped only where they should be: a few metres at most,
     /// nothing at the waterline, a minority of the vertices.

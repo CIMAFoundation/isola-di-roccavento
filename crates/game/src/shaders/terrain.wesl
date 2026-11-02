@@ -1,5 +1,6 @@
 // The terrain (`materials/terrain.rs`): ground colour and normal per terrain
-// sample, the road network and the meadow drawn from distance-field masks,
+// sample, the canopy painted on it, the fire's scar and glow (`fire_ground`),
+// the road network and the meadow drawn from distance-field masks,
 // the limestone's beds on the rock faces. A material of its own rather than an
 // extension of StandardMaterial, whose textures it would never read: on WebGL2
 // every texture of the layout takes one of the 16 units, read or not.
@@ -13,6 +14,7 @@ import bevy_pbr::render::{pbr_functions, pbr_types};
 import game::shaders::noise::{hash21, value_noise};
 import game::shaders::scenery::{limestone, rock_bed, rock_bump, tactical_grey};
 import game::shaders::faded_shadow::apply_pbr_lighting_faded;
+import game::shaders::fire_ground::fire_ground;
 
 struct Terrain {
     // world metres to mask uv (xy); z > 0.5: meadow on; w: where the blades
@@ -21,8 +23,13 @@ struct Terrain {
     // world metres to the ground textures' uv: x, y = 1 / (posting * size),
     // z = half a texel in u, w = the north edge plus half a texel in v
     ground_rect: vec4<f32>,
-    // x: tactical desaturation, 0 (full colour) to 1 (`tactical.rs`)
+    // x: tactical desaturation, 0 (full colour) to 1 (`tactical.rs`);
+    // y, z: the canopy's fade from shade to crowns, metres from the eye
     tactical: vec4<f32>,
+    // mean crown colour (linear) of conifers, broadleaves, macchia
+    canopy_conifer: vec4<f32>,
+    canopy_broadleaf: vec4<f32>,
+    canopy_macchia: vec4<f32>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> terrain: Terrain;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var road_tex: texture_2d<f32>;
@@ -235,6 +242,28 @@ fn terrain_albedo(base: vec4<f32>, p: vec3<f32>, mask_s: vec4<f32>, meadow: f32,
     return vec4<f32>(rgb, base.a);
 }
 
+// The canopy painted on the ground (`vegetation::canopy`): every crown of
+// the full-density forest as a disc, `cover` of the sample. Far from the eye
+// it is the crowns' colour, broken up a little so it does not read as paint;
+// near it, where the real plants stand, only their shade and litter.
+fn with_canopy(rgb: vec3<f32>, p: vec3<f32>, cover: f32, kind: f32, light: f32) -> vec3<f32> {
+    if cover < 0.004 {
+        return rgb;
+    }
+    let d_eye = distance(p, view.world_position.xyz);
+    let far = smoothstep(terrain.tactical.y, terrain.tactical.z, d_eye);
+    let crown = mix(
+        mix(terrain.canopy_conifer.rgb, terrain.canopy_broadleaf.rgb, clamp(kind * 2.0, 0.0, 1.0)),
+        terrain.canopy_macchia.rgb,
+        clamp(kind * 2.0 - 1.0, 0.0, 1.0),
+    ) * clamp(light, 0.5, 1.6);
+    let mottle = 0.78 + 0.44 * (0.6 * value_noise(p.xz * 0.22) + 0.4 * value_noise(p.xz * 0.07 + 3.0));
+    let shade = rgb * vec3<f32>(0.80, 0.84, 0.78);
+    let near_rgb = mix(rgb, shade, cover);
+    let far_rgb = mix(rgb, crown * mottle, cover);
+    return mix(near_rgb, far_rgb, far);
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let p = in.world_position.xyz;
@@ -242,12 +271,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let mask_uv = vec2<f32>(p.x, -p.z) * terrain.mask_rect.xy;
     let mask_s = textureSample(road_tex, road_samp, mask_uv);
     let meadow = textureSample(grass_tex, grass_samp, mask_uv).r;
+    // The fire map shares the meadow's texture (one texel per fire cell),
+    // read at a point warped by ~7 m as `field::FireField::warp` does.
+    let wn = vec2<f32>(p.x, -p.z);
+    let fire_warp = vec2<f32>(value_noise(wn * 0.045 + 11.0), value_noise(wn * 0.045 + vec2<f32>(3.0, 29.0))) - 0.5;
+    let fire_s = textureSample(grass_tex, grass_samp, (wn + fire_warp * 14.0) * terrain.mask_rect.xy);
+    let mpp = max(length(dpdx(p.xz)), length(dpdy(p.xz)));
     // colour and normal per sample (texel centres on the samples), not per
     // vertex: the mesh may be coarser than the data
     let gr = terrain.ground_rect;
     let guv = vec2<f32>(p.x * gr.x + gr.z, p.z * gr.y + gr.w);
-    let g_col = textureSampleLevel(ground_col_tex, ground_col_samp, guv, 0.0).rgb;
-    var g_nrm = normalize(textureSampleLevel(ground_nrm_tex, ground_nrm_samp, guv, 0.0).xyz);
+    let g_col4 = textureSampleLevel(ground_col_tex, ground_col_samp, guv, 0.0);
+    let g_nrm4 = textureSampleLevel(ground_nrm_tex, ground_nrm_samp, guv, 0.0);
+    let g_col = with_canopy(g_col4.rgb, p, g_col4.a, g_nrm4.z, g_nrm4.w);
+    // the normal's y is always up: rebuilt from x and z
+    var g_nrm = normalize(vec3<f32>(g_nrm4.x, sqrt(max(1.0 - g_nrm4.x * g_nrm4.x - g_nrm4.y * g_nrm4.y, 0.0)), g_nrm4.y));
     if !is_front {
         g_nrm = -g_nrm;
     }
@@ -258,9 +296,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr.V = pbr_functions::calculate_view(in.world_position, pbr.is_orthographic);
     pbr.frag_coord = in.position;
     pbr.world_position = in.world_position;
+    // the fire's scar into the ground, before the light (`fire_ground`)
+    let fire = fire_ground(p, fire_s, (mask_s.rg * 2.0 - 1.0) * RANGE_M, mpp);
     pbr.world_normal = g_nrm;
-    pbr.N = normalize(g_nrm + rock_bump(p, g_nrm));
-    pbr.material.base_color = terrain_albedo(vec4<f32>(g_col, 1.0), p, mask_s, meadow, g_nrm);
+    pbr.N = normalize(g_nrm + rock_bump(p, g_nrm) + fire.bump);
+    let albedo = terrain_albedo(vec4<f32>(g_col, 1.0), p, mask_s, meadow, g_nrm);
+    pbr.material.base_color = vec4<f32>(mix(albedo.rgb, fire.scar.rgb, fire.scar.a), albedo.a);
     pbr.material.perceptual_roughness = ROUGHNESS;
     pbr.material.metallic = 0.0;
     pbr.material.reflectance = vec3<f32>(REFLECTANCE);
@@ -268,6 +309,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting_faded(pbr);
+    // the burning band: light of its own, over the lit ground, under the fog
+    out.color = vec4<f32>(mix(out.color.rgb, fire.glow.rgb, fire.glow.a), out.color.a);
     out.color = pbr_functions::main_pass_post_lighting_processing(pbr, out.color);
     out.color = tactical_grey(out.color, terrain.tactical.x);
     return out;

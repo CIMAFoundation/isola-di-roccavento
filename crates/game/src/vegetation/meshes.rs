@@ -112,6 +112,19 @@ pub fn variety_mesh(name: &'static str, tier: Tier) -> PlantMesh {
     b.finish(!closed, !closed)
 }
 
+/// Half the width of a variety's crown seen from above, model units.
+pub fn crown_radius(name: &str) -> f32 {
+    let (lo, hi) = proxy_of(name).crown;
+    0.5 * (hi.x - lo.x).max(hi.z - lo.z)
+}
+
+/// The linear tone a variety's leaves carry over the atlas colour, averaged
+/// over the crown.
+pub fn crown_tone(name: &str) -> f32 {
+    let p = proxy_of(name);
+    (0.5 * (p.shade_low + p.shade_high)).powf(2.2)
+}
+
 /// What a distant plant keeps of its model: the crown's bounding box, its
 /// tone low and high, and the trunk below it.
 struct Proxy {

@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 pub mod cover;
 pub mod fuels;
+pub mod grade;
 pub mod metadata;
 pub mod population;
 pub mod terrain;
@@ -133,8 +134,11 @@ impl Scenario {
         )
         .context("parsing scenario.json")?;
 
-        let terrain = Terrain::load(&scenario_dir).context("render terrain")?;
+        let mut terrain = Terrain::load(&scenario_dir).context("render terrain")?;
         let vectors = Vectors::load(&scenario_dir).context("osm vectors")?;
+        if grade::enabled() {
+            terrain.grade_roads(&vectors.roads);
+        }
         let population = Population::load(&scenario_dir).context("population")?;
         let world = World {
             width_m: vectors.world_size_m[0],

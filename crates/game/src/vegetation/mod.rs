@@ -34,6 +34,7 @@
 //! embers, charcoal, the crown gone and the remains uncovered.
 
 mod atlas;
+pub mod canopy;
 mod meshes;
 mod render;
 mod scatter;
@@ -340,7 +341,7 @@ pub fn burn(
     (veg.since, veg.drawn_at, veg.drawn_cleared) = (0.0, Some(now), line_cells);
     let w = sim.scn.world;
     let (arrival, cleared) = (sim.fire.arrival_times(), sim.fire.cleared());
-    let field = FireField { state: sim.fire.state(), arrival, intensity: sim.fire.intensity(), cleared, world: w };
+    let field = FireField { arrival, intensity: sim.fire.intensity(), cleared, world: w };
     let scene = veg.scene.clone();
     for (t, tile) in scene.tiles.iter().enumerate() {
         if !veg.touched[t] {
@@ -539,8 +540,7 @@ mod tests {
         let mut states = vec![[NEVER, 0.0f32]; spots.len()];
         fn field_of(sim: &Sim) -> FireField<'_> {
             FireField {
-                state: sim.fire.state(),
-                arrival: sim.fire.arrival_times(),
+                        arrival: sim.fire.arrival_times(),
                 intensity: sim.fire.intensity(),
                 cleared: sim.fire.cleared(),
                 world: sim.scn.world,

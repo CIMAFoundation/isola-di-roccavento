@@ -1,13 +1,14 @@
 //! Custom shader materials for the fire.
 //!
 //! Everything in [`crate::fire_view`] decides *where* fire geometry goes —
-//! flame tongue placement, tongue count, the ground overlay's glow band. What
+//! flame tongue placement, tongue count, the fire map the terrain's shader
+//! draws the scar and the glow band from (`shaders/fire_ground.wesl`). What
 //! a `StandardMaterial` cannot do is make that geometry look like it is
 //! burning rather than merely lit: a billboard with a static texture reads as
 //! a sprite the moment the camera holds still. These two materials add a
 //! per-pixel animated domain warp and flicker, driven by `globals.time` and
 //! world position, so flame edges roil and the ground's glow band breathes
-//! even between the overlay's own ~150 ms rebuilds.
+//! even between the fire map's ~150 ms rewrites.
 
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::asset::uuid_handle;
@@ -93,50 +94,17 @@ impl Material for SmokeMaterial {
     }
 }
 
-/// The ground overlay: an untextured fire mask whose colour comes entirely from
-/// vertex colour, animated only where `sample_color` has marked a fragment as
-/// glowing. See `shaders/fire_ground.wgsl`.
-#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
-pub struct FireGroundMaterial {
-    /// Road distance field (`ground_mask`), so a scar can let the road show.
-    #[texture(0)]
-    #[sampler(1)]
-    pub road_mask: Option<Handle<Image>>,
-    #[uniform(2)]
-    pub mask_rect: Vec4,
-}
-
-impl Material for FireGroundMaterial {
-    fn fragment_shader() -> ShaderRef {
-        GROUND_SHADER_HANDLE.into()
-    }
-
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
-    }
-
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.primitive.cull_mode = None;
-        Ok(())
-    }
-}
-
 pub struct FireShaderPlugin;
 
 impl Plugin for FireShaderPlugin {
     fn build(&self, app: &mut App) {
         crate::load_wesl!(app, FLAME_SHADER_HANDLE, "shaders/flame.wesl");
+        // a module of the terrain's shader (`game::shaders::fire_ground`)
         crate::load_wesl!(app, GROUND_SHADER_HANDLE, "shaders/fire_ground.wesl");
         crate::load_wesl!(app, SMOKE_SHADER_HANDLE, "shaders/smoke.wesl");
         app.add_plugins((
             MaterialPlugin::<FireMaterial>::default(),
             MaterialPlugin::<SmokeMaterial>::default(),
-            MaterialPlugin::<FireGroundMaterial>::default(),
         ));
     }
 }

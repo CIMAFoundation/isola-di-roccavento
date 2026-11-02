@@ -1,25 +1,18 @@
-// Fragment shader for the ground overlay.
-//
-// The CPU side (fire_view::update_overlay) rebuilds this mesh's vertex
-// colours at most every 150 ms — plenty for the burn perimeter, which does
-// not move that fast, but not enough on its own to look "alive" at 1x speed.
-// `sample_color` flags a hot, glowing fragment by pushing its red channel
-// above 1.0 (the same convention the flame billboards use, so the two never
-// disagree about what is currently burning); this shader only adds motion to
-// that already-decided glow. Every other layer (Intensity, Arrival, Hazard)
-// never sets red above 1.0, so they pass through unanimated.
+// The fire on the ground, drawn by the terrain's own pixel shader
+// (`terrain.wesl`), so the scar can never be pierced by the terrain or float
+// over it. What the fire did comes from the fire map (`fire_view::
+// update_fire_map`, one texel per fire cell, linearly filtered): g how burnt,
+// b the arrival time against the moment the map was written, weighted by g,
+// a how much was cut by the crews. Sampled at a point shifted by a smooth
+// warp, which breaks up the 20 m raster (`field::FireField::warp`).
 
-import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::globals;
 import game::shaders::noise::{hash21, value_noise};
-import game::shaders::scene_light::{scene_shade, apply_scene_fog};
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(0) var road_tex: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(1) var road_samp: sampler;
-@group(constants::MATERIAL_BIND_GROUP) @binding(2) var<uniform> mask_rect: vec4<f32>;
-
-// Keep in step with `ground_mask.rs` and `terrain.wgsl`.
-const RANGE_M: f32 = 12.0;
+// How long ground stays visibly incandescent after the front passes. Much
+// shorter than the 20-minute burn-out: past this it is a scar with smoke over
+// it, not a glowing surface, or the glow reads as orange fog on the hillside.
+const GLOWING_S: f32 = 1100.0;
 
 // Fractal Brownian motion, domain-warped: the warp is what turns blobby
 // noise into the tendrilled, branching texture of a real fire front.
@@ -31,6 +24,28 @@ fn fbm(p_in: vec2<f32>) -> f32 {
         s += a * value_noise(p);
         p = p * 2.07 + vec2<f32>(17.3, 9.1);
         a *= 0.5;
+    }
+    return s / 0.96875;
+}
+
+// The same, without the octaves finer than two pixels (`mpp` metres per
+// pixel; `freq` the first octave's, cycles per metre): they would only
+// shimmer, and the terrain pays for every hidden fragment as well. A
+// dropped octave counts at its mean, so the tone does not shift.
+fn fbm_lod(p_in: vec2<f32>, freq: f32, mpp: f32) -> f32 {
+    var p = p_in;
+    var a = 0.5;
+    var s = 0.0;
+    var f = freq;
+    for (var i = 0; i < 5; i++) {
+        if f * 2.0 * mpp < 1.0 {
+            s += a * value_noise(p);
+        } else {
+            s += a * 0.5;
+        }
+        p = p * 2.07 + vec2<f32>(17.3, 9.1);
+        a *= 0.5;
+        f *= 2.07;
     }
     return s / 0.96875;
 }
@@ -47,60 +62,114 @@ fn fire_ramp(h: f32) -> vec3<f32> {
     return mix(mix(mix(c0, c1, a), c2, b), c3, c);
 }
 
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    var col = in.color;
-    // `w` fades the fractal treatment in smoothly over the glow gradient so
-    // there is no seam where the CPU colour crosses the hot threshold.
+
+// The colour the fire leaves at this point and how much it covers, before
+// the scene's light (the cold scar is lit here; the glow is light itself).
+fn fire_colour(p: vec3<f32>, fire: vec4<f32>) -> vec4<f32> {
+    let wp = vec2<f32>(p.x, -p.z);
+    // Coverage feathered around the half-burnt contour.
+    let cover = clamp((fire.g - 0.42) / 0.20, 0.0, 1.0);
+    if cover <= 0.0 {
+        // Fuel a crew has cleared: bare earth, with the grain of the ash so
+        // the strip does not read as a painted road.
+        let bare = clamp((fire.a - 0.42) / 0.20, 0.0, 1.0);
+        let grain = 0.8 + 0.4 * (0.6 * value_noise(wp / 17.0) + 0.4 * value_noise(wp / 6.0 + 3.0));
+        return vec4<f32>(vec3<f32>(0.36, 0.28, 0.19) * grain, bare * 0.95);
+    }
+    // the interpolated arrival, unburnt corners dragging it later (`field::arrival`)
+    let age = max(-fire.b / max(fire.g, 1e-3) - (1.0 - fire.g) * 90.0, 0.0);
+    // Incandescent only just behind the front, then straight to scar.
+    let glow = pow(clamp(1.0 - age / GLOWING_S, 0.0, 1.0), 2.0);
+    let embers = clamp(1.0 - age / (GLOWING_S * 4.0), 0.0, 1.0);
+    // Char and ash at a scale the fire model has no opinion about.
+    let ash = 0.72 + 0.85 * (0.6 * value_noise(wp / 23.0 + 7.0) + 0.4 * value_noise(wp / 8.0 + 13.0));
+    return vec4<f32>(
+        (0.085 + 0.10 * embers) * ash + 2.4 * glow,
+        0.065 * ash + 0.70 * glow * glow,
+        0.060 * ash + 0.06 * glow,
+        cover * 0.95,
+    );
+}
+
+// What the fire puts on the ground at `p`, in two parts the terrain applies
+// at different moments: `scar`, the cold scar (colour as albedo, opacity),
+// mixed into the ground's colour before the light, so the scene's light and
+// shadows fall on it once, as on the ground; `glow`, the burning band
+// (colour as light, opacity), mixed over the lit ground. `bump` roughens the
+// normal where the scar is, so the ash catches the sun grain by grain.
+struct FireGround {
+    scar: vec4<f32>,
+    glow: vec4<f32>,
+    bump: vec3<f32>,
+};
+
+// `road_d`: distance to the drivable roads and the tracks (`ground_mask`);
+// `mpp` metres per pixel.
+fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32) -> FireGround {
+    var out: FireGround;
+    out.scar = vec4<f32>(0.0);
+    out.glow = vec4<f32>(0.0);
+    out.bump = vec3<f32>(0.0);
+    // nothing burnt or cut near this point: the common case, cheap
+    if max(fire.g, fire.a) < 0.3 {
+        return out;
+    }
+    var col = fire_colour(p, fire);
+    if col.a <= 0.004 {
+        return out;
+    }
+    let wpc = p.xz;
+
+    // The burning band: `w` fades the fractal treatment in smoothly over the
+    // glow gradient so there is no seam where the colour crosses the hot
+    // threshold.
     let w = smoothstep(0.35, 1.0, col.r);
     if w > 0.0 {
         let t = globals.time;
-        let wp = in.world_position.xz;
-        // Heat decoded from the CPU glow (r = char + 2.4 * glow).
+        // Heat decoded from the glow (r = char + 2.4 * glow).
         let heat = clamp((col.r - 0.3) / 2.4, 0.0, 1.0);
-
         // Domain warp, slowly advected by the wind-ish drift.
-        let q = wp * 0.05 + vec2<f32>(t * 0.35, -t * 0.28);
+        let q = wpc * 0.05 + vec2<f32>(t * 0.35, -t * 0.28);
         let warp = vec2<f32>(fbm(q + 3.7), fbm(q + 11.2)) - 0.5;
-        let p = wp * 0.11 + warp * 2.6;
-        let n = fbm(p + vec2<f32>(t * 0.6, -t * 0.45));
+        let pw = wpc * 0.11 + warp * 2.6;
+        let n = fbm(pw + vec2<f32>(t * 0.6, -t * 0.45));
         // Fine, fast crackle on top: individual embers winking.
-        let crackle = value_noise(wp * 0.9 + vec2<f32>(t * 3.0, t * 2.1));
-
-        // Hot cells are where local heat beats the noise threshold: the
-        // front breaks into patches and fingers, with a ragged border.
-        // Slow breathing of the whole front, offset by position so it rolls
-        // along the line instead of pulsing in unison.
-        let breath = 0.5 + 0.5 * sin(t * 2.2 + wp.x * 0.035 + wp.y * 0.027);
+        let crackle = value_noise(wpc * 0.9 + vec2<f32>(t * 3.0, t * 2.1));
+        // Hot cells are where local heat beats the noise threshold: the front
+        // breaks into patches and fingers. Slow breathing of the whole front,
+        // offset by position so it rolls along the line.
+        let breath = 0.5 + 0.5 * sin(t * 2.2 + wpc.x * 0.035 + wpc.y * 0.027);
         let local = heat * 1.75 - (1.0 - n) * 0.70 + (crackle - 0.5) * 0.30 + breath * 0.10;
         let hot = smoothstep(0.0, 0.18, local);
-
-        let fire = fire_ramp(clamp(local, 0.0, 1.0)) * (0.85 + 0.55 * crackle);
-        // What the cooler gaps look like: dark char with a faint red glint.
+        let flame = fire_ramp(clamp(local, 0.0, 1.0)) * (0.85 + 0.55 * crackle);
+        // The cooler gaps: dark char with a faint red glint.
         let char_col = vec3<f32>(0.06, 0.03, 0.025) + vec3<f32>(0.9, 0.12, 0.0) * (1.0 - hot) * heat * n;
-        let fractal = mix(char_col, fire, hot);
-        let rgb = mix(col.rgb, fractal, w);
-
-        // Ragged outer edge: alpha is a smooth coverage ramp on the CPU.
+        let rgb = mix(col.rgb, mix(char_col, flame, hot), w);
+        // Ragged outer edge.
         let edge = smoothstep(0.12, 0.5, col.a + (n - 0.5) * 0.55);
-        let alpha = mix(col.a, col.a * edge, w);
-        col = vec4<f32>(rgb, alpha);
+        col = vec4<f32>(rgb, mix(col.a, col.a * edge, w));
     }
 
-    // Cold scar: ragged edge and ash grain at pixel scale, and the roads
-    // showing through it. The vertex lattice is 5 m or coarser, so without
-    // this the scar's border is a visible staircase and roads vanish under it.
-    let wpc = in.world_position.xz;
+    // The cold scar: ragged edge and ash grain at pixel scale, and the roads
+    // showing through it. The fire map is 20 m: without this the border is a
+    // soft blob and roads vanish under it.
     let cold = 1.0 - w;
-    if cold > 0.0 && col.a > 0.0 {
+    var scar = col.rgb;
+    var scar_a = col.a;
+    if cold > 0.0 {
         // Fractal border: a domain-warped fbm (large lobes down to ~1 m
         // fingers) moves the coverage threshold, so the burn edge is a
-        // self-similar coastline with peninsulas and unburned islands
-        // instead of a smooth blob. The push is strongest where coverage
-        // is low or middling (the border band) and fades inside the scar.
+        // self-similar coastline with peninsulas and unburned islands. The
+        // push is strongest in the border band and fades inside the scar.
         let warp = vec2<f32>(value_noise(wpc * 0.06 + 7.1), value_noise(wpc * 0.06 + 23.9)) - 0.5;
-        let fr = fbm(wpc * 0.13 + warp * 3.2);
-        let fine = value_noise(wpc * 1.9 + 5.3);
+        let fr = fbm_lod(wpc * 0.13 + warp * 3.2, 0.13, mpp);
+        let near = 1.0 - smoothstep(0.25, 0.6, mpp);
+        var fine = 0.5;
+        var grit = 0.5;
+        if near > 0.0 {
+            fine = mix(0.5, value_noise(wpc * 1.9 + 5.3), near);
+            grit = mix(0.5, value_noise(wpc * 4.3) * 0.6 + value_noise(wpc * 11.0 + 2.0) * 0.4, near);
+        }
         let n2 = 0.75 * fr + 0.25 * fine;
         let band = 1.0 - smoothstep(0.35, 0.95, col.a);
         let m = col.a + (n2 - 0.5) * (0.55 + 0.85 * band);
@@ -109,18 +178,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // border, darkening to ash towards the interior.
         let fringe = smoothstep(0.22, 0.30, m) * (1.0 - smoothstep(0.30, 0.62, m));
         let scorch = mix(vec3<f32>(1.0), vec3<f32>(1.9, 1.15, 0.55), fringe * 0.7);
-        // Burnt ground as a material, not a flat tint: the CPU colour is a
-        // near-neutral dark; here it is pushed between warm brown soil,
-        // cool grey ash and near-black charcoal by noise at three scales,
-        // then broken up by fine grit and hairline cracks.
-        let big = fbm(wpc * 0.035 + 31.0);
-        let mid = fbm(wpc * 0.16 + warp * 1.5 + 9.0);
-        let grit = value_noise(wpc * 4.3) * 0.6 + value_noise(wpc * 11.0 + 2.0) * 0.4;
+        // Burnt ground as a material, not a flat tint: `fire_colour` is a
+        // near-neutral dark; here it is pushed between warm brown soil, cool
+        // grey ash and near-black charcoal by noise at three scales, then
+        // broken up by fine grit and hairline cracks.
+        let big = fbm_lod(wpc * 0.035 + 31.0, 0.035, mpp);
+        let mid = fbm_lod(wpc * 0.16 + warp * 1.5 + 9.0, 0.16, mpp);
         let lum = dot(col.rgb, vec3<f32>(0.33, 0.45, 0.22));
         let brown = vec3<f32>(1.35, 0.95, 0.68);
         let grey = vec3<f32>(0.95, 1.0, 1.08);
         let hue = smoothstep(0.30, 0.70, big * 0.65 + mid * 0.35);
-        var tone = mix(brown, grey, hue);
+        let tone = mix(brown, grey, hue);
         // Ash drifts: pale grey patches, charcoal pockets, both patchy.
         let ash = smoothstep(0.58, 0.82, mid) * (1.0 - fringe);
         let coal = smoothstep(0.62, 0.20, mid * 0.7 + grit * 0.3);
@@ -129,37 +197,35 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         base = mix(base, base * 0.35, coal * 0.6);
         // Hairline cracks and pits: dark ridges where two noise fields cross.
         let cr = abs(value_noise(wpc * 0.9 + warp * 6.0) - 0.5);
-        let crack = 1.0 - smoothstep(0.0, 0.035, cr);
+        let crack = (1.0 - smoothstep(0.0, 0.035, cr)) * (1.0 - smoothstep(0.6, 1.5, mpp));
         base *= 1.0 - 0.45 * crack;
         // Matte, gritty finish: high-frequency speckle, no uniform sheen.
         base *= 0.82 + 0.36 * grit;
-        col = vec4<f32>(mix(col.rgb, base, cold) * scorch, mix(col.a, col.a * ragged, cold));
+        scar = base * scorch;
+        scar_a = col.a * ragged;
+        // Roads show through the scar.
+        let aa = max(0.5 * mpp, 0.25);
+        let on_road = max(
+            1.0 - smoothstep(max(0.0, 0.8 * mpp - 4.8) - aa, max(0.0, 0.8 * mpp - 4.8) + aa, road_d.x),
+            1.0 - smoothstep(max(0.0, 0.8 * mpp - 1.6) - aa, max(0.0, 0.8 * mpp - 1.6) + aa, road_d.y),
+        );
+        scar_a *= 1.0 - 0.72 * on_road;
+        // The ash's bump, only where a pixel is small enough to show it.
+        if near > 0.0 {
+            let e = 0.35;
+            let h0 = value_noise(wpc * 1.3) + 0.5 * value_noise(wpc * 3.1);
+            let hx = value_noise((wpc + vec2<f32>(e, 0.0)) * 1.3) + 0.5 * value_noise((wpc + vec2<f32>(e, 0.0)) * 3.1);
+            let hz = value_noise((wpc + vec2<f32>(0.0, e)) * 1.3) + 0.5 * value_noise((wpc + vec2<f32>(0.0, e)) * 3.1);
+            out.bump = vec3<f32>(h0 - hx, 0.0, h0 - hz) * 0.9 * near * scar_a;
+        }
     }
-    let road_d = (textureSample(road_tex, road_samp, vec2<f32>(wpc.x, -wpc.y) * mask_rect.xy).rg * 2.0 - 1.0) * RANGE_M;
-    let mpp = max(length(dpdx(wpc)), length(dpdy(wpc)));
-    let aa = max(0.5 * mpp, 0.25);
-    let on_road = max(
-        1.0 - smoothstep(max(0.0, 0.8 * mpp - 4.8) - aa, max(0.0, 0.8 * mpp - 4.8) + aa, road_d.x),
-        1.0 - smoothstep(max(0.0, 0.8 * mpp - 1.6) - aa, max(0.0, 0.8 * mpp - 1.6) + aa, road_d.y),
-    );
-    col.a = col.a * (1.0 - 0.72 * on_road * cold);
-
-    // Scene light on the cold scar, so it shades and shadows like the ground
-    // under it: the facet normal of the lattice, roughened by a bump of the
-    // grit noise so the ash catches the sun grain by grain. The glowing part
-    // is a light source and is left as it is. Fog applies to both.
-    let facet = cross(dpdx(in.world_position.xyz), dpdy(in.world_position.xyz));
-    var nrm = normalize(facet);
-    if nrm.y < 0.0 {
-        nrm = -nrm;
-    }
-    let e = 0.35;
-    let h0 = value_noise(wpc * 1.3) + 0.5 * value_noise(wpc * 3.1);
-    let hx = value_noise((wpc + vec2<f32>(e, 0.0)) * 1.3) + 0.5 * value_noise((wpc + vec2<f32>(e, 0.0)) * 3.1);
-    let hz = value_noise((wpc + vec2<f32>(0.0, e)) * 1.3) + 0.5 * value_noise((wpc + vec2<f32>(0.0, e)) * 3.1);
-    nrm = normalize(nrm + vec3<f32>(h0 - hx, 0.0, h0 - hz) * 0.9);
-    let shade = scene_shade(in.world_position.xyz, nrm, in.position);
-    let lit_rgb = mix(col.rgb, col.rgb * shade * 0.55, cold);
-    col = vec4<f32>(apply_scene_fog(vec4<f32>(lit_rgb, col.a), in.world_position.xyz).rgb, col.a);
-    return col;
+    out.scar = vec4<f32>(scar * SCAR_ALBEDO, scar_a * cold);
+    out.glow = vec4<f32>(col.rgb, col.a * w);
+    return out;
 }
+
+// The scar's colour as the ground's albedo: measured so the scar has the
+// tone of the overlay it replaces, which was lit separately at 0.55 of the
+// scene's light (mean RGB over the scar's pixels within 3 levels, from afar
+// and up close).
+const SCAR_ALBEDO: f32 = 0.5;

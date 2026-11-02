@@ -34,8 +34,7 @@ fn resolution(gfx: &crate::quality::Graphics) -> f32 {
 /// Half the encoded range, metres. Must match `RANGE_M` in the shader.
 const RANGE_M: f32 = 12.0;
 /// Half-widths of the ribbons, metres. Must match the shader.
-pub const DRIVABLE_HALF_W: f32 = 4.8;
-pub const TRACK_HALF_W: f32 = 1.6;
+pub use scenario::grade::{DRIVABLE_HALF_W, TRACK_HALF_W};
 
 /// Where the mask lives in `Assets<Image>`: a fixed weak handle, so the fire's
 /// ground overlay can bind it without waiting for the terrain to be built.
@@ -322,11 +321,15 @@ pub const GRASS_MAP: Handle<Image> = uuid_handle!("2f7bc4d1-0a93-4e66-b5c8-91d36
 /// noise, which is what makes the meadow's edge ragged and not 20 m squares.
 pub fn grass_map(scn: &Scenario) -> Image {
     let w = &scn.world;
-    let mut data = vec![0u8; w.fire_cols * w.fire_rows];
+    // r: meadow; g, b, a: the fire, rewritten as it moves
+    // (`fire_view::update_fire_map`); half floats, filtered on WebGL2 too
+    let one = crate::terrain_mesh::f16_bits(1.0).to_le_bytes();
+    let mut data = vec![0u8; w.fire_cols * w.fire_rows * 8];
     for r in 0..w.fire_rows {
         for c in 0..w.fire_cols {
             if matches!(scn.fuel_at(scenario::Cell { row: r, col: c }), 1..=3) {
-                data[(w.fire_rows - 1 - r) * w.fire_cols + c] = 255;
+                let at = ((w.fire_rows - 1 - r) * w.fire_cols + c) * 8;
+                data[at..at + 2].copy_from_slice(&one);
             }
         }
     }
@@ -334,8 +337,9 @@ pub fn grass_map(scn: &Scenario) -> Image {
         Extent3d { width: w.fire_cols as u32, height: w.fire_rows as u32, depth_or_array_layers: 1 },
         TextureDimension::D2,
         data,
-        TextureFormat::R8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
+        TextureFormat::Rgba16Float,
+        // the main world rewrites the fire's channels
+        RenderAssetUsages::default(),
     );
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::ClampToEdge,
@@ -360,6 +364,9 @@ mod tests {
         let data = mask.image.data.as_ref().unwrap();
         let hash = data.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3));
         assert_eq!(data.len(), 85_332_856);
-        assert_eq!(hash, 0xd4de3d2b63e08559, "roads, paving, coast and all mip levels must keep their pixels");
+        // The waterline reads the graded ground (`scenario::grade`): with
+        // `ROCCA_STRADE_PIANE=0` the hash is the earlier 0xd4de3d2b63e08559.
+        let expected = if scenario::grade::enabled() { 0xda68_b9d3_14bf_7441 } else { 0xd4de3d2b63e08559 };
+        assert_eq!(hash, expected, "roads, paving, coast and all mip levels must keep their pixels");
     }
 }

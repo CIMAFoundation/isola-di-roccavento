@@ -12,7 +12,13 @@ const SHADER_HANDLE: Handle<Shader> = uuid_handle!("91a744d2-6b0e-4c71-aa90-2201
 struct TerrainUniform {
     mask_rect: Vec4,
     ground_rect: Vec4,
+    /// x: desaturation; y, z: the canopy's fade from shade to crowns, metres
+    /// from the eye.
     tactical: Vec4,
+    /// Mean crown colour (linear) of conifers, broadleaves and macchia.
+    canopy_conifer: Vec4,
+    canopy_broadleaf: Vec4,
+    canopy_macchia: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
@@ -23,12 +29,15 @@ pub struct TerrainMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub road_mask: Handle<Image>,
-    /// Meadow cover, one texel per fire cell (`ground_mask::grass_map`).
+    /// Meadow cover and the fire, one texel per fire cell
+    /// (`ground_mask::grass_map`, `fire_view::update_fire_map`).
     #[texture(3)]
     #[sampler(4)]
     pub grass_map: Handle<Image>,
-    /// Ground colour (sRGB) and surface normal (Bevy frame), one texel per
-    /// terrain sample, so the look does not depend on the mesh density.
+    /// Ground colour (sRGB) with the canopy's cover in alpha, and surface
+    /// normal (Bevy frame: x, z; y is rebuilt) with the canopy's kind and
+    /// brightness, one texel per terrain sample, so the look does not depend
+    /// on the mesh density.
     #[texture(5)]
     #[sampler(6)]
     pub ground_colour: Handle<Image>,
@@ -51,7 +60,7 @@ impl TerrainMaterial {
         ground_normal: Handle<Image>,
     ) -> Self {
         TerrainMaterial {
-            uniform: TerrainUniform { mask_rect, ground_rect, tactical: Vec4::ZERO },
+            uniform: TerrainUniform { mask_rect, ground_rect, ..Default::default() },
             road_mask,
             grass_map,
             ground_colour,
@@ -66,6 +75,17 @@ impl TerrainMaterial {
 
     pub fn set_tactical(&mut self, amount: f32) {
         self.uniform.tactical.x = amount;
+    }
+
+    /// The crowns' colours by kind and the distances of their fade
+    /// (`vegetation::canopy`).
+    pub fn set_canopy(&mut self, colours: [[f32; 3]; 3], fade: [f32; 2]) {
+        let v = |c: [f32; 3]| Vec4::new(c[0], c[1], c[2], 1.0);
+        self.uniform.canopy_conifer = v(colours[0]);
+        self.uniform.canopy_broadleaf = v(colours[1]);
+        self.uniform.canopy_macchia = v(colours[2]);
+        self.uniform.tactical.y = fade[0];
+        self.uniform.tactical.z = fade[1];
     }
 }
 
