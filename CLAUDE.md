@@ -146,6 +146,7 @@ Sono costate tempo e non si vedono dal codice. Prima di fidarsi, verificare che 
 - **`vegetation_changes` è sparso tramite NaN:** una griglia piena di zeri riclassifica tutta la mappa.
 - **Le strade dipinte come non combustibili:** il pericolo sulle strade viene da `fire::threat` vicino al fronte, non dalle celle stradali. Le strade chiuse si leggono da lì (`Game::closed_roads`).
 - **Una mesh senza attributi** (vuota) manda in panico la pipeline di prepass di Bevy all'avvio: non lasciare mesh segnaposto vuote.
+- **Una mesh solo sulla GPU** (`RenderAssetUsages::RENDER_WORLD`) resta in `Assets<Mesh>` dopo l'estrazione, ma senza vertici: `attribute()` e `indices()` vanno in panico (con Bevy 0.15 spariva dagli asset). Ciò che il gioco rilegge, come le collisioni di Mario (squadre, monumenti), tiene `MAIN_WORLD`; per leggere una mesh qualunque, le varianti `try_` (2026-11-02).
 - **Il nodo carrabile più vicino** spesso è un'isola della rete: usare `nearest_reachable`. Mai un A* a ogni sotto-passo: si ricalcola quando cambia l'obiettivo o allo scadere di `REROUTE_S`.
 - **Rendering:**
   - una striscia stesa sul terreno con il winding sbagliato è invisibile (avvolgerla `a, a+2, a+1`, e controllare in che verso corrono le righe del reticolo);

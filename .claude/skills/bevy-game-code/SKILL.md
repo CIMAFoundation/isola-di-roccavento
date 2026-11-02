@@ -28,7 +28,11 @@ ordine, di versione o di frame rate. Il rendering vero (shader, materiali, veget
     usa `PointerClick` e `PointerPress`;
   - `NextState::set` rifà sempre la transizione, anche verso lo stesso stato: se non lo si
     vuole, `set_if_different`;
-  - `Name::new` vuole una stringa `'static` o una `String` propria.
+  - `Name::new` vuole una stringa `'static` o una `String` propria;
+  - una mesh solo `RENDER_WORLD` non sparisce più dagli asset dopo l'estrazione (nella 0.15
+    sì, e `get` dava `None`): resta senza vertici, e `Mesh::attribute` o `indices` vanno in
+    panico («Mesh has been extracted to RenderWorld»). Chi la rilegge (collisioni, limiti)
+    tiene `MAIN_WORLD`, oppure usa `try_attribute_option` e `try_indices_option`.
 
 ## 2. Sistemi e ordine
 
@@ -83,7 +87,8 @@ Rimedi tipici in Bevy:
 - **Zero allocazioni nel frame stabile**: `Vec` riusati in `Local`, stringhe della UI
   ricostruite solo quando il valore cambia (`Changed<T>`, o un confronto col valore
   precedente).
-- Geometria statica: copia CPU rilasciata dopo il caricamento (`RenderAssetUsages`).
+- Geometria statica: copia CPU rilasciata dopo il caricamento (`RenderAssetUsages`), tranne
+  quella che il gioco rilegge (collisioni, limiti).
 - **Sui telefoni** le prestazioni calano dopo qualche minuto per il calore: si lascia
   margine, si limita il frame rate e si misura dopo 5 minuti, non al primo secondo.
 

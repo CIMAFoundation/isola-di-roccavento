@@ -1534,8 +1534,10 @@ pub(super) fn rocca_start(sim: &Sim) -> Option<(Vec3, f32)> {
     Some((p.with_y(ground), outward.x.atan2(outward.z)))
 }
 
+/// None for a mesh kept only on the GPU: once extracted it has no vertices here.
 fn mesh_bounds(mesh: &Mesh, tf: &Transform) -> Option<(Vec3, Vec3)> {
-    let VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)?
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) =
+        mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION)
     else {
         return None;
     };
@@ -1572,12 +1574,16 @@ fn near(lo: Vec3, hi: Vec3, p: Vec3, radius: f32) -> bool {
     p.x + radius >= lo.x && p.x - radius <= hi.x && p.z + radius >= lo.z && p.z - radius <= hi.z
 }
 
+/// Nothing for a mesh kept only on the GPU (`RenderAssetUsages::RENDER_WORLD`):
+/// once extracted it stays in `Assets<Mesh>` without its vertices.
 fn triangles(mesh: &Mesh, mut visit: impl FnMut([Vec3; 3])) {
-    let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+    let (Ok(Some(VertexAttributeValues::Float32x3(p))), Ok(indices)) =
+        (mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION), mesh.try_indices_option())
+    else {
         return;
     };
     let mut emit = |i: [usize; 3]| visit(i.map(|index| Vec3::from_array(p[index])));
-    match mesh.indices() {
+    match indices {
         Some(Indices::U32(indices)) => {
             for i in indices.chunks_exact(3) { emit([i[0] as usize, i[1] as usize, i[2] as usize]); }
         }
@@ -1897,6 +1903,33 @@ mod tests {
         engage_nearby(&mut runtime, &mut mode, &mut state.get_mut(&mut world).unwrap(), &meshes, Vec3::Z * 100., true);
         assert!(runtime.reactions.is_empty());
         assert!(mode.nearby.starts_with("Avvicinati"));
+    }
+
+    /// What Bevy's extraction leaves of a mesh in the main world: one kept
+    /// only on the GPU stays in `Assets<Mesh>`, without its data.
+    fn extracted(mut mesh: Mesh) -> Mesh {
+        if mesh.asset_usage == RenderAssetUsages::RENDER_WORLD {
+            mesh.take_gpu_data().unwrap();
+        }
+        mesh
+    }
+
+    /// 2026-11-02: GPU-only team bodies made the game panic as soon as Mario
+    /// came close to a team.
+    #[test]
+    fn teams_stay_solid_once_their_meshes_are_extracted() {
+        for name in ["engine", "firefighter", "tanker"] {
+            let mesh = extracted(crate::models::unit_mesh(name));
+            assert!(mesh_bounds(&mesh, &Transform::IDENTITY).is_some(), "{name}");
+            let mut n = 0;
+            triangles(&mesh, |_| n += 1);
+            assert!(n > 0, "{name}");
+        }
+        let mut gpu_only = Mesh::from(Cuboid::new(1., 1., 1.));
+        gpu_only.asset_usage = RenderAssetUsages::RENDER_WORLD;
+        let gpu_only = extracted(gpu_only);
+        assert!(mesh_bounds(&gpu_only, &Transform::IDENTITY).is_none());
+        triangles(&gpu_only, |_| panic!("a mesh without vertices has no triangles"));
     }
 
     #[test]

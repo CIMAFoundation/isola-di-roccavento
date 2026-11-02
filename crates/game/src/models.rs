@@ -245,8 +245,8 @@ fn units() -> &'static HashMap<String, Kit> {
 
 /// The surface of each vertex goes in its colour's alpha
 /// (`materials::Surface::alpha`), for the structure shader.
-fn kit_to_mesh(m: &Kit, shift: Vec3) -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+fn kit_to_mesh(m: &Kit, shift: Vec3, usage: RenderAssetUsages) -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usage);
     let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| (Vec3::from_array(*p) - shift).to_array()).collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals.clone());
@@ -260,10 +260,11 @@ fn kit_to_mesh(m: &Kit, shift: Vec3) -> Mesh {
 }
 
 /// The still body of a model of `scripts/build_unit_models.py` (firefighter,
-/// engine, tanker), in its real colours (vertex colours, linear).
+/// engine, tanker), in its real colours (vertex colours, linear). It keeps its
+/// CPU copy: Mario reads it, to bump into a team and to greet it.
 pub fn unit_mesh(name: &str) -> Mesh {
     let m = units().get(name).unwrap_or_else(|| panic!("unit models have no `{name}`"));
-    kit_to_mesh(m, Vec3::ZERO)
+    kit_to_mesh(m, Vec3::ZERO, RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD)
 }
 
 /// The animated parts of a unit (wheels, propellers, limbs, beacons), each
@@ -274,7 +275,7 @@ pub fn unit_parts(name: &str) -> Vec<(String, Mesh, Rig)> {
         .iter()
         .filter_map(|(k, m)| {
             let rig = m.rig.clone()?;
-            Some((k.strip_prefix(&prefix)?.to_string(), kit_to_mesh(m, rig.pivot), rig))
+            Some((k.strip_prefix(&prefix)?.to_string(), kit_to_mesh(m, rig.pivot, RenderAssetUsages::RENDER_WORLD), rig))
         })
         .collect();
     parts.sort_by(|a, b| a.0.cmp(&b.0));
