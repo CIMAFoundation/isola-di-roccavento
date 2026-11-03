@@ -276,7 +276,8 @@ pub fn draw(
         operator(ctx, k, &mut gfx, &mut audio, auto.as_deref(), &mut commands);
     }
     pad_mode.game = matches!(k.phase, Phase::Tutorial | Phase::Gioco);
-    focus.pointer = ctx.is_pointer_over_egui();
+    // a badge being dragged keeps the pointer even when the finger has left it
+    focus.pointer = ctx.is_pointer_over_egui() || ctx.egui_is_using_pointer();
     focus.keyboard = ctx.egui_wants_keyboard_input();
     if k.fade > 0.0 && k.phase == Phase::Intro {
         let a = (k.fade.clamp(0.0, 1.0) * 255.0) as u8;

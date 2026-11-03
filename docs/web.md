@@ -52,7 +52,7 @@ scripts/build_web.sh
 .venv/bin/python scripts/playtest_mobile.py --smoke
 ```
 
-Il test touch ha ora una lingua esplicita (`it-IT`), coerente con i testi che cerca. La prova completa preesistente si interrompe anche sulla build iniziale nella parte di trascinamento/cancellazione del tutorial: non viene considerata superata. La misura della partita completa usa il runner di memoria separato. Avvio, nome, tutorial e rotazione verificati con `--smoke`; nessuna prova su telefono fisico.
+Il test touch ha ora una lingua esplicita (`it-IT`), coerente con i testi che cerca. Dal 2026-11-03 la prova completa passa tutta (prima si interrompeva nel trascinamento del tutorial: il badge trascinava con sé la mappa, voce in `TODO.md`). La misura della partita completa usa il runner di memoria separato. Avvio, nome, tutorial e rotazione verificati con `--smoke`; nessuna prova su telefono fisico.
 
 ## Pagina introduttiva (2026-10-18)
 
@@ -250,12 +250,12 @@ restano quelli della versione desktop. Il menu web non permette di riattivare ef
 
 L'interfaccia compatta si attiva sotto 1000 px di larghezza o 600 px di altezza:
 
-- vista iniziale dall'alto (nadirale), nord in alto e zoom ampio sull'incendio;
+- vista iniziale dall'alto (nadirale), nord in alto e zoom ampio sull'incendio; poi la camera è libera come sul computer (2026-11-03): due dita che scorrono insieme in su o in giù la inclinano;
 - verticale: istruzioni in basso; orizzontale: tutorial a destra, mappa a sinistra;
 - la schermata del titolo è quella del desktop (logo, titolo, sottotitolo, «Gioca»), in scala sulla larghezza;
 - apertura, scelta dello scenario, finale e menu scorrono se non entrano nello schermo;
 - il nome usa un campo HTML con tastiera del telefono;
-- un dito sposta la mappa, due dita fanno zoom, rotazione e spostamento;
+- un dito sposta la mappa, due dita fanno zoom, rotazione e spostamento, oppure inclinano (dita affiancate che scorrono in verticale nello stesso verso; il gesto si decide dopo 12 px, `view::two_finger_tilt`);
 - in pausa si trascina il badge della squadra, oppure si tocca la squadra e poi l'esagono;
 - durante il trascinamento si vedono percorso, tempo o motivo del rifiuto;
   tenendo il badge vicino al bordo della mappa, la vista scorre in quella

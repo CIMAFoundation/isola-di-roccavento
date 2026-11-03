@@ -149,6 +149,18 @@ pub fn tr(key: &'static str) -> &'static str {
     }
 }
 
+/// A text that comes from the data, not from the code (the scenarios' names
+/// and descriptions in `game.json` → `levels`): translated like [`tr`], the
+/// Italian itself when there is no translation. `tools/i18n/keys.py` takes
+/// these keys from the data too.
+pub fn data(key: &str) -> &str {
+    let Ok(s) = STATE.read() else { return key };
+    match s.as_ref() {
+        Some(s) => s.catalog.get(key).copied().unwrap_or(key),
+        None => key,
+    }
+}
+
 /// [`tr`] with the holes `{0}`, `{1}`… filled.
 pub fn fmt(key: &'static str, args: &[String]) -> String {
     let mut out = tr(key).to_string();

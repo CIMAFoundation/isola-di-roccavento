@@ -476,8 +476,8 @@ pub fn scenario(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &m
                     ui.painter().rect_stroke(rect, 10.0, egui::Stroke::new(2.0, if on { AMBER } else { Color32::from_gray(90) }), egui::StrokeKind::Middle);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.add(egui::Label::new(RichText::new(&l.name).size(if wide { 21.0 } else { 17.0 }).strong().color(if on { AMBER } else { Color32::WHITE })).wrap());
-                        ui.add(egui::Label::new(RichText::new(&l.about).size(if wide { 15.0 } else { 13.0 }).color(GREY)).wrap());
+                        ui.add(egui::Label::new(RichText::new(rocca::i18n::data(&l.name)).size(if wide { 21.0 } else { 17.0 }).strong().color(if on { AMBER } else { Color32::WHITE })).wrap());
+                        ui.add(egui::Label::new(RichText::new(rocca::i18n::data(&l.about)).size(if wide { 15.0 } else { 13.0 }).color(GREY)).wrap());
                     });
                 });
             }).response.interact(egui::Sense::click());

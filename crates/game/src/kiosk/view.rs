@@ -2,7 +2,8 @@
 //! on the map that chooses a hex (`Kiosk::click`).
 //!
 //! Drag to pan (Shift-drag or right-drag to turn), wheel or pinch to zoom,
-//! Home for the starting view. A press and release that barely moved is a
+//! Home for the starting view. On a touch screen: one finger pans, two pinch,
+//! twist and pan, and two sliding up or down together tilt the view. A press and release that barely moved is a
 //! click, not a drag. While the fire runs the camera follows it, until a hand
 //! takes the map.
 
@@ -136,7 +137,23 @@ pub struct Drag {
     touch_moved: f32,
     multi: bool,
     pair: Option<(u64, u64, Vec2, Vec2)>,
+    /// What a two-finger gesture does, decided once it has moved enough:
+    /// `Some(true)` tilts (both fingers slide up or down together),
+    /// `Some(false)` pinches, twists and pans.
+    tilt: Option<bool>,
+    /// How far the two fingers have moved since they came down, logical px.
+    pair_moved: (Vec2, Vec2),
 }
+
+/// Two fingers moved by `da` and `db` (logical px), `sep` apart: a tilt when
+/// both slide mostly vertically the same way, the fingers side by side.
+fn two_finger_tilt(da: Vec2, db: Vec2, sep: Vec2) -> bool {
+    let vertical = |d: Vec2| d.y.abs() > 2.0 * d.x.abs();
+    vertical(da) && vertical(db) && da.y.signum() == db.y.signum() && sep.x.abs() > sep.y.abs()
+}
+
+/// Two-finger motion needed before deciding between tilt and pinch.
+const TILT_DECIDE_PX: f32 = 12.0;
 
 #[derive(SystemParam)]
 pub struct ViewInput<'w, 's> {
@@ -173,6 +190,7 @@ pub fn camera(
     mut last_cursor: Local<Option<Vec2>>,
     mut tracked: Local<Option<(Vec2, f32)>>,
     mut smooth_h: Local<Option<(f32, f32)>>,
+    mut was_intro: Local<bool>,
 ) {
     input.motion.clear();
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
@@ -282,11 +300,20 @@ pub fn camera(
         }
     }
     if active.len() >= 2 { drag.multi = true; }
+    // `focus` is the interface's word from the last frame: at touch-down a
+    // finger has no pointer yet, so a press on a team's badge first looks like
+    // the map's. Until the gesture has moved the map, the interface can take
+    // it back (2026-11-03: dragging a badge used to pan the map with it).
+    if drag.touch_map && focus.pointer && drag.touch_moved < CLICK_PX && drag.tilt.is_none() && !drag.multi {
+        drag.touch_map = false;
+    }
+    let pressed_now = |id: u64| input.touches.just_pressed(id);
     if drag.touch_map {
         match active.as_slice() {
             [t] if !drag.multi => {
                 drag.touch_moved = drag.touch_moved.max(t.distance().length());
-                if drag.touch_moved >= CLICK_PX { pan(&mut orbit, t.delta(), height); }
+                // not on the frame it comes down: the interface has not seen it yet
+                if drag.touch_moved >= CLICK_PX && !pressed_now(t.id()) { pan(&mut orbit, t.delta(), height); }
                 drag.pair = None;
             }
             [a, b] => {
@@ -294,14 +321,32 @@ pub fn camera(
                 let (a, b) = if a.id() < b.id() { (a, b) } else { (b, a) };
                 if let Some((ia, ib, pa, pb)) = drag.pair {
                     if (ia, ib) == (a.id(), b.id()) {
+                        let (da, db) = (a.position() - pa, b.position() - pb);
+                        drag.pair_moved.0 += da;
+                        drag.pair_moved.1 += db;
+                        let (ma, mb) = drag.pair_moved;
+                        if drag.tilt.is_none() && ma.length().max(mb.length()) >= TILT_DECIDE_PX {
+                            drag.tilt = Some(two_finger_tilt(ma, mb, b.position() - a.position()));
+                        }
                         let before = pb - pa;
                         let now = b.position() - a.position();
-                        if before.length() > 8.0 && now.length() > 8.0 {
-                            orbit.distance *= before.length() / now.length();
-                            orbit.yaw -= before.perp_dot(now).atan2(before.dot(now));
-                            pan(&mut orbit, (a.position() + b.position() - pa - pb) * 0.5, height);
+                        match drag.tilt {
+                            // fingers up: the view tips towards the horizon, as the right drag does
+                            Some(true) => orbit.pitch -= (da.y + db.y) * 0.5 * 0.006,
+                            Some(false) if before.length() > 8.0 && now.length() > 8.0 => {
+                                orbit.distance *= before.length() / now.length();
+                                orbit.yaw -= before.perp_dot(now).atan2(before.dot(now));
+                                pan(&mut orbit, (a.position() + b.position() - pa - pb) * 0.5, height);
+                            }
+                            _ => {}
                         }
+                    } else {
+                        drag.tilt = None;
+                        drag.pair_moved = (Vec2::ZERO, Vec2::ZERO);
                     }
+                } else {
+                    drag.tilt = None;
+                    drag.pair_moved = (Vec2::ZERO, Vec2::ZERO);
                 }
                 drag.pair = Some((a.id(), b.id(), a.position(), b.position()));
             }
@@ -319,6 +364,7 @@ pub fn camera(
         drag.touch_id = None;
         drag.touch_map = false;
         drag.pair = None;
+        drag.tilt = None;
     }
     if kiosk.zoom_steps != 0.0 {
         orbit.distance *= (-kiosk.zoom_steps * 0.25).exp();
@@ -380,8 +426,10 @@ pub fn camera(
             kiosk.shot = None;
         }
     }
-    // leaving the opening on a phone: back to the top-down framing
-    if mobile_web && kiosk.phase != Phase::Intro && orbit.pitch > NADIR_PITCH + 0.01 {
+    // leaving the opening on a phone: back to the top-down framing, once; then
+    // the player tilts and turns it as on a computer (2026-11-03)
+    let left_intro = std::mem::replace(&mut *was_intro, kiosk.phase == Phase::Intro) && kiosk.phase != Phase::Intro;
+    if mobile_web && left_intro {
         if let Some((_, d)) = *home_view {
             (orbit.focus, orbit.distance) = mobile_opening(camera, &sim, home, d);
             orbit.pitch = NADIR_PITCH;
@@ -534,7 +582,8 @@ pub fn camera(
     let freecam = kiosk.freecam && kiosk.phase == Phase::Intro;
     // the opening looks level at the sunrise; the director's shots stay lower
     let max_pitch = if kiosk.opening.is_some() { -0.01 } else if kiosk.phase == Phase::Intro && !kiosk.frozen && !freecam { INTRO_MAX_PITCH } else { MAX_PITCH };
-    orbit.pitch = orbit.pitch.clamp(if mobile_web && kiosk.phase != Phase::Intro { NADIR_PITCH } else { MIN_PITCH }, max_pitch);
+    // the phone's top-down start is steeper than the computer's steepest
+    orbit.pitch = orbit.pitch.clamp(if mobile_web { NADIR_PITCH } else { MIN_PITCH }, max_pitch);
     orbit.distance = orbit.distance.clamp(MIN_DIST * shot_zoom().min(1.0), MAX_DIST);
     let off = Vec2::new(orbit.focus.x - home.x, orbit.focus.z - home.z);
     let reach = if freecam { SCENIC_RADIUS_M } else { PAN_RADIUS_M };

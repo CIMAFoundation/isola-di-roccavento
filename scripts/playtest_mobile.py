@@ -221,7 +221,10 @@ def main():
                 # A fresh camera flight can start after the valid drop, so
                 # ownership is checked in the saved in-drag observation.
                 in_drag = json.loads((args.output / '05-drag-preview.json').read_text())
-                assert sum(abs(a-b) for a,b in zip(before,in_drag['camera']['focus'])) < 10
+                # The target may lie in the edge band beside the panel: the
+                # edge pan then moves the view a few tens of metres. A map
+                # following the finger would move it about a kilometre.
+                assert sum(abs(a-b) for a,b in zip(before,in_drag['camera']['focus'])) < 150, (before, in_drag['camera'])
                 def read_until(expect):
                     for _ in range(20):
                         if state()['expect'].startswith(expect): return
@@ -250,6 +253,22 @@ def main():
                 touch('touchEnd', [])
                 assert state()['camera']['distance'] < pinch_before * 0.9
                 assert [t['hex'] for t in state()['teams']] == [t['hex'] for t in teams]
+                # Two fingers sliding up together tilt the view, then down again
+                # (the phone's camera is no longer held top-down, 2026-11-03).
+                pitch0 = state()['camera']['pitch']
+                touch('touchStart', [(0, 120, 520), (1, 270, 520)])
+                for k in range(1, 9):
+                    touch('touchMove', [(0, 120, 520 - 20 * k), (1, 270, 520 - 20 * k)])
+                touch('touchEnd', [])
+                pitch1 = state()['camera']['pitch']
+                assert pitch1 > pitch0 + 0.3, (pitch0, pitch1)
+                assert [t['hex'] for t in state()['teams']] == [t['hex'] for t in teams]
+                snap('09b-game-tilted')
+                touch('touchStart', [(0, 120, 300), (1, 270, 300)])
+                for k in range(1, 9):
+                    touch('touchMove', [(0, 120, 300 + 20 * k), (1, 270, 300 + 20 * k)])
+                touch('touchEnd', [])
+                assert state()['camera']['pitch'] < pitch1 - 0.3, (pitch1, state()['camera'])
                 tap('Isola'); frames(10)
                 snap('10-game-home')
                 tap('Riprendi')

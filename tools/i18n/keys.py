@@ -27,6 +27,12 @@ def keys():
         text = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("//"))
         for m in LIT.finditer(text):
             found.setdefault(unescape(m.group(1)), set()).add(p.relative_to(ROOT).as_posix())
+    # texts from the data, read with `i18n::data`: the scenarios' names and
+    # descriptions (`game.json` → `levels`)
+    for p in sorted((ROOT / "data" / "scenarios").glob("*/game.json")):
+        for level in json.loads(p.read_text()).get("levels", []):
+            for field in ("name", "about"):
+                found.setdefault(level[field], set()).add(p.relative_to(ROOT).as_posix())
     return found
 
 

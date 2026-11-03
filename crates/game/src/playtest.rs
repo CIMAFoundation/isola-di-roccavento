@@ -48,7 +48,7 @@ mod browser {
         };
         let state = serde_json::json!({
             "tutorial_target": target,
-            "camera": view.map(|(c, _, o)| serde_json::json!({"distance": o.distance, "yaw": o.yaw, "focus": [o.focus.x, o.focus.z], "pixels": c.physical_viewport_size().map(|v| [v.x,v.y])})),
+            "camera": view.map(|(c, _, o)| serde_json::json!({"distance": o.distance, "yaw": o.yaw, "pitch": o.pitch, "focus": [o.focus.x, o.focus.z], "pixels": c.physical_viewport_size().map(|v| [v.x,v.y])})),
             "wasm_memory_bytes": wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>().buffer().unchecked_into::<js_sys::ArrayBuffer>().byte_length(),
             "phase": format!("{:?}", k.phase), "case": sim.case.name, "time_s": sim.time_s(), "end_s": sim.case.duration_s(),
             "player": k.player, "error": k.error, "baseline_ready": k.baseline().is_some(),
