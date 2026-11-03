@@ -263,17 +263,28 @@ pub fn intro(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &mut 
             ui.horizontal(|ui| {
                 ui.label(RichText::new(rocca::tr!("Come ti chiami?")).size(20.0).strong().color(Color32::WHITE));
                 ui.add_space(8.0);
-                let edit = egui::TextEdit::singleline(&mut k.player)
-                    .hint_text(rocca::tr!("Il tuo nome"))
-                    .font(egui::FontId::proportional(24.0))
-                    .char_limit(rocca::score::NAME_MAX)
-                    .desired_width(320.0)
-                    .margin(egui::vec2(12.0, 8.0));
-                let r = ui.add(edit);
-                crate::playtest::control("Nome", &r, true);
-                // nothing else on this screen takes typing
-                if !r.has_focus() {
-                    r.request_focus();
+                // A tablet in the browser: egui's text field does not bring up
+                // the on-screen keyboard (2026-11-03, reported on a tablet;
+                // the phone's page already used the page's own name dialog)
+                if web_touch(ui.ctx()) {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let r = web_name_button(ui, k, [320.0, 46.0], 22.0, false);
+                        crate::playtest::control("Nome", &r, true);
+                    }
+                } else {
+                    let edit = egui::TextEdit::singleline(&mut k.player)
+                        .hint_text(rocca::tr!("Il tuo nome"))
+                        .font(egui::FontId::proportional(24.0))
+                        .char_limit(rocca::score::NAME_MAX)
+                        .desired_width(320.0)
+                        .margin(egui::vec2(12.0, 8.0));
+                    let r = ui.add(edit);
+                    crate::playtest::control("Nome", &r, true);
+                    // nothing else on this screen takes typing
+                    if !r.has_focus() {
+                        r.request_focus();
+                    }
                 }
             });
             ui.add_space(14.0);
@@ -374,7 +385,8 @@ pub fn tutorial(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &m
         });
     });
     ctx.request_repaint();
-    if skip || (!ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
+    // Esc opens the game menu (`ui::game_menu`), which can skip the tutorial too
+    if skip {
         start_game(k, sim, restarted);
     }
 }
@@ -435,18 +447,6 @@ fn highlight(ctx: &egui::Context, k: &Kiosk, expect: Expect) {
 
 // --- the scenario ---------------------------------------------------------------
 
-/// The label of a scenario's difficulty and its colour.
-fn difficulty_style(d: &str) -> (String, Color32) {
-    let (word, colour) = match d.to_lowercase().as_str() {
-        "facile" => (rocca::tr!("facile"), Color32::from_rgb(120, 200, 110)),
-        "medio" => (rocca::tr!("medio"), Color32::from_rgb(240, 200, 70)),
-        "difficile" => (rocca::tr!("difficile"), Color32::from_rgb(240, 140, 60)),
-        _ => (rocca::tr!("estremo"), Color32::from_rgb(230, 80, 70)),
-    };
-    let word = if matches!(d.to_lowercase().as_str(), "facile" | "medio" | "difficile") { word.to_string() } else { d.to_string() };
-    (format!(" {} ", word.to_uppercase()), colour)
-}
-
 /// After «Inizia»: the fire to fight (the four named scenarios) and the level.
 pub fn scenario(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter<SimRestarted>, icons: Option<&super::characters::ScenarioIcons>) {
     let compact = super::ui::compact(ctx);
@@ -463,7 +463,6 @@ pub fn scenario(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &m
             let fill = if on { AMBER.gamma_multiply(0.20) } else { Color32::from_white_alpha(8) };
             let stroke = if on { egui::Stroke::new(3.0, AMBER) } else { egui::Stroke::new(1.0, Color32::from_gray(90)) };
             let icon = if wide { 148.0 } else { 88.0 };
-            let (name, colour) = difficulty_style(&l.difficulty);
             let r = egui::Frame::NONE.fill(fill).stroke(stroke).corner_radius(14.0).inner_margin(10.0).show(ui, |ui| {
                 ui.set_width(card_w - 22.0);
                 ui.set_min_height(icon);
@@ -474,10 +473,9 @@ pub fn scenario(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &m
                     if let Some(t) = icons.and_then(|x| x.get(&l.case)) {
                         egui::Image::new(egui::load::SizedTexture::new(t, rect.size())).corner_radius(10.0).paint_at(ui, rect);
                     }
-                    ui.painter().rect_stroke(rect, 10.0, egui::Stroke::new(2.0, colour), egui::StrokeKind::Middle);
+                    ui.painter().rect_stroke(rect, 10.0, egui::Stroke::new(2.0, if on { AMBER } else { Color32::from_gray(90) }), egui::StrokeKind::Middle);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.label(RichText::new(name.trim()).size(if wide { 14.0 } else { 12.0 }).strong().color(Color32::BLACK).background_color(colour));
                         ui.add(egui::Label::new(RichText::new(&l.name).size(if wide { 21.0 } else { 17.0 }).strong().color(if on { AMBER } else { Color32::WHITE })).wrap());
                         ui.add(egui::Label::new(RichText::new(&l.about).size(if wide { 15.0 } else { 13.0 }).color(GREY)).wrap());
                     });
@@ -860,6 +858,56 @@ fn action(ui: &mut egui::Ui, label: &str) -> bool {
     r.clicked()
 }
 
+/// In the browser, on a device with a touch screen (a tablet, a phone; also
+/// an iPad that calls itself a Mac): the name is typed in the page's own
+/// dialog, which brings up the keyboard. Never on the desktop build.
+fn web_touch(ctx: &egui::Context) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let points = web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w.navigator(), &"maxTouchPoints".into()).ok())
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        points > 0.0 || ctx.input(|i| i.has_touch_screen())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = ctx;
+        false
+    }
+}
+
+/// The name as a button that opens the page's name dialog (`roccaEditName` in
+/// `web/index.html`); the name typed there comes back in `roccaPlayerName`.
+#[cfg(target_arch = "wasm32")]
+fn web_name_button(ui: &mut egui::Ui, k: &mut Kiosk, size: [f32; 2], text: f32, alone: bool) -> egui::Response {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window().unwrap();
+    if let Ok(v) = js_sys::Reflect::get(&window, &"roccaPlayerName".into()) {
+        if let Some(name) = v.as_string() {
+            k.player = rocca::score::name(&name);
+            let _ = js_sys::Reflect::delete_property(&window, &"roccaPlayerName".into());
+        }
+    }
+    // `alone`: no «Come ti chiami?» beside it (the phone's page)
+    let label = match (k.player.is_empty(), alone) {
+        (true, true) => rocca::tr!("Come ti chiami?").to_string(),
+        (true, false) => rocca::tr!("Il tuo nome").to_string(),
+        (false, true) => rocca::tr!("Nome: {0}", k.player),
+        (false, false) => k.player.clone(),
+    };
+    let colour = if k.player.is_empty() && !alone { Color32::from_gray(150) } else { Color32::WHITE };
+    let b = egui::Button::new(RichText::new(label).size(text).color(colour))
+        .fill(Color32::from_gray(40)).stroke(egui::Stroke::new(1.0, Color32::from_gray(120))).corner_radius(8.0);
+    let r = ui.add_sized(size, b);
+    if r.clicked() {
+        if let Ok(f) = js_sys::Reflect::get(&window, &"roccaEditName".into()) {
+            if let Some(f) = f.dyn_ref::<js_sys::Function>() { let _ = f.call1(&window, &k.player.clone().into()); }
+        }
+    }
+    r
+}
+
 fn compact_intro(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter<SimRestarted>) {
     let mut go = None;
     compact_page(ctx, "intro_mobile", |ui| {
@@ -868,22 +916,8 @@ fn compact_intro(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &
         ui.add_space(6.0);
         #[cfg(target_arch = "wasm32")]
         {
-            use wasm_bindgen::JsCast;
-            let window = web_sys::window().unwrap();
-            if let Ok(v) = js_sys::Reflect::get(&window, &"roccaPlayerName".into()) {
-                if let Some(name) = v.as_string() {
-                    k.player = rocca::score::name(&name);
-                    let _ = js_sys::Reflect::delete_property(&window, &"roccaPlayerName".into());
-                }
-            }
-            let label = if k.player.is_empty() { rocca::tr!("Come ti chiami?").to_string() } else { rocca::tr!("Nome: {0}", k.player) };
-            let r = ui.add_sized([ui.available_width(), 44.0], secondary(&label));
+            let r = web_name_button(ui, k, [ui.available_width(), 44.0], 17.0, true);
             crate::playtest::control("Nome", &r, true);
-            if r.clicked() {
-                if let Ok(f) = js_sys::Reflect::get(&window, &"roccaEditName".into()) {
-                    if let Some(f) = f.dyn_ref::<js_sys::Function>() { let _ = f.call1(&window, &k.player.clone().into()); }
-                }
-            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         { ui.add(egui::TextEdit::singleline(&mut k.player).hint_text(rocca::tr!("Come ti chiami?"))); }

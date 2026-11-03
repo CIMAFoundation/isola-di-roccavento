@@ -863,22 +863,6 @@ fn clicks(mut commands: Commands, mut contexts: EguiContexts, prefs: Res<AudioPr
     }
 }
 
-/// The audio controls of the settings menu: muted, and the two volumes.
-pub fn settings_ui(ui: &mut egui::Ui, prefs: &mut AudioPrefs) {
-    let before = *prefs;
-    ui.horizontal(|ui| {
-        ui.label(rocca::tr!("Audio:"));
-        ui.checkbox(&mut prefs.muted, rocca::tr!("Muto"));
-    });
-    ui.add_enabled_ui(!prefs.muted, |ui| {
-        ui.add(egui::Slider::new(&mut prefs.ambience, 0.0..=1.0).show_value(false).text(rocca::tr!("Ambiente")));
-        ui.add(egui::Slider::new(&mut prefs.effects, 0.0..=1.0).show_value(false).text(rocca::tr!("Effetti")));
-    });
-    if *prefs != before {
-        prefs.save();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

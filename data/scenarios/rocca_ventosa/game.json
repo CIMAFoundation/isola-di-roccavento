@@ -191,28 +191,24 @@
   },
   "levels": [
     {
-      "name": "Attraversamento del valico",
-      "case": "impatti_valico_due_lati_30_6",
-      "difficulty": "Facile",
-      "about": "2–3 borghi colpiti senza ordini. Il profilo più permissivo dei tre nuovi."
-    },
-    {
-      "name": "Il fuoco della demo",
+      "name": "Scenario 1",
       "case": "medium",
-      "difficulty": "Medio",
-      "about": "Il fuoco di riferimento: la configurazione già in uso nella demo."
+      "about": "L'incendio parte sopra Le Terrazze con un vento forte, 36 km/h da est-sud-est. Dopo 45 minuti il vento gira da nord-est e il fuoco risale il valico verso Pian dei Grilli: sono minacciati Le Terrazze e Le Ghiande."
     },
     {
-      "name": "Pressione su quattro borghi",
+      "name": "Scenario 2",
+      "case": "impatti_valico_due_lati_30_6",
+      "about": "L'incendio parte sopra Le Terrazze, spinto da un vento di 30 km/h da est-sud-est. Dopo 75 minuti il vento gira da nord-est e porta il fuoco verso il valico: sono minacciati Le Terrazze e Le Ghiande."
+    },
+    {
+      "name": "Scenario 3",
       "case": "impatti_nuclei_valico_costante_lungo_28_7_0_60",
-      "difficulty": "Difficile",
-      "about": "Castelvento, Fornaci, Le Terrazze e Le Ghiande. Vento costante; serve tempestività."
+      "about": "L'incendio parte sopra Le Terrazze e il vento resta costante, 28 km/h da est-sud-est, per tutta la giornata. Il fuoco si allarga verso quattro borghi: Castelvento, Fornaci, Le Terrazze e Le Ghiande."
     },
     {
-      "name": "Rotazione da est",
+      "name": "Scenario 4",
       "case": "impatti_nuclei_est_giro_lungo_28_6_75_60",
-      "difficulty": "Esperto",
-      "about": "3–4 borghi colpiti senza ordini. Cambio di vento e meno margine per i ritardi."
+      "about": "L'incendio parte più a nord, vicino a Castelvento, con un vento di 28 km/h da est-sud-est. Dopo 75 minuti il vento gira da nord-est: sono minacciati Le Terrazze, Le Ghiande, Castelvento e San Rocco."
     }
   ]
 }

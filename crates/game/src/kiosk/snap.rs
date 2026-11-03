@@ -17,6 +17,8 @@
 //! | `hover`  | the district under the pointer (its route and time shown)            |
 //! | `at`     | camera focus: `home`, `fire`, `district:<name>`, `team:<n>`, `<x>:<y>` |
 //! | `dist`, `yaw`, `pitch` | the view, metres and degrees                           |
+//! | `menu`   | `1`: the settings menu (F2) open                                      |
+//! | `esc`    | `1`: the game menu (Esc) open, in the tutorial or the game             |
 //! | `iso`    | `0`: no isochrones (lines and labels)                                |
 //! | `marks`  | `0`: no team, order, hex, road or flag marks on the map              |
 //! | `ui`     | `0`: no interface at all (panels, labels, buttons)                   |
@@ -84,6 +86,8 @@ struct State {
     yaw: Option<f32>,
     pitch: Option<f32>,
     hide: SnapHide,
+    menu: bool,
+    esc: bool,
     mario: bool,
     /// `mario=<x>:<y>`: where Mario starts instead of beside the fire.
     mario_at: Option<Vec2>,
@@ -140,6 +144,8 @@ fn parse(spec: &str) -> Vec<State> {
                     "dist" => st.dist = v.parse().ok(),
                     "yaw" => st.yaw = v.parse().ok(),
                     "pitch" => st.pitch = v.parse().ok(),
+                    "menu" => st.menu = v == "1",
+                    "esc" => st.esc = v == "1",
                     "iso" => st.hide.iso = v == "0",
                     "marks" => st.hide.marks = v == "0",
                     "ui" => st.hide.ui = v == "0",
@@ -317,6 +323,8 @@ fn apply(st: &State, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter
         k.script = rocca::tutorial::Script::of(sim);
         k.step = st.step;
     }
+    k.operator = st.menu;
+    k.menu = st.esc;
     k.frozen = !st.live;
     k.follow = false;
     if let Some(t) = st.team {

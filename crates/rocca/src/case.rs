@@ -130,15 +130,12 @@ pub struct Territory {
     pub cases: Vec<Case>,
 }
 
-/// An operator scenario choice: a name, the case it plays and one
-/// line on what makes it so.
+/// An operator scenario choice: a name («Scenario 1»…), the case it plays and
+/// what happens in it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Level {
     pub name: String,
     pub case: String,
-    /// «Facile», «Medio», «Difficile» or «Esperto».
-    #[serde(default)]
-    pub difficulty: String,
     pub about: String,
 }
 

@@ -162,6 +162,9 @@ pub struct Kiosk {
     pub after_opening: f32,
     /// The operator menu (F2).
     pub operator: bool,
+    /// The game menu (Esc, or «Menu» bottom left) over the tutorial or the
+    /// game: the world stands still while it is open.
+    pub menu: bool,
     /// Operator's free camera over the opening's fire: no director, the
     /// fire keeps running, the view is the visitor's own.
     pub freecam: bool,
@@ -221,6 +224,7 @@ impl Kiosk {
             operator: false,
             freecam: false,
             frozen: false,
+            menu: false,
             error: None,
         }
     }
@@ -229,6 +233,7 @@ impl Kiosk {
         self.phase = phase;
         self.phase_t = 0.0;
         self.notice = None;
+        self.menu = false;
         self.clear_selection();
     }
 
@@ -528,7 +533,7 @@ pub fn step(time: Res<Time>, mut kiosk: ResMut<Kiosk>, mut sim: ResMut<Sim>, mut
     }
     let dt = crate::playtest::delta(time.delta_secs());
     let k = &mut *kiosk;
-    if !k.frozen {
+    if !k.frozen && !k.menu {
         k.phase_t += dt;
         k.step_t += dt;
     }
@@ -550,7 +555,7 @@ pub fn step(time: Res<Time>, mut kiosk: ResMut<Kiosk>, mut sim: ResMut<Sim>, mut
         }
     }
     sim.speed = match k.phase {
-        _ if k.frozen => 0.0,
+        _ if k.frozen || k.menu => 0.0,
         // Mario chooses how fast the world moves (0 = still)
         _ if mario.active => mario.simulation_speed,
         Phase::Intro => k.demo_speed,

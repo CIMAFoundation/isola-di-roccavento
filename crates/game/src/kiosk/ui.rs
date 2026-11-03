@@ -150,10 +150,13 @@ pub fn draw(
     egui::Area::new(egui::Id::new("menu_btn")).anchor(Align2::LEFT_BOTTOM, [10.0, -10.0]).order(egui::Order::Foreground).show(ctx, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.horizontal(|ui| {
-            let r = ui.add(secondary(if k.operator { rocca::tr!("Chiudi impostazioni") } else { rocca::tr!("Impostazioni") }));
+            // during play the button opens the game menu, which holds the settings too
+            let playing = matches!(k.phase, Phase::Tutorial | Phase::Gioco);
+            let label = if k.operator { rocca::tr!("Chiudi impostazioni") } else if playing { rocca::tr!("Menu") } else { rocca::tr!("Impostazioni") };
+            let r = ui.add(secondary(label));
             crate::playtest::control("Menu", &r, true);
             if r.clicked() {
-                k.operator = !k.operator;
+                if k.operator || !playing { k.operator = !k.operator; } else { k.menu = !k.menu; }
             }
             let r = mute_button(ui, &mut audio);
             crate::playtest::control("Audio", &r, true);
@@ -203,8 +206,14 @@ pub fn draw(
             k.side_w = if compact(ctx) && r.width() > r.height() && k.phase == Phase::Tutorial { (r.width() * 0.37).clamp(220.0, 316.0) } else { 0.0 };
             top_bar(ctx, k, &mut sim, cam);
             // Esc takes back a choice first (and is then used up: in the tutorial it would also skip)
-            if !ctx.egui_wants_keyboard_input() && k.selection != Selection::None && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-                k.clear_selection();
+            if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                if k.selection != Selection::None && !k.menu {
+                    k.clear_selection();
+                } else if k.operator {
+                    k.operator = false;
+                } else {
+                    k.menu = !k.menu;
+                }
             }
             map_badges(ctx, k, &mut sim, cam);
             if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
@@ -259,6 +268,9 @@ pub fn draw(
     // written in; the settings menu still has the list
     if k.phase == Phase::Intro && !k.freecam && !(k.operator && compact(ctx)) {
         super::lang::button(ctx, pad_h);
+    }
+    if k.menu && matches!(k.phase, Phase::Tutorial | Phase::Gioco) && !k.operator {
+        game_menu(ctx, k, &mut sim, &mut restarted);
     }
     if k.operator {
         operator(ctx, k, &mut gfx, &mut audio, auto.as_deref(), &mut commands);
@@ -1479,6 +1491,63 @@ fn mute_button(ui: &mut egui::Ui, prefs: &mut crate::sound::AudioPrefs) -> egui:
     r
 }
 
+/// The game menu (Esc, or «Menu» bottom left, in the tutorial and the game):
+/// the world stands still behind it (`Kiosk::menu`, read by `step`). Go on,
+/// skip the tutorial, start the fire again, the settings, or leave the game
+/// for the title (nothing is saved to the board).
+fn game_menu(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter<SimRestarted>) {
+    // a veil that takes the clicks: nothing reaches the map under the menu
+    let screen = ctx.viewport_rect();
+    egui::Area::new(egui::Id::new("menu_velo")).fixed_pos(screen.min).order(egui::Order::Tooltip).show(ctx, |ui| {
+        let r = ui.allocate_rect(screen, egui::Sense::click_and_drag());
+        ui.painter().rect_filled(screen, 0.0, Color32::from_rgba_premultiplied(2, 3, 5, 235));
+        if r.clicked() { k.menu = false; }
+    });
+    let touch = compact(ctx);
+    let h = if touch { 50.0 } else { 46.0 };
+    let width = 360.0_f32.min(screen.width() - 40.0);
+    let mut leave = false;
+    egui::Area::new(egui::Id::new("menu_gioco")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).order(egui::Order::Debug).show(ctx, |ui| {
+        egui::Frame::NONE.fill(Color32::from_rgb(18, 20, 24)).stroke(egui::Stroke::new(1.5, AMBER.gamma_multiply(0.8))).corner_radius(14.0).inner_margin(20.0).show(ui, |ui| {
+            ui.set_width(width - 40.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(rocca::tr!("Menu")).size(26.0).strong().color(Color32::WHITE));
+            });
+            ui.add_space(4.0);
+            let w = ui.available_width();
+            let r = ui.add_sized([w, h + 6.0], primary(rocca::tr!("Continua")));
+            crate::playtest::control("Continua", &r, true);
+            if r.clicked() { k.menu = false; }
+            if k.phase == Phase::Tutorial {
+                let r = ui.add_sized([w, h], secondary(rocca::tr!("Salta il tutorial")));
+                crate::playtest::control("Salta il tutorial", &r, true);
+                if r.clicked() { super::start_game(k, sim, restarted); }
+            } else {
+                let r = ui.add_sized([w, h], secondary(rocca::tr!("Ricomincia questo incendio")));
+                crate::playtest::control("Ricomincia", &r, true);
+                if r.clicked() { super::retry(k, sim, restarted); }
+            }
+            let r = ui.add_sized([w, h], secondary(rocca::tr!("Impostazioni")));
+            crate::playtest::control("Impostazioni", &r, true);
+            if r.clicked() { k.operator = true; }
+            ui.add_space(4.0);
+            let r = ui.add_sized([w, h], egui::Button::new(RichText::new(rocca::tr!("Esci dalla partita")).size(17.0).color(Color32::WHITE))
+                .fill(Color32::from_rgb(120, 40, 34)).stroke(egui::Stroke::new(1.0, RED)).corner_radius(8.0));
+            crate::playtest::control("Esci dalla partita", &r, true);
+            if r.clicked() { leave = true; }
+            if !touch {
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(rocca::tr!("Esc per continuare")).size(13.0).color(Color32::from_gray(150)));
+                });
+            }
+        });
+    });
+    if leave {
+        super::new_visit(k, sim, restarted);
+    }
+}
+
 /// The settings menu (F2): language, view, audio, graphics.
 fn operator(ctx: &egui::Context, k: &mut Kiosk, gfx: &mut crate::quality::Graphics, audio: &mut crate::sound::AudioPrefs, auto: Option<&crate::adaptive::Adaptive>, commands: &mut Commands) {
     if compact(ctx) {
@@ -1486,7 +1555,7 @@ fn operator(ctx: &egui::Context, k: &mut Kiosk, gfx: &mut crate::quality::Graphi
         // «Chiudi» pinned under the scrolling controls.
         let mut close = false;
         super::screens::compact_page_footer(ctx, "operatore_mobile", |ui| {
-            ui.heading(rocca::tr!("Impostazioni"));
+            ui.label(RichText::new(rocca::tr!("Impostazioni")).size(24.0).strong().color(Color32::WHITE));
             operator_body(ui, k, gfx, audio, auto, commands, true);
         }, |ui| {
             close = ui.add_sized([ui.available_width(), 46.0], secondary(rocca::tr!("Chiudi"))).clicked();
@@ -1494,84 +1563,153 @@ fn operator(ctx: &egui::Context, k: &mut Kiosk, gfx: &mut crate::quality::Graphi
         if close { k.operator = false; }
         return;
     }
-    egui::Window::new(rocca::tr!("Impostazioni")).id(egui::Id::new("operatore")).anchor(Align2::LEFT_BOTTOM, [8.0, -60.0]).default_width((ctx.viewport_rect().width() - 48.0).min(380.0)).max_height(ctx.viewport_rect().height() - 90.0).resizable(false).collapsible(false).vscroll(true).show(ctx, |ui| {
-        panel().show(ui, |ui| {
-            ui.label(RichText::new(rocca::tr!("Impostazioni (F2 per chiudere)")).strong().color(Color32::WHITE));
-            operator_body(ui, k, gfx, audio, auto, commands, false);
+    // A card like the other screens, with no grey title bar of its own.
+    let width = 400.0_f32.min(ctx.viewport_rect().width() - 20.0);
+    let room = ctx.viewport_rect().height() - 64.0 - 20.0;
+    egui::Area::new(egui::Id::new("operatore")).anchor(Align2::LEFT_BOTTOM, [10.0, -64.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+        egui::Frame::NONE.fill(Color32::from_rgb(18, 20, 24)).stroke(egui::Stroke::new(1.5, AMBER.gamma_multiply(0.8))).corner_radius(14.0).inner_margin(16.0).show(ui, |ui| {
+            ui.set_width(width - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(rocca::tr!("Impostazioni")).size(22.0).strong().color(Color32::WHITE));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("F2").size(13.0).strong().color(Color32::from_gray(150)).background_color(Color32::from_gray(45)));
+                });
+            });
+            let mut body = |ui: &mut egui::Ui| {
+                operator_body(ui, k, gfx, audio, auto, commands, false);
+                ui.add_space(4.0);
+                ui.label(RichText::new(rocca::tr!("versione {0}", super::BUILD)).size(12.0).color(Color32::from_gray(150)));
+            };
+            // a short window scrolls; otherwise the card takes its full height
+            // (a scroll area would be cut to the room under the card's top)
+            if room < 640.0 {
+                egui::ScrollArea::vertical().max_height((room - 70.0).max(120.0)).auto_shrink([false, true]).show(ui, &mut body);
+            } else {
+                body(ui);
+            }
         });
     });
 }
 
+/// A section title in the settings: small, spaced capitals over a thin rule.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(12.0);
+    ui.label(RichText::new(title.trim_end_matches(':').to_uppercase()).size(12.0).strong().color(AMBER.gamma_multiply(0.85)));
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
+    ui.painter().hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, Color32::from_gray(70)));
+    ui.add_space(3.0);
+}
+
+/// One choice of a row of exclusive options: the chosen one is amber.
+fn choice(ui: &mut egui::Ui, w: f32, on: bool, label: &str, touch: bool) -> egui::Response {
+    let text = RichText::new(label).size(if touch { 17.0 } else { 15.0 });
+    let b = if on {
+        egui::Button::new(text.strong().color(Color32::BLACK)).fill(AMBER).stroke(egui::Stroke::NONE)
+    } else {
+        egui::Button::new(text.color(Color32::WHITE)).fill(Color32::from_gray(52)).stroke(egui::Stroke::new(1.0, Color32::from_gray(95)))
+    };
+    ui.add_sized([w, if touch { 44.0 } else { 34.0 }], b.corner_radius(8.0))
+}
+
+/// A row of options that share the width equally.
+fn choices<R>(ui: &mut egui::Ui, n: usize, add: impl FnOnce(&mut egui::Ui, f32) -> R) -> R {
+    ui.spacing_mut().item_spacing.x = 6.0;
+    let w = (ui.available_width() - 6.0 * (n as f32 - 1.0)) / n as f32;
+    ui.horizontal(|ui| add(ui, w)).inner
+}
+
 /// The controls of the operator menu. `touch`: finger-sized buttons.
 fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Graphics, audio: &mut crate::sound::AudioPrefs, auto: Option<&crate::adaptive::Adaptive>, commands: &mut Commands, touch: bool) {
-    let button = |ui: &mut egui::Ui, label: &str| -> bool {
-        if touch { ui.add_sized([ui.available_width(), 46.0], secondary(label)).clicked() } else { ui.add(secondary(label)).clicked() }
-    };
-    {
-        {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    let h = if touch { 46.0 } else { 36.0 };
+    section(ui, rocca::tr!("Lingua:"));
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = h;
+        ui.spacing_mut().combo_width = ui.available_width();
+        super::lang::picker_ui(ui);
+    });
+    ui.add_space(8.0);
+    if ui.add_sized([ui.available_width(), h], secondary(rocca::tr!("Vista iniziale"))).clicked() {
+        k.reset_view = true;
+    }
+    section(ui, rocca::tr!("Audio:"));
+    let before = *audio;
+    choices(ui, 2, |ui, w| {
+        for (muted, label) in [(false, "🔊"), (true, "🔇")] {
+            let r = ui.add_sized([w, h], egui::Button::new(RichText::new(label).size(18.0).color(if audio.muted == muted { Color32::BLACK } else { Color32::WHITE }))
+                .fill(if audio.muted == muted { AMBER } else { Color32::from_gray(52) })
+                .stroke(if audio.muted == muted { egui::Stroke::NONE } else { egui::Stroke::new(1.0, Color32::from_gray(95)) })
+                .corner_radius(8.0));
+            if r.clicked() { audio.muted = muted; }
+        }
+    });
+    ui.add_enabled_ui(!audio.muted, |ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+        for (value, label) in [(&mut audio.ambience, rocca::tr!("Ambiente")), (&mut audio.effects, rocca::tr!("Effetti"))] {
             ui.horizontal(|ui| {
-                ui.label(rocca::tr!("Lingua:"));
-                super::lang::picker_ui(ui);
+                ui.add(egui::Slider::new(value, 0.0..=1.0).show_value(false));
+                ui.label(RichText::new(label).size(15.0).color(Color32::WHITE));
             });
-            if button(ui, rocca::tr!("Vista iniziale")) {
-                k.reset_view = true;
+        }
+    });
+    if *audio != before {
+        audio.save();
+    }
+    if !cfg!(target_arch = "wasm32") {
+        use crate::quality::Graphics;
+        section(ui, rocca::tr!("Grafica:"));
+        let now_level = if auto.is_some() { None } else { gfx.level() };
+        let auto_label = match auto {
+            Some(a) => format!("Auto {}/{}", a.step() + 1, a.rungs()),
+            None => "Auto".to_string(),
+        };
+        let presets = [("alta", "Alta", Graphics::ALTA), ("media", "Media", Graphics::MEDIA), ("bassa", "Bassa", Graphics::BASSA)];
+        choices(ui, 4, |ui, w| {
+            let r = choice(ui, w, auto.is_some(), &auto_label, touch)
+                .on_hover_text(rocca::tr!("Il livello segue la velocità di questo computer: scende se i frame sono lenti, risale se c'è margine"));
+            if r.clicked() && auto.is_none() {
+                let a = crate::adaptive::Adaptive::new(Graphics::ALTA.built_as(&gfx));
+                *gfx = a.initial();
+                commands.insert_resource(a);
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::quality::forget_aa();
+                if let Err(e) = crate::quality::save("auto") {
+                    k.error = Some(e);
+                }
             }
-            crate::sound::settings_ui(ui, audio);
-            if !cfg!(target_arch = "wasm32") { ui.horizontal(|ui| {
-                use crate::quality::Graphics;
-                ui.label(rocca::tr!("Grafica:"));
-                let now_level = if auto.is_some() { None } else { gfx.level() };
-                let label = match auto {
-                    Some(a) => format!("Auto ({}/{})", a.step() + 1, a.rungs()),
-                    None => "Auto".to_string(),
-                };
-                if ui.selectable_label(auto.is_some(), label)
-                    .on_hover_text(rocca::tr!("Il livello segue la velocità di questo computer: scende se i frame sono lenti, risale se c'è margine"))
-                    .clicked() && auto.is_none()
-                {
-                    let a = crate::adaptive::Adaptive::new(Graphics::ALTA.built_as(&gfx));
-                    *gfx = a.initial();
-                    commands.insert_resource(a);
+            for (name, label, preset) in presets {
+                if choice(ui, w, now_level == Some(name), label, touch).clicked() && now_level != Some(name) {
+                    // a level brings its own antialiasing: the choice made apart is dropped
+                    *gfx = preset.built_as(&gfx);
                     #[cfg(not(target_arch = "wasm32"))]
                     crate::quality::forget_aa();
-                    if let Err(e) = crate::quality::save("auto") {
+                    if let Err(e) = crate::quality::save(name) {
                         k.error = Some(e);
                     }
                 }
-                for (name, label, preset) in [("alta", "Alta", Graphics::ALTA), ("media", "Media", Graphics::MEDIA), ("bassa", "Bassa", Graphics::BASSA)] {
-                    if ui.selectable_label(now_level == Some(name), label).clicked() && now_level != Some(name) {
-                        // a level brings its own antialiasing: the choice made apart is dropped
-                        *gfx = preset.built_as(&gfx);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        crate::quality::forget_aa();
-                        if let Err(e) = crate::quality::save(name) {
-                            k.error = Some(e);
-                        }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new(rocca::tr!("Antialiasing:").trim_end_matches(':')).size(14.0).color(GREY));
+        let now = gfx.aa();
+        choices(ui, 3, |ui, w| {
+            for (name, label, tip) in [
+                ("msaa", "MSAA 4×", "Il più pulito sui bordi sottili; costa qualche ms a schermo grande"),
+                ("smaa", "SMAA", "Filtro sui bordi dopo il disegno: quasi gratis, bordi quasi uguali"),
+                ("nessuno", "Nessuno", "Bordi seghettati"),
+            ] {
+                if choice(ui, w, now == name, label, touch).on_hover_text(tip).clicked() && now != name {
+                    gfx.set_aa(name);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Err(e) = crate::quality::save_aa(name) {
+                        k.error = Some(e);
                     }
                 }
-            });
-            ui.horizontal(|ui| {
-                ui.label(rocca::tr!("Antialiasing:"));
-                let now = gfx.aa();
-                for (name, label, tip) in [
-                    ("msaa", "MSAA 4×", "Il più pulito sui bordi sottili; costa qualche ms a schermo grande"),
-                    ("smaa", "SMAA", "Filtro sui bordi dopo il disegno: quasi gratis, bordi quasi uguali"),
-                    ("nessuno", "Nessuno", "Bordi seghettati"),
-                ] {
-                    if ui.selectable_label(now == name, label).on_hover_text(tip).clicked() && now != name {
-                        gfx.set_aa(name);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if let Err(e) = crate::quality::save_aa(name) {
-                            k.error = Some(e);
-                        }
-                    }
-                }
-            });
             }
-            if let Some(e) = &k.error {
-                ui.colored_label(RED, e);
-            }
-        }
+        });
+    }
+    if let Some(e) = &k.error {
+        ui.colored_label(RED, e);
     }
 }
 
