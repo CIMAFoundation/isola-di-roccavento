@@ -568,9 +568,72 @@ struct Draw {
     group: u32,
     /// Drawn for the plants the fire has come to ([`GpuRemains`]), not the whole group.
     remains: bool,
-    /// The group's plants drawn, from its first (`Group::kept`); the
+    /// The group's plants drawn: `count` from `first` (a run of its
+    /// quadtree, [`select`]; `Group::kept` when thinned by count); the
     /// remains draw all theirs.
+    first: u32,
     count: u32,
+}
+
+/// `KIOSK_LOD_TILE=1`: the level of detail per 1280 m tile, as until
+/// 2026-11-04, for comparisons.
+fn lod_per_tile() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KIOSK_LOD_TILE").is_ok_and(|v| v == "1"))
+}
+
+/// The runs of `group`'s plants and the band of distance each falls in
+/// (`band`, from the distance of a node's nearest and farthest points),
+/// in the order of the instance buffer, neighbours of one band merged
+/// (2026-11-04: the level of detail per node of the group's quadtree, no
+/// longer per 1280 m tile). A node goes whole when all of it is in one
+/// band, else its children do, down to the leaves (40 m), which take the
+/// band of their nearest point. Nodes out of `frustum` are left out.
+/// `limit`: no plant at or past it (the thinning by count).
+fn select(
+    group: &super::Group,
+    eye: Vec3,
+    frustum: &Mat4,
+    near_plane: bool,
+    limit: u32,
+    band: &dyn Fn(f32) -> u8,
+    out: &mut Vec<(u8, u32, u32)>,
+) {
+    fn walk(
+        nodes: &[super::Node],
+        id: u32,
+        eye: Vec3,
+        frustum: &Mat4,
+        near_plane: bool,
+        limit: u32,
+        band: &dyn Fn(f32) -> u8,
+        out: &mut Vec<(u8, u32, u32)>,
+    ) {
+        let n = &nodes[id as usize];
+        if n.start >= limit || !in_view(frustum, n.lo, n.hi, near_plane) {
+            return;
+        }
+        let near = eye.distance(eye.clamp(n.lo, n.hi));
+        let far = (eye - n.lo).abs().max((eye - n.hi).abs()).length();
+        let (b0, b1) = (band(near), band(far));
+        let leaf = n.kids.iter().all(|&k| k == super::NO_NODE);
+        if b0 == b1 || leaf {
+            let end = n.end.min(limit);
+            match out.last_mut() {
+                Some(last) if last.0 == b0 && last.2 == n.start => last.2 = end,
+                _ => out.push((b0, n.start, end)),
+            }
+        } else {
+            for &k in &n.kids {
+                if k != super::NO_NODE {
+                    walk(nodes, k, eye, frustum, near_plane, limit, band, out);
+                }
+            }
+        }
+    }
+    if !group.nodes.is_empty() {
+        walk(&group.nodes, 0, eye, frustum, near_plane, limit, band, out);
+    }
 }
 
 /// What each view draws this frame, by render-world view entity.
@@ -668,23 +731,35 @@ fn queue_plants(
             lod.0.insert(key, (near, far));
             tiers.push((near, far, d));
         }
+        // per node: the models within the LOD distance, the cheapest crowns
+        // beyond the far one, the proxies between
+        let band = |d: f32| if lod_m > 0.0 && d < lod_m { 0 } else if d > far_m { 2 } else { 1 };
         let mut list = Vec::new();
+        let mut runs = Vec::new();
         for (t, tile) in scene.tiles.iter().enumerate() {
             if !in_view(&frustum, tile.lo, tile.hi, true) {
                 continue;
             }
             let (near, far, _) = tiers[t];
+            let whole = |_: f32| if near { 0 } else if far { 2 } else { 1 };
             for g in tile.groups.clone() {
                 let group = &scene.groups[g];
                 let tier = |t: Tier| group.tiers[t as usize];
-                let plant = if near { tier(Tier::Full) } else if far { tier(Tier::Far) } else { None }.or(tier(Tier::Proxy));
-                let count = drawn(g);
-                if let Some(mesh) = plant.filter(|_| count > 0) {
-                    list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: false, count });
+                runs.clear();
+                if lod_per_tile() {
+                    runs.push((whole(0.0), 0, drawn(g)));
+                } else {
+                    select(group, eye, &frustum, true, drawn(g), &band, &mut runs);
+                }
+                for &(b, first, end) in &runs {
+                    let plant = match b { 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
+                    if let Some(mesh) = plant.filter(|_| end > first) {
+                        list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: false, first, count: end - first });
+                    }
                 }
                 if plants.fire.get(g).is_some_and(|f| !f.2.is_empty()) {
                     if let Some(mesh) = if near { tier(Tier::RemainsNear) } else { None }.or(tier(Tier::RemainsFar)) {
-                        list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: true, count: 0 });
+                        list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: true, first: 0, count: 0 });
                     }
                 }
             }
@@ -743,7 +818,13 @@ fn queue_plants(
             let Some(shadow) = shadow_phases.get_mut(&light_view.retained_view_entity) else { continue };
             shadow.remove(item.1);
             let cascade = clip_from_world(light_view);
+            // a plant casts the shadow of the mesh it is drawn with: a
+            // proxy's closed crown over a full model darkened the model
+            // itself (2026-11-04, per node; per tile the camera's own tile
+            // cast with its full models up to its edge, `FULL_SHADOW_M`)
+            let band = |d: f32| if lod_m > 0.0 && d < lod_m { 0 } else if d > far_m { 2 } else { 1 };
             let mut list = Vec::new();
+            let mut runs = Vec::new();
             for (t, tile) in scene.tiles.iter().enumerate() {
                 if !in_view(&cascade, tile.lo, tile.hi, false) {
                     continue;
@@ -753,14 +834,22 @@ fn queue_plants(
                 for g in tile.groups.clone() {
                     let group = &scene.groups[g];
                     let tier = |t: Tier| group.tiers[t as usize];
-                    let plant = if full { tier(Tier::Full) } else if far { tier(Tier::Far) } else { None }.or(tier(Tier::Proxy));
-                    let count = drawn(g);
-                    if let Some(mesh) = plant.filter(|_| count > 0) {
-                        list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: false, count });
+                    runs.clear();
+                    if lod_per_tile() {
+                        runs.push((if full { 0 } else if far { 2 } else { 1 }, 0, drawn(g)));
+                    } else {
+                        // the distance from the camera, the box from the cascade
+                        select(group, eye, &cascade, false, drawn(g), &band, &mut runs);
+                    }
+                    for &(b, first, end) in &runs {
+                        let plant = match b { 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
+                        if let Some(mesh) = plant.filter(|_| end > first) {
+                            list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: false, first, count: end - first });
+                        }
                     }
                     if full && plants.fire.get(g).is_some_and(|f| !f.2.is_empty()) {
                         if let Some(mesh) = tier(Tier::RemainsNear) {
-                            list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: true, count: 0 });
+                            list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: true, first: 0, count: 0 });
                         }
                     }
                 }
@@ -824,18 +913,84 @@ impl<P: PhaseItem, const PASS: u8> RenderCommand<P> for DrawPlants<PASS> {
                 current = Some(d.pipeline);
             }
             let (Some(mesh), Some(group)) = (gpu.meshes.get(d.mesh as usize), gpu.groups.get(d.group as usize)) else { continue };
-            let (instances, fire, count) = if d.remains {
+            let (instances, fire, first, count) = if d.remains {
                 let Some(r) = group.remains.as_ref() else { continue };
-                (&r.instances, &r.fire, r.count)
+                (&r.instances, &r.fire, 0, r.count)
             } else {
-                (&group.instances, &group.fire, d.count.min(group.count))
+                let first = d.first.min(group.count);
+                (&group.instances, &group.fire, first, d.count.min(group.count - first))
             };
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_vertex_buffer(1, instances.slice(..));
             pass.set_vertex_buffer(2, fire.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), IndexFormat::Uint16);
-            pass.draw_indexed(0..mesh.count, 0, 0..count);
+            pass.draw_indexed(0..mesh.count, 0, first..first + count);
         }
         RenderCommandResult::Success
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Draws and triangles of the plants for a few cameras, the level of
+    /// detail chosen per 1280 m tile (until 2026-11-04) and per node of the
+    /// groups' quadtrees: printed, run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    #[allow(deprecated)] // glam's camera matrices, renamed in its new API
+    fn plant_lod_per_tile_and_per_node() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let sim = crate::sim::Sim::new(&data, "medium", 2).unwrap();
+        let (wm, hm) = (sim.scn.world.width_m, sim.scn.world.height_m);
+        for (label, gfx) in [("alta", crate::quality::Graphics::ALTA), ("media", crate::quality::Graphics::MEDIA)] {
+            let mut world = World::new();
+            world.insert_resource(crate::sim::Sim::new(&data, "medium", 2).unwrap());
+            world.insert_resource(gfx.clone());
+            world.run_system_once(super::super::spawn).unwrap();
+            let scene = world.resource::<Vegetation>().scene.clone();
+            let lod_m = gfx.lod_m;
+            let far_m = (lod_m * FAR_TIER).max(FAR_TIER_MIN_M);
+            let tris = |m: Option<u32>| m.map_or(0, |m| scene.meshes[m as usize].triangles());
+            println!("{label}: lod {lod_m} m, far {far_m} m");
+            println!("{:>28} {:>9} {:>9} {:>11} {:>11}", "camera", "draws", "draws", "M tris", "M tris");
+            println!("{:>28} {:>9} {:>9} {:>11} {:>11}", "", "tile", "node", "tile", "node");
+            for (name, at, dist, pitch) in [
+                ("centre, 1600 m, -32°", Vec2::new(wm * 0.5, hm * 0.5), 1600.0f32, -32.0f32),
+                ("centre, 500 m, -25°", Vec2::new(wm * 0.5, hm * 0.5), 500.0, -25.0),
+                ("west, 900 m, -20°", Vec2::new(wm * 0.3, hm * 0.5), 900.0, -20.0),
+                ("north, 250 m, -15°", Vec2::new(wm * 0.5, hm * 0.7), 250.0, -15.0),
+            ] {
+                let ground = sim.scn.terrain.height_at(scenario::Pos { x: at.x, y: at.y });
+                let target = Vec3::new(at.x, ground, -at.y);
+                let p = pitch.to_radians();
+                let eye = target + Vec3::new(0.0, -p.sin() * dist, p.cos() * dist);
+                let clip = Mat4::perspective_rh(45f32.to_radians(), 1.6, 1.0, 30_000.0) * Mat4::look_at_rh(eye, target, Vec3::Y);
+                let (mut dt, mut dn, mut tt, mut tn) = (0usize, 0usize, 0usize, 0usize);
+                let mut runs = Vec::new();
+                for tile in &scene.tiles {
+                    if !in_view(&clip, tile.lo, tile.hi, true) {
+                        continue;
+                    }
+                    let d = eye.distance(eye.clamp(tile.lo, tile.hi));
+                    let (near, far) = (d < lod_m, d >= lod_m && d > far_m);
+                    let band = |d: f32| if lod_m > 0.0 && d < lod_m { 0 } else if d > far_m { 2 } else { 1 };
+                    for g in tile.groups.clone() {
+                        let group = &scene.groups[g];
+                        let tier = |t: Tier| group.tiers[t as usize];
+                        let mesh = |b: u8| match b { 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
+                        dt += 1;
+                        tt += group.count as usize * tris(mesh(if near { 0 } else if far { 2 } else { 1 }));
+                        runs.clear();
+                        select(group, eye, &clip, true, group.count, &band, &mut runs);
+                        dn += runs.len();
+                        tn += runs.iter().map(|&(b, s, e)| (e - s) as usize * tris(mesh(b))).sum::<usize>();
+                    }
+                }
+                println!("{name:>28} {dt:>9} {dn:>9} {:>11.2} {:>11.2}", tt as f32 / 1e6, tn as f32 / 1e6);
+            }
+        }
     }
 }
