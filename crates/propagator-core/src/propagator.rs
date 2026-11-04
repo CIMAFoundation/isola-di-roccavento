@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::checkpoint::{
     reanchor_event, PropagatorCheckpoint, ResumeOptions, CHECKPOINT_VERSION,
 };
+use crate::edges::EdgeCache;
 use crate::error::{PropagatorError, Result};
 use crate::fold::{fold_realization, PropagatorOutput, PropagatorStats, StateFold};
 use crate::fuels::{legacy_fuel_system, FuelSystem, NO_FUEL};
@@ -107,8 +108,15 @@ pub struct Propagator {
     wind_dir: Option<Grid2<f32>>,
     wind_speed: Option<Grid2<f32>>,
     actions_moisture: Option<Grid2<f32>>,
+    /// cells whose cached edges depend on `actions_moisture`: every cell
+    /// with action moisture plus its 8 neighbours (edges read the target's
+    /// moisture). Decay only invalidates these.
+    actions_footprint: Vec<(usize, usize)>,
     scheduler: Scheduler,
     reals: Vec<Realization>,
+    /// realization-independent spread quantities per cell edge, valid for
+    /// the current vegetation / weather / action moisture
+    edges: EdgeCache,
 
     store: Option<Arc<TileStore>>,
     // precomputed fold contribution of frozen tiles, one 32x32 block per
@@ -172,8 +180,10 @@ impl Propagator {
             wind_dir: None,
             wind_speed: None,
             actions_moisture: None,
+            actions_footprint: Vec::new(),
             scheduler: Scheduler::new(),
             reals,
+            edges: EdgeCache::for_realizations(rows, cols, config.realizations),
             store,
             fold_blocks: HashMap::new(),
             fold_dirty: HashSet::new(),
@@ -224,6 +234,17 @@ impl Propagator {
     /// realization's heap, so nothing in that realization advances again.
     pub fn set_oob_mode(&mut self, mode: OobMode) {
         self.oob_mode = mode;
+    }
+
+    /// Tiles currently held by the shared edge cache (spread quantities
+    /// per cell edge, see [`EdgeCache`]).
+    pub fn edge_cache_tiles(&self) -> usize {
+        self.edges.allocated_tiles()
+    }
+
+    /// Bytes currently held by the shared edge cache.
+    pub fn edge_cache_bytes(&self) -> usize {
+        self.edges.allocated_bytes()
     }
 
     /// Which domain edges the front is pressing against, as
@@ -510,6 +531,7 @@ impl Propagator {
             ros_model: self.ros_model,
             moisture_model: self.moisture_model,
             do_spotting: self.do_spotting,
+            edges: &self.edges,
         };
         advance_all(
             &mut self.reals,
@@ -531,6 +553,9 @@ impl Propagator {
         if time_delta > 0 {
             self.decay_actions_moisture(time_delta);
         }
+        if event.moisture.is_some() || event.wind_dir.is_some() || event.wind_speed.is_some() {
+            self.edges.invalidate();
+        }
         if let Some(moisture) = &event.moisture {
             self.moisture = Some(moisture.clone());
         }
@@ -546,6 +571,11 @@ impl Propagator {
             {
                 *a = (*a + *b).clamp(0.0, 1.0);
             }
+            // action moisture only ever accumulates, so the new footprint
+            // covers every cell whose edges changed
+            self.rebuild_actions_footprint();
+            self.edges
+                .invalidate_cells(self.actions_footprint.iter().copied());
         }
         if let Some(wind_dir) = &event.wind_dir {
             self.wind_dir = Some(wind_dir.clone());
@@ -573,6 +603,7 @@ impl Propagator {
             }
         }
         self.fuel_idx = self.fuels.build_fuel_index_grid(&self.veg)?;
+        self.edges.invalidate();
         Ok(())
     }
 
@@ -607,6 +638,42 @@ impl Propagator {
         for value in actions.as_mut_slice() {
             *value *= factor;
         }
+        // only edges into cells with action moisture changed
+        self.edges
+            .invalidate_cells(self.actions_footprint.iter().copied());
+    }
+
+    /// Recompute `actions_footprint` from `actions_moisture`: the cells with
+    /// action moisture, dilated by one cell in every direction.
+    fn rebuild_actions_footprint(&mut self) {
+        self.actions_footprint.clear();
+        let Some(actions) = &self.actions_moisture else {
+            return;
+        };
+        let (rows, cols) = actions.shape();
+        let mut marked = vec![false; rows * cols];
+        for row in 0..rows {
+            for col in 0..cols {
+                if actions[(row, col)] == 0.0 {
+                    continue;
+                }
+                for dr in -1i64..=1 {
+                    for dc in -1i64..=1 {
+                        let r = row as i64 + dr;
+                        let c = col as i64 + dc;
+                        if r >= 0 && c >= 0 && (r as usize) < rows && (c as usize) < cols {
+                            marked[r as usize * cols + c as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+        self.actions_footprint = marked
+            .iter()
+            .enumerate()
+            .filter(|(_, &m)| m)
+            .map(|(i, _)| (i / cols, i % cols))
+            .collect();
     }
 
     /// Base moisture plus action-derived increments, clipped to [0, 1].
@@ -683,6 +750,10 @@ impl Propagator {
             ros_mean: masked_mean(&fold.ros_sum, &fold.count),
             ros_max: fold.ros_max,
             fli_mean: masked_mean(&fold.fli_sum, &fold.count),
+            flame_height_max: fold.flame_max,
+            flame_height_mean: masked_mean(&fold.flame_sum, &fold.count),
+            radiant_reach_max: fold.radiant_max,
+            radiant_reach_mean: masked_mean(&fold.radiant_sum, &fold.count),
             fli_max: fold.fli_max,
             fire_probability,
             stats,
@@ -906,7 +977,28 @@ impl Propagator {
                 .tiles
                 .remove_slots(&slots_to_remove, FROZEN_TILE);
         }
+        if frozen_total > 0 {
+            self.release_dead_edge_tiles();
+        }
         Ok(frozen_total)
+    }
+
+    /// Free cached edges of blocks no realization holds a live tile for:
+    /// frozen everywhere (never popped again) or not yet reached (cheap to
+    /// refill on first touch).
+    fn release_dead_edge_tiles(&mut self) {
+        let (tiles_h, tiles_w) = self.edges.tiles_shape();
+        for tile_row in 0..tiles_h {
+            for tile_col in 0..tiles_w {
+                let live = self
+                    .reals
+                    .iter()
+                    .any(|real| real.tiles.slot_of(tile_row, tile_col) >= 0);
+                if !live {
+                    self.edges.release_tile(tile_row, tile_col);
+                }
+            }
+        }
     }
 
     /// Cells reachable from any pending front event through unburnt fuel
@@ -1233,6 +1325,7 @@ impl Propagator {
         self.dem = dem;
         self.fuel_idx = self.fuels.build_fuel_index_grid(&self.veg)?;
         self.origin = origin;
+        self.edges.reset(new_shape.0, new_shape.1);
 
         let tile_row0 = row_shift >> TILE_SHIFT;
         let tile_col0 = col_shift >> TILE_SHIFT;
@@ -1251,6 +1344,7 @@ impl Propagator {
             self.actions_moisture =
                 Some(grid.pad_const(new_shape, row_shift, col_shift, 0.0));
         }
+        self.rebuild_actions_footprint();
 
         for (_, event) in self.scheduler.events_mut() {
             reanchor_event(event, row_shift, col_shift, old_shape, new_shape);
@@ -1292,6 +1386,7 @@ impl Propagator {
         let new_shape = self.veg.shape();
         let grew = old_shape != new_shape || row_shift != 0 || col_shift != 0;
         self.time = checkpoint.time;
+        self.edges.reset(new_shape.0, new_shape.1);
 
         let tile_row0 = row_shift >> TILE_SHIFT;
         let tile_col0 = col_shift >> TILE_SHIFT;
@@ -1328,6 +1423,7 @@ impl Propagator {
                 grid.clone()
             }
         });
+        self.rebuild_actions_footprint();
 
         self.scheduler = Scheduler::new();
         for (event_time, event) in &checkpoint.scheduler_events {

@@ -27,24 +27,24 @@ use crate::{CellFire, Weather};
 
 /// Byram's flame-length relation, `L = 0.0775 * I^0.46`, with fireline
 /// intensity in kW/m and length in metres (Byram 1959; SI form after
-/// Alexander 1982).
+/// Alexander 1982). The formula lives in the core
+/// ([`propagator_core::flame_height`]), which also folds it into its output
+/// maps: one rule for the game and for PROPAGATOR.
 #[inline]
 pub fn flame_length_m(fli_kw_m: f32) -> f32 {
-    if fli_kw_m <= 0.0 {
-        return 0.0;
-    }
-    0.0775 * fli_kw_m.powf(0.46)
+    propagator_core::flame_height(fli_kw_m as f64) as f32
 }
 
 /// Radiant reach of a flaming cell.
 ///
 /// Uses the safe-separation convention of four flame lengths (Butler & Cohen
 /// 1998), which is where radiant flux has fallen to a level people and
-/// structures can tolerate. Clamped so a single hot cell cannot reach
-/// implausibly far.
+/// structures can tolerate, clamped to 10–200 m so a single hot cell cannot
+/// reach implausibly far ([`propagator_core::radiant_reach`]). No flame
+/// (intensity ≤ 0) has no reach: 0 m.
 #[inline]
 pub fn radiant_range_m(fli_kw_m: f32) -> f32 {
-    (4.0 * flame_length_m(fli_kw_m)).clamp(10.0, 200.0)
+    propagator_core::radiant_reach(fli_kw_m as f64) as f32
 }
 
 /// Downwind ember reach, growing with plume strength and wind.

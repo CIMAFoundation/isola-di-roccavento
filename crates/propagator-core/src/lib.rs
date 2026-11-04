@@ -33,6 +33,7 @@
 //! ```
 
 mod checkpoint;
+mod edges;
 mod error;
 mod fold;
 mod front;
@@ -47,6 +48,7 @@ mod tile_store;
 mod tiles;
 
 pub use checkpoint::{PropagatorCheckpoint, ResumeOptions, CHECKPOINT_VERSION};
+pub use edges::{CellEdges, EdgeCache, EDGE_TILE_BYTES};
 pub use error::{PropagatorError, Result};
 pub use fold::{PropagatorOutput, PropagatorStats, StateFold};
 pub use fuels::{
@@ -54,7 +56,10 @@ pub use fuels::{
     NO_FUEL,
 };
 pub use grid::Grid2;
-pub use models::{MoistureModel, RosModel};
+pub use models::{
+    flame_height, radiant_reach, MoistureModel, RosModel, BYRAM_FLAME_COEFF,
+    BYRAM_FLAME_EXPONENT, RADIANT_REACH_FLAME_HEIGHTS, RADIANT_REACH_MAX_M, RADIANT_REACH_MIN_M,
+};
 pub use propagator::{
     OobMode, Propagator, PropagatorConfig, CELLSIZE_DEFAULT, REALIZATIONS_DEFAULT,
 };

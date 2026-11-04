@@ -8,7 +8,8 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [workspace.dependencies]
-# Vendored from CIMAFoundation/propagator_sim at a2749c81. Cargo cannot refer
+# Vendored from CIMAFoundation/propagator_sim at bbdbacd (dev d3f40f0 + flame
+# height and radiant reach, branch feat/flame-height-radiant-reach). Cargo cannot refer
 # to a crate in a Git repository subdirectory, so keeping this small std-only
 # core here makes CI and GitHub Pages self-contained.
 propagator-core = { path = "crates/propagator-core" }
