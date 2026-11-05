@@ -95,7 +95,9 @@ impl Graphics {
         cascades: 4,
         shadow_distance: 4000.0,
         shadow_map: 2048,
-        vegetation: if WEBGL2 { 0.12 } else { 0.5 },
+        // 2026-11-04: twice the plants (a closed wood); +3 ms of GPU at 4x the
+        // pixels, measured with `KIOSK_SNAP_BENCH`
+        vegetation: if WEBGL2 { 0.12 } else { 1.0 },
         lod_m: 1400.0,
         terrain_shadows: true,
         terrain_stride: 1,
@@ -111,7 +113,7 @@ impl Graphics {
         smaa: true,
         cascades: 3,
         shadow_distance: 2500.0,
-        vegetation: if WEBGL2 { 0.12 } else { 0.35 },
+        vegetation: if WEBGL2 { 0.12 } else { 0.6 },
         lod_m: 1000.0,
         cover_m: if WEBGL2 { 0.0 } else { 35.0 },
         ..Graphics::ALTA

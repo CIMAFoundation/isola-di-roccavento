@@ -10,6 +10,8 @@
 //! | 12..16 | normal and what the vertex is ([`Kind`]), `Snorm8x4`  |
 //! | 16..20 | uv into the foliage atlas, `Unorm16x2`                |
 //! | 20..28 | colour (linear) and occlusion, `Unorm16x4`            |
+//! | 28..32 | a scanned card's right axis, its stretch / 2, `Snorm8x4` |
+//! | 32..36 | a scanned card's up axis, `Snorm8x4`                  |
 //!
 //! The colour of a leaf or wood vertex is the model's own shading, halved;
 //! the plant's tint (also halved) multiplies it and the atlas paints it. What
@@ -23,7 +25,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 
 /// Bytes per vertex (see the table above).
-pub const VERTEX_BYTES: u64 = 28;
+pub const VERTEX_BYTES: u64 = 36;
 
 /// The levels of detail of a variety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -38,9 +40,14 @@ pub enum Tier {
     /// What fire adds (twig skeleton, ash and fallen wood), near and far.
     RemainsNear = 3,
     RemainsFar = 4,
+    /// A scanned plant's nearest level (`models::scans`, `lod0`), where it
+    /// has one; then [`Tier::Mid`] (`lod1`), [`Tier::Full`] (`lod2`), and
+    /// its `lod3` in place of the proxies ([`Tier::Proxy`], [`Tier::Far`]).
+    Near = 5,
+    Mid = 6,
 }
 
-pub const TIERS: usize = 5;
+pub const TIERS: usize = 7;
 
 /// What a vertex is to the fire, in the normal's fourth byte (`kind` in the
 /// shader): leaves burn away, wood chars and stays, twigs and debris appear
@@ -109,8 +116,38 @@ impl PlantMesh {
 /// `name`'s mesh for `tier`.
 pub fn variety_mesh(name: &'static str, tier: Tier) -> PlantMesh {
     let mut b = Builder::default();
+    let scan = crate::models::scan_of(name).and_then(|plant| {
+        // the nearest level there is, from the tier's on (a level not built
+        // yet); the proxies only their own
+        let levels: &[&str] = match tier {
+            Tier::Near => &["lod0", "lod1", "lod2"],
+            Tier::Mid => &["lod1", "lod2"],
+            Tier::Full => &["lod2"],
+            Tier::Proxy => &["lod3"],
+            Tier::Far | Tier::RemainsNear | Tier::RemainsFar => return None,
+        };
+        let scans = crate::models::scans()?;
+        levels.iter().find_map(|level| scans.level(plant, level))
+    });
+    if tier == Tier::Far {
+        if let Some((vertices, indices, _)) = crate::models::scan_of(name).and_then(|p| crate::models::scans()?.level(p, "lod3")) {
+            b.scan_lumps(&vertices, &indices, super::canopy::crown_colour(name), scan_stretch(name));
+            return b.finish(false, false);
+        }
+    }
+    if let Some((vertices, indices, leaf_rgb)) = scan {
+        b.scan(&vertices, &indices, leaf_rgb, super::canopy::crown_colour(name), scan_stretch(name));
+        return b.finish(true, true);
+    }
+    // a scanned plant's own wood stays, charred: of the remains only the
+    // debris at its foot
+    let debris_only = crate::models::scan_of(name).is_some();
     match tier {
-        Tier::Full => b.model(crate::models::live(name)),
+        Tier::RemainsNear if debris_only => b.debris(&crate::models::variety(name).remains),
+        // the far remains have no debris of their own: the near ones'
+        // (none, for some: then no remains, `vegetation::spawn`)
+        Tier::RemainsFar if debris_only => b.debris(&crate::models::variety(name).remains),
+        Tier::Near | Tier::Mid | Tier::Full => b.model(crate::models::live(name)),
         Tier::Proxy => b.proxy(name, false),
         Tier::Far => b.proxy(name, true),
         Tier::RemainsNear => b.remains(&crate::models::variety(name).remains),
@@ -131,6 +168,29 @@ pub fn crown_radius(name: &str) -> f32 {
 pub fn crown_tone(name: &str) -> f32 {
     let p = proxy_of(name);
     (0.5 * (p.shade_low + p.shade_high)).powf(2.2)
+}
+
+/// How much wider a scanned plant is drawn than it was scanned
+/// (2026-11-04): its crown brought to the width of the variety's own
+/// (the leaves' span across, over the height), so a stand covers the
+/// ground as the island's fuels were drawn: Poly Haven's Aleppo pine is a
+/// slim tree where ours spread an umbrella, its *Searsia* half as wide as
+/// our lentisk. Measured on the scan's `lod2` (all levels alike), within
+/// 0.6..1.8.
+fn scan_stretch(name: &'static str) -> f32 {
+    let span = |points: &mut dyn Iterator<Item = [f32; 3]>| {
+        let (lo, hi) = points.fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
+            ([lo[0].min(p[0]), lo[1].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[2])])
+        });
+        0.5 * ((hi[0] - lo[0]) + (hi[1] - lo[1]))
+    };
+    let m = crate::models::live(name);
+    let ours = span(&mut m.positions.iter().zip(&m.wood).filter(|(_, w)| !**w).map(|(p, _)| *p));
+    let Some((vertices, _, _)) = crate::models::scan_of(name).and_then(|p| crate::models::scans()?.level(p, "lod2")) else {
+        return 1.0;
+    };
+    let scanned = span(&mut vertices.iter().filter(|v| v.leaf).map(|v| v.position));
+    (ours / scanned.max(1e-3)).clamp(0.6, 1.8)
 }
 
 /// `name`'s lobed stand-in, the browser's plant (2026-11-02): the authored
@@ -154,8 +214,11 @@ pub fn lobed_mesh(name: &'static str) -> PlantMesh {
 /// repeats it over the lobes from its corner.
 pub fn canopy_tile() -> [f32; 2] {
     let [u0, v0, u1, v1] = crate::models::variety(crate::models::variety_names(crate::models::SPECIES[0])[0]).canopy;
-    [u1 - u0, v1 - v0]
+    super::atlas::layout().authored_uv([u1 - u0, v1 - v0])
 }
+
+/// The most lumps a scanned plant has far away ([`Builder::scan_lumps`]).
+const MAX_LUMPS: usize = 6;
 
 /// How much of its cards' reach a lump of [`lobed_mesh`] fills: the cards'
 /// leaves do not reach their corners, and a lump as wide as their box read
@@ -217,6 +280,13 @@ struct Builder {
     /// Linear colour and occlusion.
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
+    /// A scanned card's right and up axes (zero elsewhere).
+    cards: Vec<[Vec3; 2]>,
+    /// How much a scanned plant is stretched across ([`scan_stretch`]).
+    stretch: Vec<f32>,
+    /// The uv points into the scans' cards (`atlas::Layout::scan_uv`), not
+    /// into the authored atlas.
+    scan_uv: Vec<bool>,
 }
 
 impl Builder {
@@ -227,7 +297,46 @@ impl Builder {
         self.kinds.push(kind);
         self.uvs.push(uv);
         self.colors.push(color);
+        self.cards.push([Vec3::ZERO; 2]);
+        self.stretch.push(1.0);
+        self.scan_uv.push(false);
         i
+    }
+
+    /// A scanned plant's level (`models::Scans::level`): the cards leaves
+    /// painted by the scans' atlas, their mean colour (`leaf_rgb`) brought
+    /// to the variety's crown (`target`, the palette the island's fuels
+    /// are read by; the plant's tint over it); the wood the bark's own
+    /// colour (over the atlas grey, which halves it: the colour travels
+    /// halved and is doubled). The leaves occluded toward the bottom and
+    /// the inside of the crown.
+    /// Stretched across by `stretch` ([`scan_stretch`]): positions and
+    /// the cards' axes by it, normals by its inverse.
+    fn scan(&mut self, vertices: &[crate::models::ScanVertex], indices: &[u32], leaf_rgb: [f32; 3], target: [f32; 3], stretch: f32) {
+        let s = Vec3::new(stretch, 1.0, stretch);
+        let leaf = [0, 1, 2].map(|k| (0.5 * target[k] / leaf_rgb[k].max(1e-3)).clamp(0.05, 1.0));
+        let (lo, hi) = vertices.iter().filter(|v| v.leaf).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
+            (lo.min(Vec3::from(v.position) * s), hi.max(Vec3::from(v.position) * s))
+        });
+        let grey = crate::models::atlas().grey;
+        let start = self.positions.len() as u32;
+        for v in vertices {
+            let p = Vec3::from(v.position) * s;
+            let n = Some((Vec3::from(v.normal) / s).normalize_or_zero());
+            let i = if v.leaf {
+                let i = self.vertex(p, n, Kind::Leaf, v.uv, [leaf[0], leaf[1], leaf[2], crown_occlusion(p, lo, hi)]);
+                // as scanned: the shader tests them against the view
+                // unstretched (`plant_common::card_hidden`)
+                self.cards[i as usize] = [Vec3::from(v.card_a), Vec3::from(v.card_b)];
+                self.stretch[i as usize] = stretch;
+                self.scan_uv[i as usize] = true;
+                i
+            } else {
+                self.vertex(p, n, Kind::Wood, grey, [v.color[0], v.color[1], v.color[2], 0.8])
+            };
+            let _ = i;
+        }
+        self.indices.extend(indices.iter().map(|&i| start + i));
     }
 
     /// The authored model: its normals (a leaf card lights as part of its
@@ -457,6 +566,109 @@ impl Builder {
         self.indices.extend(piece.indices.iter().map(|i| start + i));
     }
 
+    /// A scanned plant from far away (2026-11-04): each cluster of its
+    /// `lod3` (three crossed cards about one centre) a closed lump, opaque
+    /// and single-sided, as wide as its cards reach (`LOBE_FILL`), in the
+    /// variety's crown colour over the atlas grey (which halves it, as the
+    /// colour is doubled: the colour itself), darker toward the bottom and
+    /// the heart of the crown. No cut-out, so no fragment is drawn twice for
+    /// a leaf's edge: the far forest's cost.
+    fn scan_lumps(&mut self, vertices: &[crate::models::ScanVertex], indices: &[u32], colour: [f32; 3], stretch: f32) {
+        let s = Vec3::new(stretch, 1.0, stretch);
+        // the cards: the leaf vertices joined by triangles
+        let n = vertices.len();
+        let mut of: Vec<usize> = (0..n).collect();
+        fn root(of: &mut [usize], mut i: usize) -> usize {
+            while of[i] != i {
+                of[i] = of[of[i]];
+                i = of[i];
+            }
+            i
+        }
+        for t in indices.chunks_exact(3) {
+            let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
+            if vertices[a].leaf && vertices[b].leaf && vertices[c].leaf {
+                for (x, y) in [(a, b), (b, c)] {
+                    let (rx, ry) = (root(&mut of, x), root(&mut of, y));
+                    of[rx] = ry;
+                }
+            }
+        }
+        let mut cards: BTreeMap<usize, Vec<Vec3>> = BTreeMap::new();
+        for i in (0..n).filter(|&i| vertices[i].leaf) {
+            let r = root(&mut of, i);
+            cards.entry(r).or_default().push(Vec3::from(vertices[i].position) * s);
+        }
+        // the clusters: cards about one centre
+        let mut clusters: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+        for pts in cards.values() {
+            let mid = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+            let (lo, hi) = pts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+            match clusters.iter_mut().find(|c| c.0.distance(mid) < 1e-3) {
+                Some(c) => (c.1, c.2) = (c.1.min(lo), c.2.max(hi)),
+                None => clusters.push((mid, lo, hi)),
+            }
+        }
+        // at most `MAX_LUMPS`: the two nearest merged, their boxes joined
+        while clusters.len() > MAX_LUMPS {
+            let mut best = (f32::MAX, 0, 1);
+            for i in 0..clusters.len() {
+                for j in i + 1..clusters.len() {
+                    let d = ((clusters[i].1 + clusters[i].2) - (clusters[j].1 + clusters[j].2)).length_squared();
+                    if d < best.0 {
+                        best = (d, i, j);
+                    }
+                }
+            }
+            let (_, i, j) = best;
+            let b = clusters.swap_remove(j);
+            clusters[i].1 = clusters[i].1.min(b.1);
+            clusters[i].2 = clusters[i].2.max(b.2);
+        }
+        let (crown_lo, crown_hi) = clusters.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), c| (lo.min(c.1), hi.max(c.2)));
+        let grey = crate::models::atlas().grey;
+        let colour = colour.map(|c| c.clamp(0.0, 1.0));
+        // an octahedron, its corners pushed in and out a little per lump,
+        // turned per lump so that the lumps do not line up
+        let corners: [Vec3; 6] = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z];
+        const FACES: [[u32; 3]; 8] = [[2, 4, 0], [2, 0, 5], [2, 5, 1], [2, 1, 4], [3, 0, 4], [3, 5, 0], [3, 1, 5], [3, 4, 1]];
+        for (k, &(_, lo, hi)) in clusters.iter().enumerate() {
+            let centre = (lo + hi) * 0.5;
+            let reach = ((hi - lo) * 0.5 * LOBE_FILL).max(Vec3::splat(1e-3));
+            let start = self.positions.len() as u32;
+            let turn = Quat::from_rotation_y(k as f32 * 0.7);
+            for (j, c) in corners.iter().enumerate() {
+                let h = ((k * 6 + j) as u32).wrapping_mul(2654435761) >> 24;
+                let bump = 0.9 + 0.2 * h as f32 / 255.0;
+                let c = &(turn * *c);
+                let p = centre + *c * reach * bump;
+                let normal = ((*c / reach).normalize_or_zero() + Vec3::Y * 0.3).normalize();
+                let occlusion = crown_occlusion(p, crown_lo, crown_hi);
+                self.vertex(p, Some(normal), Kind::Leaf, grey, [colour[0], colour[1], colour[2], occlusion]);
+            }
+            for f in FACES {
+                self.indices.extend([start + f[0], start + f[1], start + f[2]]);
+            }
+        }
+    }
+
+    /// Of the remains only the debris at the plant's foot (whole
+    /// triangles: all three vertices debris).
+    fn debris(&mut self, piece: &crate::models::Piece) {
+        let grey = crate::models::atlas().grey;
+        let mut index = std::collections::HashMap::new();
+        for t in piece.indices.chunks_exact(3).filter(|t| t.iter().all(|&i| piece.debris[i as usize])) {
+            for &i in t {
+                let v = *index.entry(i).or_insert_with(|| {
+                    let c = piece.colors[i as usize];
+                    let l = Color::srgb(c[0], c[1], c[2]).to_linear();
+                    self.vertex(Vec3::from(piece.positions[i as usize]), None, Kind::Debris, grey, [l.red, l.green, l.blue, 1.0])
+                });
+                self.indices.push(v);
+            }
+        }
+    }
+
     /// Area-weighted normals where none was given, then the packed mesh.
     fn finish(self, cutout: bool, double_sided: bool) -> PlantMesh {
         let mut faces = vec![Vec3::ZERO; self.positions.len()];
@@ -471,6 +683,7 @@ impl Builder {
         let mut vertices = Vec::with_capacity(self.positions.len() * VERTEX_BYTES as usize);
         let snorm = |v: f32| (v.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8;
         let unorm16 = |v: f32| ((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_le_bytes();
+        let layout = super::atlas::layout();
         for i in 0..self.positions.len() {
             let p = self.positions[i];
             let n = self.normals[i].unwrap_or_else(|| faces[i].normalize_or_zero());
@@ -479,12 +692,16 @@ impl Builder {
                 vertices.extend_from_slice(&v.to_le_bytes());
             }
             vertices.extend_from_slice(&[snorm(n.x), snorm(n.y), snorm(n.z), self.kinds[i].snorm() as u8]);
-            for v in self.uvs[i] {
+            let uv = if self.scan_uv[i] { layout.scan_uv(self.uvs[i]) } else { layout.authored_uv(self.uvs[i]) };
+            for v in uv {
                 vertices.extend_from_slice(&unorm16(v));
             }
             for v in self.colors[i] {
                 vertices.extend_from_slice(&unorm16(v));
             }
+            let [a, b] = self.cards[i];
+            vertices.extend_from_slice(&[snorm(a.x), snorm(a.y), snorm(a.z), snorm(self.stretch[i] * 0.5)]);
+            vertices.extend_from_slice(&[snorm(b.x), snorm(b.y), snorm(b.z), 0]);
         }
         PlantMesh { vertices, indices: self.indices.iter().map(|&i| i as u16).collect(), cutout, double_sided, canopy: false }
     }
@@ -514,8 +731,12 @@ mod tests {
     #[test]
     fn every_tier_builds() {
         for name in every_variety() {
-            for tier in [Tier::Full, Tier::Proxy, Tier::Far, Tier::RemainsNear, Tier::RemainsFar] {
+            for tier in [Tier::Full, Tier::Proxy, Tier::Far, Tier::RemainsNear, Tier::RemainsFar, Tier::Near, Tier::Mid] {
                 let m = variety_mesh(name, tier);
+                let scanned_remains = crate::models::scan_of(name).is_some() && matches!(tier, Tier::RemainsNear | Tier::RemainsFar);
+                if scanned_remains && m.triangles() == 0 {
+                    continue;
+                }
                 assert!(m.triangles() > 0, "{name} {tier:?}");
                 assert_eq!(m.vertices.len() % VERTEX_BYTES as usize, 0);
                 assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()), "{name} {tier:?}");
@@ -527,7 +748,10 @@ mod tests {
                 match tier {
                     Tier::RemainsNear | Tier::RemainsFar => {
                         assert!(kinds.iter().all(|&k| k < 0), "{name} {tier:?}: remains are twigs and debris");
-                        assert!(kinds.iter().any(|&k| k == Kind::Twig.snorm()), "{name} {tier:?}: a skeleton");
+                        // a scanned plant keeps its own charred wood: no skeleton
+                        if crate::models::scan_of(name).is_none() {
+                            assert!(kinds.iter().any(|&k| k == Kind::Twig.snorm()), "{name} {tier:?}: a skeleton");
+                        }
                     }
                     _ => assert!(kinds.iter().any(|&k| k == Kind::Leaf.snorm()), "{name} {tier:?}: leaves"),
                 }
@@ -544,11 +768,17 @@ mod tests {
         assert!(canopy_tile()[0] > 0.0 && canopy_tile()[1] > 0.0);
         for name in every_variety() {
             let [u0, v0, u1, v1] = crate::models::variety(name).canopy;
-            assert!(((u1 - u0) - canopy_tile()[0]).abs() < 1e-4 && ((v1 - v0) - canopy_tile()[1]).abs() < 1e-4, "{name}: a canopy tile of its own size");
+            // in the plants' atlas (with the scans, the authored one is a part of it)
+            let [su, sv] = super::super::atlas::layout().authored_uv([u1 - u0, v1 - v0]);
+            assert!((su - canopy_tile()[0]).abs() < 1e-4 && (sv - canopy_tile()[1]).abs() < 1e-4, "{name}: a canopy tile of its own size");
             let m = lobed_mesh(name);
             assert!(!m.cutout && !m.double_sided && m.canopy);
+            // against the authored model (a scanned variety's `lod2` may be
+            // lighter than the browser's lumps, where the scans are off)
             let full = variety_mesh(name, Tier::Full);
-            assert!(m.triangles() < full.triangles(), "{name}: {} triangles for the model's {}", m.triangles(), full.triangles());
+            if crate::models::scan_of(name).is_none() {
+                assert!(m.triangles() < full.triangles(), "{name}: {} triangles for the model's {}", m.triangles(), full.triangles());
+            }
             assert!(m.triangles() >= 20, "{name}: at least a lump");
             assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
             let kind = |i: usize| m.vertices[i * VERTEX_BYTES as usize + 15] as i8;
@@ -577,6 +807,12 @@ mod tests {
     #[test]
     fn proxies_are_cheap_and_face_out() {
         for name in every_variety() {
+            // a scanned plant's: its `lod3` cards, then opaque lumps
+            if crate::models::scan_of(name).is_some() {
+                let lumps = variety_mesh(name, Tier::Far);
+                assert!(!lumps.double_sided && !lumps.cutout && lumps.triangles() >= 20, "{name}: lumps");
+                continue;
+            }
             let full = variety_mesh(name, Tier::Full).triangles();
             for tier in [Tier::Proxy, Tier::Far] {
                 let m = variety_mesh(name, tier);

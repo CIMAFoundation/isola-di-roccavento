@@ -38,6 +38,8 @@ pub mod canopy;
 mod meshes;
 mod render;
 mod scatter;
+// the plants alight, for the flames on them (`fire_view`)
+pub(crate) mod torch;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -290,8 +292,10 @@ fn plant_lag(x: f32, y: f32) -> f32 {
 
 /// A plant's static record: foot (Bevy frame) and yaw, crown width and
 /// height (m), tint (leaf red, green, blue, wood: multipliers / 2), and its
-/// own numbers (thinning rank, sway phase, shade).
-fn instance(i: &scatter::Inst) -> [u8; INSTANCE_BYTES as usize] {
+/// own numbers (thinning rank, sway phase, shade, how closed the stand
+/// around it is: [`canopy::StandDensity`], 0 when the forest's occlusion is
+/// off).
+fn instance(i: &scatter::Inst, stand: f32) -> [u8; INSTANCE_BYTES as usize] {
     let (x, y) = (i.base.x, -i.base.z);
     let mut out = [0u8; INSTANCE_BYTES as usize];
     for (k, v) in [i.base.x, i.base.y, i.base.z, i.yaw, i.scale.x, i.scale.y].into_iter().enumerate() {
@@ -299,7 +303,7 @@ fn instance(i: &scatter::Inst) -> [u8; INSTANCE_BYTES as usize] {
     }
     out[24..28].copy_from_slice(&scatter::tint_bytes(i));
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    out[28..32].copy_from_slice(&[byte(plant_rank(x, y)), byte(hash01(x, y, 0x7A11)), byte(hash01(x, y, 0x5AD3)), 0]);
+    out[28..32].copy_from_slice(&[byte(plant_rank(x, y)), byte(hash01(x, y, 0x7A11)), byte(hash01(x, y, 0x5AD3)), byte(stand)]);
     out
 }
 
@@ -348,15 +352,45 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
     // of the lumps and shadowed them in hard notches)
     let lobes = gfx.lobes;
     let thin_by_count = !remains;
+    let density = canopy::forest_shade().then(|| canopy::StandDensity::new(scn));
+
+    // the trial of full-resolution models (`hi_trees`): the nearest
+    // broadleaves around a point, taken out of the instanced plants
+    #[cfg(not(target_arch = "wasm32"))]
+    let hi = crate::hi_trees::spec().map(|spec| {
+        let mut found: Vec<(f32, Vec3, f32, f32)> = Vec::new();
+        for r0 in (0..rows).step_by(tile_cells) {
+            for c0 in (0..cols).step_by(tile_cells) {
+                let cells = (r0, (r0 + tile_cells).min(rows), c0, (c0 + tile_cells).min(cols));
+                for i in scatter::scatter_tile(scn, gfx.vegetation, cells).inst.iter().filter(|i| crate::hi_trees::replaces(i.name)) {
+                    let d = Vec2::new(i.base.x, -i.base.z).distance(spec.at);
+                    if d < spec.radius {
+                        found.push((d, i.base, i.yaw, i.scale.y));
+                    }
+                }
+            }
+        }
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.truncate(spec.max);
+        let keys: std::collections::HashSet<(u32, u32)> = found.iter().map(|f| (f.1.x.to_bits(), f.1.z.to_bits())).collect();
+        let spots = found.iter().map(|f| crate::hi_trees::HiSpot { path: spec.path.clone(), foot: f.1, yaw: f.2, height: Some(f.3) }).collect();
+        commands.insert_resource(crate::hi_trees::HiTrees { spots });
+        keys
+    });
+    #[cfg(target_arch = "wasm32")]
+    let hi: Option<std::collections::HashSet<(u32, u32)>> = None;
 
     let mut meshes: Vec<PlantMesh> = Vec::new();
-    let mut mesh_of: HashMap<(&'static str, Tier), u32> = HashMap::new();
+    let mut mesh_of: HashMap<(&'static str, Tier), Option<u32>> = HashMap::new();
     let (mut groups, mut tiles) = (Vec::new(), Vec::new());
     let mut plants = 0usize;
     for r0 in (0..rows).step_by(tile_cells) {
         for c0 in (0..cols).step_by(tile_cells) {
             let cells = (r0, (r0 + tile_cells).min(rows), c0, (c0 + tile_cells).min(cols));
-            let stand = scatter::scatter_tile(scn, gfx.vegetation, cells);
+            let mut stand = scatter::scatter_tile(scn, gfx.vegetation, cells);
+            if let Some(keys) = &hi {
+                stand.inst.retain(|i| !keys.contains(&(i.base.x.to_bits(), i.base.z.to_bits())));
+            }
             if stand.inst.is_empty() {
                 continue;
             }
@@ -375,19 +409,27 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
                     list = sorted;
                 }
                 let mut tiers = [None; TIERS];
+                // a scanned plant: its `lod3` for the proxy, lumps of it far away
+                let scanned = crate::models::scan_of(name).is_some();
                 for (tier, on) in [
                     (Tier::Full, full),
                     (Tier::Proxy, true),
-                    (Tier::Far, far),
+                    (Tier::Far, far || scanned),
                     (Tier::RemainsNear, remains && full),
                     (Tier::RemainsFar, remains),
+                    (Tier::Near, full && scanned),
+                    (Tier::Mid, full && scanned),
                 ] {
                     if on {
+                        // `None`: nothing to draw (a scanned plant's remains without debris)
                         let id = *mesh_of.entry((name, tier)).or_insert_with(|| {
-                            meshes.push(if tier == Tier::Proxy && lobes { meshes::lobed_mesh(name) } else { meshes::variety_mesh(name, tier) });
-                            meshes.len() as u32 - 1
+                            let mesh = if tier == Tier::Proxy && lobes { meshes::lobed_mesh(name) } else { meshes::variety_mesh(name, tier) };
+                            (mesh.triangles() > 0).then(|| {
+                                meshes.push(mesh);
+                                meshes.len() as u32 - 1
+                            })
                         });
-                        tiers[tier as usize] = Some(id);
+                        tiers[tier as usize] = id;
                     }
                 }
                 let mut instances = Vec::with_capacity(list.len() * INSTANCE_BYTES as usize);
@@ -397,7 +439,7 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
                 for i in &list {
                     let (a, b) = plant_box(i.base, i.scale);
                     (glo, ghi) = (glo.min(a), ghi.max(b));
-                    let record = instance(i);
+                    let record = instance(i, density.as_ref().map_or(0.0, |d| d.at(Pos { x: i.base.x, y: -i.base.z })));
                     ranks.push(record[28]);
                     instances.extend_from_slice(&record);
                     let (x, y) = (i.base.x, -i.base.z);
@@ -432,7 +474,7 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
         meshes,
         groups,
         tiles,
-        atlas: atlas::atlas(),
+        atlas: atlas::plant_atlas(),
         remains,
         canopy_tile: meshes::canopy_tile(),
         thin_by_count,
@@ -614,7 +656,7 @@ impl Vegetation {
             meshes,
             groups,
             tiles,
-            atlas: atlas::atlas(),
+            atlas: atlas::plant_atlas(),
             remains: true,
             canopy_tile: meshes::canopy_tile(),
             thin_by_count: false,

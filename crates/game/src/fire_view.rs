@@ -30,7 +30,7 @@ use scenario::Pos;
 
 use crate::field::{noise, FireField};
 use crate::streamed_mesh::{push_vertex, Shape, Streamed, StreamedFrame};
-use crate::fire_shader::{FireMaterial, SmokeMaterial};
+use crate::fire_shader::{FireMaterial, FireVolumeMaterial, SmokeMaterial, SmokeVolumeMaterial};
 use crate::sim::Sim;
 use crate::textures;
 
@@ -42,12 +42,105 @@ const FIRE_MAP_MIN_INTERVAL_S: f32 = 0.15;
 /// a cell alight for 20 minutes (`fire::BURNOUT_S`), which is residence time
 /// including smouldering; the flaming zone of a real fire is a band of tens of
 /// metres, not the whole burnt area.
-const FLAMING_S: f32 = 900.0;
+/// 2026-11-04 (the user: «lo voglio più realistico»): from 900 s, which
+/// drew a carpet of flames a hundred metres deep behind the front.
+pub(crate) const FLAMING_S: f32 = 540.0;
 
 /// Caps, all of them per-frame geometry budgets rather than physical limits.
 const MAX_FLAME_CELLS: usize = if crate::quality::WEBGL2 { 600 } else { 3_500 };
-const MAX_SMOKE: usize = if crate::quality::WEBGL2 { 100 } else { 800 };
+/// 2026-11-05: from 1400; fewer, bigger puffs billow, many small ones haze.
+const MAX_SMOKE: usize = if crate::quality::WEBGL2 { 100 } else { 900 };
 const MAX_EMBERS: usize = if crate::quality::WEBGL2 { 60 } else { 525 };
+/// Burning plants given flames of their own (`plant_torches`), the nearest
+/// to the camera first, and how far from it they are looked for.
+const MAX_TORCHES: usize = if crate::quality::WEBGL2 { 150 } else { 1_200 };
+const TORCH_RADIUS_M: f32 = 1_400.0;
+
+/// The front's tongues are drawn at toy scale so the fire reads from the
+/// play camera (`update_flames`); close to the camera they shrink toward
+/// their true flame length, where the burning plants carry their own
+/// flames. Between these distances from the camera (m) the scale blends.
+const TRUE_SCALE_NEAR_M: f32 = 220.0;
+const TOY_SCALE_FAR_M: f32 = 750.0;
+/// Past this distance from the camera (m) a cell keeps its first tongue
+/// only, over the next 40 % of it (`CachedTongue::rank`).
+const FAR_TONGUES_M: f32 = 450.0;
+
+/// The flames as volumes (2026-11-04, `shaders/fire_volume.wesl`): near the
+/// camera the front's tongues give way to ray-marched boxes over the
+/// flaming band, which have thickness and break into licks and wisps.
+/// WebGL2 has no 3D textures worth the cost on phones.
+///
+/// **Off since 2026-11-05**, an experiment: measured with `KIOSK_SNAP_BENCH`
+/// at 4x the pixels the smoke volumes took the frame from 20 to 76 ms on
+/// the play camera and from 26 to 136 ms at 700 m from the fire, the
+/// flame volumes added 5–10 ms up close, and neither looked better than
+/// the billboards (a dithered carpet of fire, a dark stain of smoke).
+/// `KIOSK_VOLUMI=scatole` turns them on, for a comparison (`=1` is the
+/// screen-space march, `fire_volumetric`).
+pub const VOLUMES: bool = !crate::quality::WEBGL2;
+
+/// Whether the volumes are drawn: only with `KIOSK_VOLUMI=scatole`, where built in.
+pub fn volumes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| VOLUMES && std::env::var("KIOSK_VOLUMI").is_ok_and(|v| v == "scatole"))
+}
+
+/// Whether the smoke is a volume: with the flames', unless `KIOSK_FUMO=0`
+/// (the puffs, as on WebGL2).
+pub fn smoke_volumes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| volumes_on() && std::env::var("KIOSK_FUMO").map_or(true, |v| v != "0"))
+}
+
+/// The puffs' roll forward from an empty state (`update_flames`): steps and
+/// seconds a step, a minute of plume.
+const PREROLL_STEPS: usize = 45;
+const PREROLL_DT_S: f32 = 1.0;
+
+/// Metres a step of the march, up close (`KIOSK_VOL_PASSO`, for the bench).
+fn vol_step_m() -> f32 {
+    std::env::var("KIOSK_VOL_PASSO").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+}
+/// Nearer than `VOL_FULL_M` to the eye the volumes alone burn; past
+/// `VOL_END_M` the tongues alone. Between, the tongues grow as the volumes
+/// fade, so nothing pops.
+const VOL_FULL_M: f32 = 300.0;
+const VOL_END_M: f32 = 480.0;
+/// Fire cells a volume box spans on a side.
+const VOL_BLOCK: usize = 3;
+/// The smoke as a volume (`shaders/smoke_volume.wesl`): a box per block of
+/// `SMOKE_BLOCK` cells of smoking ground, sheared downwind. With it the
+/// front spawns no puffs (the burning houses keep theirs). The plume's
+/// top (m above the ground), its rise (m/s), the seconds a cell smokes
+/// (as the puffs: three flaming times), and metres a step of the march.
+const SMOKE_BLOCK: usize = 8;
+const SMOKE_TOP_M: f32 = 380.0;
+const SMOKE_RISE_MS: f32 = 8.0;
+const SMOKE_S: f32 = FLAMING_S * 3.0;
+const SMOKE_STEP_M: f32 = 15.0;
+/// Extinction per metre at full density, noise period (m), gain.
+const SMOKE_LOOK: Vec4 = Vec4::new(0.06, 170.0, 1.0, FLAMING_S);
+/// The flames' height over every cell, metres as half floats, one texel per
+/// fire cell laid out as the fire map (`ground_mask::GRASS_MAP`), written
+/// with it (`update_fire_map`): the volumes read their local height from
+/// it, so it runs smoothly across the boxes and follows the sim's own
+/// intensity (`vol_flame_m`).
+pub const FLAME_MAP: Handle<Image> = bevy::asset::uuid_handle!("b1c4e8a2-6f3d-4a97-8e21-7d5c9b0a3f16");
+/// Metres of noise per period, periods risen per second, emission gain and
+/// absorption per metre of dense flame (`VolumeParams::look`).
+const VOL_LOOK: Vec4 = Vec4::new(1.0, 14.0, 0.9, 0.45);
+
+/// As `CLIMB_S_PER_M` and `CROWN_SHARE` in `shaders/plant_common.wesl`:
+/// seconds the fire takes to climb a metre of a plant, and the share of
+/// its flaming time a point of the crown burns for. Keep them in step, or
+/// the flames leave the crown before it chars.
+const CLIMB_S_PER_M: f32 = 2.8;
+const CROWN_SHARE: f32 = 0.5;
+/// The share of a point's burn time its leaves flame for: the shader eats
+/// them by about this point of their burn (`burn_gone` in
+/// `plant_common.wesl`); after it the twigs only glow.
+const FLAME_SHARE: f32 = 0.6;
 
 /// Shape of the firebrand's flight, mirroring `compute_spotting` in
 /// `propagator-core/src/kernel.rs` — the median landing distance is linear in
@@ -83,6 +176,39 @@ pub struct FireView {
     tongues_key: (u64, u32),
     /// Vertex count of the last flame mesh, to size the next allocation.
     last_flame_verts: usize,
+    /// The burning plants of the frame (`plant_torches`), kept for its room.
+    torches: Vec<crate::vegetation::torch::Torch>,
+    /// The flame volumes (`update_volumes`): their mesh, the boxes of the
+    /// last sim state, and the box the eye was in when the mesh was written.
+    volumes: Option<Streamed>,
+    boxes: Vec<VolumeBox>,
+    boxes_key: Option<((u64, u32), IVec3)>,
+    boxes_written: Option<Option<usize>>,
+    /// The smoke volumes (`update_smoke_volumes`): mesh, material, the
+    /// blocks of smoking ground (cell block row and column, ground range).
+    smoke_volumes: Option<(Streamed, Handle<SmokeVolumeMaterial>)>,
+    smoke_blocks: Vec<SmokeBlock>,
+    smoke_key: Option<(u64, u32)>,
+}
+
+/// A block of smoking ground: its footprint centre (Bevy x, z), the
+/// ground's range under it (m).
+#[derive(Clone, Copy)]
+struct SmokeBlock {
+    x: f32,
+    z: f32,
+    g_lo: f32,
+    g_hi: f32,
+}
+
+/// A volume of flame over a block of cells: an axis-aligned box in Bevy
+/// space, the flame height (m) and heat it carries.
+#[derive(Clone, Copy)]
+struct VolumeBox {
+    centre: Vec3,
+    half: Vec3,
+    flame_m: f32,
+    heat: f32,
 }
 
 /// Everything about a front tongue that does not depend on the frame's clock
@@ -90,6 +216,8 @@ pub struct FireView {
 struct CachedTongue {
     foot: Vec3,
     flame_m: f32,
+    /// The flame length the fire has (Byram), drawn up close.
+    true_m: f32,
     ratio: f32,
     phase: f32,
     heat: f32,
@@ -98,6 +226,9 @@ struct CachedTongue {
     crown_h: f32,
     crown_cyc: f32,
     crown_lift: f32,
+    /// Which of its cell's tongues this is: from afar only the first is
+    /// drawn (`update_flames`).
+    rank: u8,
 }
 
 /// A drifting particle: smoke puff or ember, which differ only in how they are
@@ -118,16 +249,19 @@ struct Particle {
 
 pub fn setup(
     mut commands: Commands,
+    sim: Res<Sim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut smoke_materials: ResMut<Assets<SmokeMaterial>>,
     mut fire_materials: ResMut<Assets<FireMaterial>>,
+    volume_materials: Option<ResMut<Assets<FireVolumeMaterial>>>,
+    smoke_volume_materials: Option<ResMut<Assets<SmokeVolumeMaterial>>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let flames = Streamed::new(&mut meshes, TONGUE, false);
     let smoke_mesh = Streamed::new(&mut meshes, BILLBOARD, true);
     let sparks = Streamed::new(&mut meshes, BILLBOARD, false);
 
-    let flame_tex = images.add(textures::flame_tongue());
+    let flame_tex = images.add(textures::flame_flipbook());
     let puff_tex = images.add(textures::puff());
     let spark_tex = images.add(textures::spark());
 
@@ -160,6 +294,65 @@ pub fn setup(
         bevy::light::NotShadowCaster,
     ));
 
+    // The flame volumes: boxes over the band, the world's fire map and
+    // heights to march through (`update_volumes`).
+    let volumes = volume_materials.filter(|_| volumes_on()).map(|mut volume_materials| {
+        let volumes = Streamed::new(&mut meshes, BOX, true);
+        let (t, w) = (&sim.scn.terrain, &sim.scn.world);
+        let (heights, elev_lo, elev_scale) = textures::heights(t);
+        let mut flame_map = crate::ground_mask::grass_map(&sim.scn);
+        flame_map.texture_descriptor.format = bevy::render::render_resource::TextureFormat::R16Float;
+        flame_map.data = Some(vec![0u8; w.fire_cols * w.fire_rows * 2]);
+        let _ = images.insert(&FLAME_MAP, flame_map);
+        let noise = images.add(textures::noise_volume());
+        let heights = images.add(heights);
+        let mat = volume_materials.add(FireVolumeMaterial {
+            params: crate::fire_shader::VolumeParams {
+                rect: Vec4::new(1.0 / w.width_m, 1.0 / w.height_m, t.posting, t.height_m),
+                fade: Vec4::new(FLAMING_S, VOL_FULL_M, VOL_END_M, vol_step_m()),
+                look: VOL_LOOK,
+                elev: Vec4::new(elev_lo, elev_scale, 0.0, 0.0),
+            },
+            noise: noise.clone(),
+            fire_map: crate::ground_mask::GRASS_MAP,
+            heights: heights.clone(),
+            flame_map: FLAME_MAP,
+        });
+        commands.spawn((
+            (Mesh3d(volumes.handle.clone()), MeshMaterial3d(mat)),
+            bevy::camera::visibility::NoFrustumCulling,
+            bevy::light::NotShadowCaster,
+        ));
+        (volumes, noise, heights, elev_lo, elev_scale)
+    });
+    let smoke_volumes = match (volumes.as_ref(), smoke_volume_materials) {
+        (Some((_, noise, heights, elev_lo, elev_scale)), Some(mut smoke_volume_materials)) if smoke_volumes_on() => {
+            let (t, w) = (&sim.scn.terrain, &sim.scn.world);
+            let mat = smoke_volume_materials.add(SmokeVolumeMaterial {
+                params: crate::fire_shader::SmokeParams {
+                    rect: Vec4::new(1.0 / w.width_m, 1.0 / w.height_m, t.posting, t.height_m),
+                    plume: Vec4::new(SMOKE_TOP_M, SMOKE_RISE_MS, SMOKE_S, SMOKE_STEP_M),
+                    wind: smoke_wind(&sim),
+                    look: SMOKE_LOOK,
+                    elev: Vec4::new(*elev_lo, *elev_scale, 0.0, 0.0),
+                },
+                noise: noise.clone(),
+                fire_map: crate::ground_mask::GRASS_MAP,
+                heights: heights.clone(),
+                flame_map: FLAME_MAP,
+            });
+            let mesh = Streamed::new(&mut meshes, BOX, true);
+            commands.spawn((
+                (Mesh3d(mesh.handle.clone()), MeshMaterial3d(mat.clone())),
+                bevy::camera::visibility::NoFrustumCulling,
+                bevy::light::NotShadowCaster,
+            ));
+            Some((mesh, mat))
+        }
+        _ => None,
+    };
+    let volumes = volumes.map(|v| v.0);
+
     commands.insert_resource(FireView {
         flames,
         smoke_mesh,
@@ -173,6 +366,14 @@ pub fn setup(
         tongues: Vec::new(),
         tongues_key: (u64::MAX, 0),
         last_flame_verts: 0,
+        torches: Vec::new(),
+        volumes,
+        boxes: Vec::new(),
+        boxes_key: None,
+        boxes_written: None,
+        smoke_volumes,
+        smoke_blocks: Vec::new(),
+        smoke_key: None,
     });
 }
 
@@ -234,6 +435,27 @@ pub fn update_fire_map(
             data[at + 6..at + 8].copy_from_slice(&f16(f32::from(cleared[i])).to_le_bytes());
         }
     }
+    drop(image);
+    // the volumes' flame heights (`FLAME_MAP`), where something burns
+    let Some(mut flame_map) = images.get_mut(&FLAME_MAP) else { return };
+    let Some(data) = flame_map.data.as_mut() else { return };
+    let intensity = sim.fire.intensity();
+    for r in 0..w.fire_rows {
+        for c in 0..w.fire_cols {
+            let i = r * w.fire_cols + c;
+            let h = if state[i] == CellFire::Unburnt { 0.0 } else { vol_flame_m(intensity[i]) };
+            let at = ((w.fire_rows - 1 - r) * w.fire_cols + c) * 2;
+            data[at..at + 2].copy_from_slice(&f16(h).to_le_bytes());
+        }
+    }
+}
+
+/// The flame volumes' height (m) over a cell of fireline intensity `fli`:
+/// twice Byram's length, since the wisps reach past the mean flame and
+/// the fire has to be seen from a hundred metres, with a floor for the
+/// creeping fire.
+pub(crate) fn vol_flame_m(fli: f32) -> f32 {
+    (flame_length_m(fli) * 2.2).clamp(5.0, 30.0)
 }
 
 /// Rows per flame tongue ribbon.
@@ -255,15 +477,28 @@ const TONGUE_INDICES: [u32; TONGUE_SEGMENTS * 6] = {
 };
 /// A billboard as [`QuadBuilder::billboard`] lays it out.
 const BILLBOARD: Shape = Shape { verts: 4, indices: &[0, 1, 2, 0, 2, 3] };
+/// A volume box as [`QuadBuilder::volume`] lays it out: corner `i` at
+/// (`i & 1`, `i >> 1 & 1`, `i >> 2 & 1`) of the box, every face wound
+/// counter-clockwise seen from outside (the material culls the back).
+const BOX: Shape = Shape {
+    verts: 8,
+    indices: &[
+        1, 3, 7, 1, 7, 5, // +x
+        0, 4, 6, 0, 6, 2, // -x
+        2, 6, 7, 2, 7, 3, // +y
+        0, 1, 5, 0, 5, 4, // -y
+        4, 5, 7, 4, 7, 6, // +z
+        0, 2, 3, 0, 3, 1, // -z
+    ],
+};
 
 /// What a row of every tongue shares: its height share `s` (0 foot, 1 tip)
-/// and powers, the taper `(1 − s)^0.85`, and the waves' phase offsets along
+/// and powers, and the waves' phase offsets along
 /// the tongue as (cos, sin): 4.5 s, 7 s and 3 s.
 struct TongueRow {
     s: f32,
     s2: f32,
     s3: f32,
-    taper: f32,
     w1: (f32, f32),
     w2: (f32, f32),
     w3: (f32, f32),
@@ -278,7 +513,7 @@ fn tongue_rows() -> &'static [TongueRow; TONGUE_SEGMENTS + 1] {
                 let (sin, cos) = (k * s).sin_cos();
                 (cos, sin)
             };
-            TongueRow { s, s2: s * s, s3: s * s * s, taper: (1.0 - s).powf(0.85), w1: cs(4.5), w2: cs(7.0), w3: cs(3.0) }
+            TongueRow { s, s2: s * s, s3: s * s * s, w1: cs(4.5), w2: cs(7.0), w3: cs(3.0) }
         })
     })
 }
@@ -326,10 +561,20 @@ impl QuadBuilder {
         // joined by `BILLBOARD`'s indices
     }
 
-    /// A flame tongue: a ribbon of `TONGUE_SEGMENTS` rows from foot to tip.
-    /// It tapers to a point and its spine travels on two travelling waves
-    /// whose amplitude grows toward the tip, so the tongue snakes and licks
-    /// instead of bobbing. `foot` is the centre of the base; `h` the height.
+    /// A billboard with a colour per corner (bottom left, bottom right, top
+    /// right, top left), for the shaded puffs.
+    fn billboard_corners(&mut self, centre: Vec3, right: Vec3, up: Vec3, colors: [[f32; 4]; 4], normal: [f32; 3]) {
+        self.vertex(centre - right - up, normal, [0.0, 1.0], colors[0]);
+        self.vertex(centre + right - up, normal, [1.0, 1.0], colors[1]);
+        self.vertex(centre + right + up, normal, [1.0, 0.0], colors[2]);
+        self.vertex(centre - right + up, normal, [0.0, 0.0], colors[3]);
+    }
+
+    /// A flame tongue: a sheet of `TONGUE_SEGMENTS` rows from foot to tip,
+    /// on which the shader plays a filmed flame (`flame.wesl`, the
+    /// flipbook); its top sways a little on two travelling waves. The
+    /// tongue's number, from `phase`, rides in uv.x and picks its film.
+    /// `foot` is the centre of the base; `h` the height.
     #[allow(clippy::too_many_arguments)]
     fn tongue(
         &mut self,
@@ -349,6 +594,7 @@ impl QuadBuilder {
         let (a1, b1) = (t * 7.0 + phase).sin_cos();
         let (a2, b2) = (t * 11.3 + phase * 1.7).sin_cos();
         let (a3, b3) = (t * 9.0 + phase).sin_cos();
+        let id = 2.0 * (hash01((phase * 1000.0) as i64 as u64 ^ 0x5EED) * 256.0).floor().min(255.0);
         for row in tongue_rows() {
             let (s, s2, s3) = (row.s, row.s2, row.s3);
             // Two waves running upward at different speeds: the second makes
@@ -356,23 +602,61 @@ impl QuadBuilder {
             let w1 = a1 * row.w1.0 - b1 * row.w1.1; // sin(t·7 + phase − 4.5 s)
             let w2 = a2 * row.w2.0 - b2 * row.w2.1; // sin(t·11.3 + 1.7 phase − 7 s)
             let w3 = a3 * row.w3.0 + b3 * row.w3.1; // sin(t·9 + phase + 3 s)
-            let lateral = h * (0.30 * s2 * w1 + 0.12 * s3 * w2);
-            // The tip droops a little as it whips.
-            let drop = h * 0.06 * s3 * (w1 * w2).abs();
-            let width = half_w * row.taper * (1.0 + 0.18 * w3);
-            let centre = foot + Vec3::Y * (h * s - drop) + right * lateral;
+            // The film moves the flame (`flame.wesl`, a flipbook): the sheet
+            // only sways at the top, and keeps its width, or the frames
+            // would be squeezed into a point (2026-11-05).
+            let lateral = h * (0.08 * s2 * w1 + 0.04 * s3 * w2);
+            let width = half_w * (1.0 + 0.04 * w3) * (1.0 - 0.15 * s);
+            let centre = foot + Vec3::Y * (h * s) + right * lateral;
             let color = [
                 bottom[0] + (top[0] - bottom[0]) * s,
                 bottom[1] + (top[1] - bottom[1]) * s,
                 bottom[2] + (top[2] - bottom[2]) * s,
-                1.0,
+                // the foot's fade (`flame.wesl`): 1 on the ground's tongues
+                bottom[3] + (top[3] - bottom[3]) * s,
             ];
-            // uv.y: 1 at the foot, 0 at the tip (what the shader expects).
+            // uv.y: 1 at the foot, 0 at the tip (what the shader expects);
+            // uv.x: 2 id + 0.5 across the sheet, the tongue's own number
+            // choosing its film (`flame.wesl`)
             let side = right * width;
-            self.vertex(centre - side, [0.0, 1.0, 0.0], [0.0, 1.0 - s], color);
-            self.vertex(centre + side, [0.0, 1.0, 0.0], [1.0, 1.0 - s], color);
+            self.vertex(centre - side, [0.0, 1.0, 0.0], [id + 0.5, 1.0 - s], color);
+            self.vertex(centre + side, [0.0, 1.0, 0.0], [id + 1.5, 1.0 - s], color);
         }
         // joined by `TONGUE`'s indices
+    }
+
+    /// A flame volume (`shaders/fire_volume.wesl`): the box's corners, each
+    /// carrying the box itself (centre in the normal slot, half extents x
+    /// and z in the uv, flame height, heat and half height in the colour).
+    /// `quad`: the four corners of a quad across the view instead, for a box
+    /// around the eye (it stands on the `+z` face; the rest degenerates).
+    fn volume(&mut self, b: &VolumeBox, quad: Option<[Vec3; 4]>) {
+        let normal = b.centre.into();
+        let uv = [b.half.x, b.half.z];
+        let color = [b.flame_m, b.heat, b.half.y, 0.0];
+        for i in 0..8 {
+            let p = match quad {
+                Some(q) => q[if i < 4 { 0 } else { [0, 1, 3, 2][i - 4] }],
+                None => b.centre + b.half * Vec3::new(if i & 1 == 1 { 1.0 } else { -1.0 }, if i & 2 == 2 { 1.0 } else { -1.0 }, if i & 4 == 4 { 1.0 } else { -1.0 }),
+            };
+            self.vertex(p, normal, uv, color);
+        }
+    }
+
+    /// A smoke volume (`shaders/smoke_volume.wesl`): the box's corners,
+    /// each carrying its block's footprint (centre in the normal slot, half
+    /// side in the uv) and the box's centre y and half height (colour).
+    fn smoke_volume(&mut self, b: &VolumeBox, blk: &SmokeBlock, half: f32, quad: Option<[Vec3; 4]>) {
+        let normal = [blk.x, (blk.g_lo + blk.g_hi) * 0.5, blk.z];
+        let uv = [half, half];
+        let color = [b.centre.y, b.half.y, 0.0, 0.0];
+        for i in 0..8 {
+            let p = match quad {
+                Some(q) => q[if i < 4 { 0 } else { [0, 1, 3, 2][i - 4] }],
+                None => b.centre + b.half * Vec3::new(if i & 1 == 1 { 1.0 } else { -1.0 }, if i & 2 == 2 { 1.0 } else { -1.0 }, if i & 4 == 4 { 1.0 } else { -1.0 }),
+            };
+            self.vertex(p, normal, uv, color);
+        }
     }
 
     /// The position of vertex `i` (tests).
@@ -391,15 +675,17 @@ impl QuadBuilder {
 pub fn update_flames(
     sim: Res<Sim>,
     time: Res<Time>,
-    camera: Query<&Transform, (With<Camera3d>, Without<crate::camera::AuxiliaryCamera>)>,
+    camera: Query<(&Transform, &Projection), (With<Camera3d>, Without<crate::camera::AuxiliaryCamera>)>,
     buildings: Res<crate::buildings::Buildings>,
+    vegetation: Option<Res<crate::vegetation::Vegetation>>,
     fog: Query<(&DistanceFog, Option<&Exposure>), With<Camera3d>>,
     suns: Query<(&GlobalTransform, &DirectionalLight)>,
     mut view: ResMut<FireView>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut frame: ResMut<StreamedFrame>,
+    mut smoke_volume_materials: Option<ResMut<Assets<SmokeVolumeMaterial>>>,
 ) {
-    let Ok(cam) = camera.single() else {
+    let Ok((cam, projection)) = camera.single() else {
         return;
     };
     let scn = &sim.scn;
@@ -435,7 +721,8 @@ pub fn update_flames(
             let arrival = sim.fire.arrival_time(*cell).unwrap_or(now as i32) as f32;
             // The flaming band: only cells the front has just crossed carry flame.
             let flaming = (1.0 - (now - arrival) / FLAMING_S).clamp(0.0, 1.0);
-            if flaming < 0.05 {
+            // the band's tail carries no lone candles: char and embers
+            if flaming < 0.2 {
                 continue;
             }
 
@@ -446,9 +733,16 @@ pub fn update_flames(
             // camera a true-height flame is a few pixels and the fire read as a
             // dark smudge; the front has to be the brightest thing on the table.
             let flame_m = (flame_length_m(fli) * 3.4).clamp(22.0, 110.0) * (0.45 + 0.55 * flaming);
+            // up close: the true length, with a floor so the band still flames
+            // (a quarter of the toy scale kept: the front must still read as
+            // a line of fire over tall grass a hundred metres off)
+            let true_m = ((flame_length_m(fli) * 1.2).clamp(1.2, 30.0) * (0.45 + 0.55 * flaming)).max(flame_m * 0.25).min(flame_m);
             // A hot cell carries several tongues, a creeping one carries a single
             // flicker. Sub-cell placement is what stops them lining up on a grid.
-            let n = (1.0 + (fli / 450.0).min(6.0) * flaming).round() as usize;
+            // (2026-11-05, the flipbook: each film is one narrow flame, so
+            // the front is drawn by many side by side: up to 12 a cell, of
+            // which only the first stays past `FAR_TONGUES_M`)
+            let n = (2.0 + (fli / 300.0).min(10.0) * flaming).round() as usize;
             let centre = scn.world.centre_of(*cell);
             let half = scn.world.cellsize * 0.5;
 
@@ -468,9 +762,13 @@ pub fn update_flames(
                 // Additive light competing with a daylit hillside: the multiplier
                 // has to be well above 1 or the flame is a pale smudge.
                 let heat = (local / 2000.0).clamp(0.55, 2.2) * (0.6 + 0.4 * flaming);
+                // tongues of a fire are not alike: a few tall, most low
+                let h3 = hash01(cell.row as u64 * 31 + cell.col as u64 * 7 + k as u64 * 104_729);
+                let vary = 0.45 + 1.1 * h3 * h3;
                 tongues.push(CachedTongue {
                     foot: Vec3::new(p.x, ground, -p.y),
-                    flame_m,
+                    flame_m: flame_m * vary,
+                    true_m: true_m * vary,
                     ratio: 0.6 + 0.4 * (local / fli.max(1.0)).min(1.5),
                     phase,
                     heat,
@@ -483,17 +781,53 @@ pub fn update_flames(
                     },
                     crown_cyc: h * 13.0 + h2 * 5.0,
                     crown_lift: if fuel >= 10 { 12.0 } else { 7.0 },
+                    rank: k.min(255) as u8,
                 });
             }
         }
         view.tongues = tongues;
     }
+    // the boxes follow the sim, and the eye by 50 m steps: their height is
+    // the flames' at that distance (`grow`), so the near ones stay tight
+    let eye_cell = (cam.translation / 50.0).floor().as_ivec3();
+    if view.volumes.is_some() && view.boxes_key != Some((key, eye_cell)) {
+        view.boxes_key = Some((key, eye_cell));
+        let mut boxes = std::mem::take(&mut view.boxes);
+        build_boxes(&sim, now, cam.translation, &mut boxes);
+        view.boxes = boxes;
+        view.boxes_written = None;
+    }
 
     let mut flames = QuadBuilder::new(false, view.last_flame_verts);
     let max_half_w = scn.world.cellsize * 1.3;
+    let eye = cam.translation;
     for c in &view.tongues {
         let flicker = 0.62 + 0.38 * (t * 5.5 + c.phase).sin() * (t * 2.3 + c.phase).cos();
-        let mut h_m = c.flame_m * flicker * c.ratio;
+        // toy scale from afar, the true flame length up close
+        let d_eye = eye.distance(c.foot);
+        let toy = smoothstep(TRUE_SCALE_NEAR_M, TOY_SCALE_FAR_M, d_eye);
+        // near the eye the volumes burn instead (`update_volumes`): the
+        // tongues shrink away as they come
+        // with the screen's volumes on (`fire_volumetric`), they draw every
+        // flame, near and far (user, 2026-11-05: «voglio tutte le fiamme
+        // volumetriche»)
+        let mut keep = if crate::fire_volumetric::on() {
+            0.0
+        } else if view.volumes.is_some() {
+            smoothstep(VOL_FULL_M, VOL_END_M, d_eye)
+        } else {
+            1.0
+        };
+        // From afar one tongue a cell (2026-11-05): seven overlapping
+        // sheets at toy scale drew a field of saturated cones; one, wider,
+        // draws the front as a ragged line of fire.
+        if c.rank > 0 {
+            keep *= 1.0 - smoothstep(FAR_TONGUES_M, FAR_TONGUES_M * 1.4, d_eye);
+        }
+        if keep <= 0.001 {
+            continue;
+        }
+        let mut h_m = c.flame_m * (c.true_m / c.flame_m + (1.0 - c.true_m / c.flame_m) * toy) * flicker * c.ratio * keep;
         let mut lift = 0.0;
         // Crowning, drawn only: now and then a tongue over tall trees
         // climbs into the canopy and roars well above the surface fire.
@@ -501,13 +835,16 @@ pub fn update_flames(
         // at random.
         if c.crown_h > 1.0 && c.flaming > 0.3 {
             let cyc = (t * 0.11 + c.crown_cyc).fract();
-            let env = if cyc < 0.22 { (std::f32::consts::PI * cyc / 0.22).sin() } else { 0.0 };
+            // up close the plants' own flames do the crowning (`plant_torches`)
+            let env = if cyc < 0.22 { (std::f32::consts::PI * cyc / 0.22).sin() } else { 0.0 } * toy;
             h_m *= 1.0 + (c.crown_h - 1.0) * env * c.flaming;
             // The tongue stands on the crown, not on the trunk's foot:
             // the shader already burns the foliage there (`burn_plant`).
             lift = env * c.flaming * c.crown_lift;
         }
-        let half_w = (h_m * 0.38).min(max_half_w);
+        // wide enough that neighbours overlap into a wall (the licks are cut
+        // in the shader, `flame.wesl`); wider still where it stands alone
+        let half_w = (h_m * (0.32 + 0.1 * smoothstep(FAR_TONGUES_M, FAR_TONGUES_M * 1.4, d_eye))).min(max_half_w);
         let heat = c.heat;
         flames.tongue(
             c.foot + Vec3::Y * lift,
@@ -521,6 +858,21 @@ pub fn update_flames(
         );
     }
 
+    if let Some(veg) = vegetation.as_deref().filter(|_| !crate::fire_volumetric::on()) {
+        let mut torches = std::mem::take(&mut view.torches);
+        gather_torches(veg, eye, &mut torches);
+        plant_torches(&mut flames, &torches, eye, right, t);
+        view.torches = torches;
+    }
+
+    // The plume is there when the fire is (2026-11-05): after a restart or
+    // a jump of the sim the puffs start from nothing and the column took a
+    // minute to build; from an empty state they are rolled forward first.
+    if view.smoke.is_empty() && view.smoke_volumes.is_none() && !crate::fire_volumetric::on() && !sim.fire.active_cells().is_empty() {
+        for _ in 0..PREROLL_STEPS {
+            step_particles(&mut view, &sim, PREROLL_DT_S, now);
+        }
+    }
     step_particles(&mut view, &sim, dt, now);
 
     // Drama where the fire meets people: a home the books count as lost burns
@@ -552,7 +904,7 @@ pub fn update_flames(
             );
         }
         // Dark smoke column and a steady rain of sparks.
-        if view.smoke.len() < MAX_SMOKE && hash01(view.seed.wrapping_add(i as u64) ^ (t * 60.0) as u64) < dt * 3.0 {
+        if view.smoke.len() < MAX_SMOKE && hash01(view.seed.wrapping_add(i as u64) ^ (t * 60.0) as u64) < dt * 4.5 {
             view.seed = view.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             let phase = hash01(view.seed);
             view.smoke.push(Particle {
@@ -582,37 +934,65 @@ pub fn update_flames(
     }
 
     let fogger = PuffFog::new(&fog, &suns, cam.translation);
+    // the sun, for the puffs' shading: toward it
+    let sun = fogger.lights.first().map_or(Vec3::Y, |l| l.0);
+    let shadow = PlumeShadow::new(&view.smoke, sun);
+    // Back to front (2026-11-05): blended in spawn order, the dark puffs
+    // inside the plume painted over its lit shell.
+    let mut order: Vec<(f32, usize)> = view.smoke.iter().enumerate().map(|(i, p)| (p.pos.distance_squared(eye), i)).collect();
+    order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let mut smoke = QuadBuilder::new(true, 4 * view.smoke.len());
-    for puff in &view.smoke {
+    for &(_, i) in &order {
+        let puff = &view.smoke[i];
         let k = (puff.age / puff.life).clamp(0.0, 1.0);
         // Grows as it disperses, darkest and densest near the fire.
-        let size = puff.size * (0.6 + 1.9 * k);
-        // Pale, toy smoke: grey near the fire, near-white as it disperses, so
-        // the plume shows the wind without burying the flames under it.
-        let shade = 0.58 + 0.34 * k;
+        let size = puff_size(puff, k);
+        // A wildfire's smoke (2026-11-05): brown-grey where it leaves the
+        // flames, grey, then pale as it rises and spreads. Albedo, not
+        // brightness: the light is added below. (The 2026-11-04 shade of
+        // 0.22 drew the plume so dark that over the scar it vanished.)
+        let albedo = Vec3::new(0.52, 0.44, 0.37).lerp(Vec3::new(0.86, 0.86, 0.88), k.powf(0.6));
         // Fade in fast, out slowly: a puff should never pop into existence.
-        // Kept thin — hundreds of puffs overlap, and at 0.55 each the plume
-        // turned into a white wall as soon as the camera dropped into it.
-        let alpha = (k * 4.0).min(1.0) * (1.0 - k).powf(1.4) * 0.22;
+        // Hundreds of puffs overlap: thin each, denser while young.
+        // Dense enough to be a plume from the play camera; thin next to
+        // the camera, so a view dropped into the smoke is not a wall.
+        let d_eye = eye.distance(puff.pos);
+        let alpha = puff_alpha(k) * smoothstep(20.0, 90.0, d_eye);
+        // From afar the puffs are a few pixels and the plume a veil: they
+        // grow with the distance (up to twice), as the far trees do.
+        let size = size * (1.0 + 0.6 * smoothstep(300.0, 1500.0, d_eye));
         let spin = puff.phase * std::f32::consts::TAU + k * 0.6;
         let (s, c) = spin.sin_cos();
         let r = (right * c + up * s) * size;
         let u = (up * c - right * s) * size;
         let (gain, offset) = fogger.at(puff.pos);
-        let c = [
-            shade * 1.05 * gain.x,
-            shade * 0.92 * gain.y,
-            shade * 0.84 * gain.z,
-            alpha,
-        ];
+        // lit orange from below by the flames, for its first seconds
+        let lit = (1.0 - k / 0.18).max(0.0);
+        let offset = offset + Vec3::new(0.55, 0.20, 0.03) * lit * lit * alpha;
+        // Lit by the sun through the plume itself (2026-11-05): the smoke
+        // between this puff and the sun shades it (`PlumeShadow`), so the
+        // top and the sunward face of the column are bright, the underside
+        // and the lee dark; the sky lights the rest. Then each puff is a
+        // ball: a pseudo-normal per corner, leaning toward the eye, shades
+        // its own side away from the sun. The flames are drawn after the
+        // smoke (`FireMaterial::depth_bias`), so it does not bury them.
+        let shade = shadow.at(puff.pos);
+        let to_eye = (eye - puff.pos).normalize_or_zero();
+        let rn = r.normalize_or_zero();
+        let un = u.normalize_or_zero();
+        let corner = |sx: f32, sy: f32| {
+            let n = (rn * sx + un * sy + to_eye * 0.9).normalize_or_zero();
+            let ndl = n.dot(sun).max(0.0);
+            let lit = albedo * gain * (0.50 + 0.50 * shade * (0.35 + 0.65 * ndl));
+            [lit.x, lit.y, lit.z, alpha]
+        };
         // The normal slot carries the fog's additive part (`smoke.wgsl`).
-        smoke.billboard(puff.pos, r, u, 1.0, c, c, offset.into());
+        smoke.billboard_corners(puff.pos, r, u, [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)], offset.into());
     }
 
     // Embers are plain round particles (`flame.wgsl`, mode 2). Colour
     // channels carry no colour: r = age share,
     // g = per-ember phase, b = gain (negative for the landing flash).
-    let eye = cam.translation;
     let mut sparks = QuadBuilder::new(false, 4 * view.embers.len());
     for ember in &view.embers {
         let k = (ember.age / ember.life).clamp(0.0, 1.0);
@@ -629,8 +1009,14 @@ pub fn update_flames(
             sparks.billboard(ember.pos, right * size, up * size, 1.0, c, c, [0.0, 1.0, 0.0]);
             continue;
         }
-        let size = (ember.size * (1.0 - 0.35 * k)).max(min_size);
-        let gain = 0.9 + 0.5 * ember.phase;
+        // a real ember is a few centimetres: drawn a metre wide it reads from
+        // the play camera, but next to the camera it was a pale disc
+        let d_eye = eye.distance(ember.pos);
+        let near_cap = d_eye * 0.003;
+        let size = (ember.size * (1.0 - 0.35 * k)).min(near_cap).max(min_size);
+        // dimmer from afar (2026-11-05): from the play camera five hundred
+        // embers at full gain were a swarm of white fireflies
+        let gain = (0.9 + 0.5 * ember.phase) * (1.0 - 0.85 * smoothstep(300.0, 1000.0, d_eye));
         let c = [k, ember.phase, gain, 1.0];
         // An oval: a little longer along the direction of travel, seen from
         // the camera. The shader draws the round-edged shape inside it.
@@ -653,8 +1039,366 @@ pub fn update_flames(
         let items = built.verts as u32 / shape.verts;
         target.write(&mut meshes, &mut frame, built.bytes, items);
     }
+    update_volumes(view, cam, projection, &mut meshes, &mut frame);
+    update_smoke_volumes(view, &sim, now, key, cam, projection, &mut meshes, &mut frame, &mut smoke_volume_materials);
 }
 
+/// The wind's drift for the smoke (`SmokeParams::wind`): Bevy x and z in
+/// m/s, the speed, and the plume's lateral margin, a share of its drift
+/// (`sway` in `smoke_volume.wesl`), never under 60 m.
+pub(crate) fn smoke_wind(sim: &Sim) -> Vec4 {
+    let weather = sim.fire.weather();
+    // `wind_dir_deg` is the bearing the wind blows *from* (Bevy -Z is north)
+    let from = (weather.wind_dir_deg as f32).to_radians();
+    let wind_ms = weather.wind_speed_kmh as f32 / 3.6;
+    let margin = (wind_ms * 6.0).max(60.0);
+    Vec4::new(-from.sin() * wind_ms, from.cos() * wind_ms, wind_ms, margin)
+}
+
+/// The box of a smoke block (`smoke_volume.wesl` computes the same): its
+/// footprint sheared downwind to the plume's top, with the margin.
+fn smoke_box(b: &SmokeBlock, half: f32, wind: Vec4) -> VolumeBox {
+    let shift = Vec2::new(wind.x, wind.y) * (SMOKE_TOP_M / SMOKE_RISE_MS);
+    let foot = Vec2::new(b.x, b.z);
+    let lo = foot.min(foot + shift) - half - wind.w;
+    let hi = foot.max(foot + shift) + half + wind.w;
+    let (bottom, top) = (b.g_lo - 5.0, b.g_hi + SMOKE_TOP_M);
+    VolumeBox {
+        centre: Vec3::new((lo.x + hi.x) * 0.5, (bottom + top) * 0.5, (lo.y + hi.y) * 0.5),
+        half: Vec3::new((hi.x - lo.x) * 0.5, (top - bottom) * 0.5, (hi.y - lo.y) * 0.5),
+        flame_m: 0.0,
+        heat: 0.0,
+    }
+}
+
+/// The smoke volumes: the blocks of smoking ground follow the sim; their
+/// boxes are written every frame, the farthest first, since they overlap
+/// and blend in the order they are drawn. A box around the eye goes as a
+/// quad across the view (`update_volumes`).
+#[allow(clippy::too_many_arguments)]
+fn update_smoke_volumes(
+    view: &mut FireView,
+    sim: &Sim,
+    now: f32,
+    key: (u64, u32),
+    cam: &Transform,
+    projection: &Projection,
+    meshes: &mut Assets<Mesh>,
+    frame: &mut StreamedFrame,
+    materials: &mut Option<ResMut<Assets<SmokeVolumeMaterial>>>,
+) {
+    let Some((mesh, mat)) = view.smoke_volumes.as_mut() else { return };
+    let scn = &sim.scn;
+    let w = scn.world;
+    let cs = w.cellsize;
+    let side = SMOKE_BLOCK as f32 * cs;
+    let wind = smoke_wind(sim);
+    // the material is touched only when the wind changes (a touch sends
+    // the uniform again)
+    if let Some(m) = materials.as_mut() {
+        if m.get(&*mat).is_some_and(|m| m.params.wind != wind) {
+            if let Some(mut m) = m.get_mut(&*mat) {
+                m.params.wind = wind;
+            }
+        }
+    }
+    if view.smoke_key != Some(key) {
+        view.smoke_key = Some(key);
+        let k = SMOKE_BLOCK as i32;
+        let mut blocks = std::collections::HashSet::new();
+        for cell in sim.fire.active_cells() {
+            let arrival = sim.fire.arrival_time(*cell).unwrap_or(now as i32) as f32;
+            if now - arrival > SMOKE_S {
+                continue;
+            }
+            blocks.insert(((cell.row as i32).div_euclid(k), (cell.col as i32).div_euclid(k)));
+        }
+        let mut keys: Vec<_> = blocks.into_iter().collect();
+        keys.sort();
+        view.smoke_blocks.clear();
+        for (br, bc) in keys {
+            let x0 = bc as f32 * side;
+            let y1 = w.height_m - br as f32 * side;
+            let (mut g_lo, mut g_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for i in 0..=k {
+                for j in 0..=k {
+                    let h = scn.terrain.height_at(Pos { x: x0 + i as f32 * cs, y: y1 - j as f32 * cs });
+                    g_lo = g_lo.min(h);
+                    g_hi = g_hi.max(h);
+                }
+            }
+            view.smoke_blocks.push(SmokeBlock { x: x0 + side * 0.5, z: -(y1 - side * 0.5), g_lo, g_hi });
+        }
+    }
+    let eye = cam.translation;
+    let half = side * 0.5;
+    let mut order: Vec<(VolumeBox, &SmokeBlock)> = view.smoke_blocks.iter().map(|b| (smoke_box(b, half, wind), b)).collect();
+    order.sort_by(|a, b| b.0.centre.distance_squared(eye).total_cmp(&a.0.centre.distance_squared(eye)));
+    let mut built = QuadBuilder::new(true, 8 * order.len());
+    for (b, blk) in &order {
+        let quad = (eye - b.centre).abs().cmplt(b.half + 1.0).all().then(|| near_quad(cam, projection));
+        built.smoke_volume(b, blk, half, quad);
+    }
+    let items = built.verts as u32 / BOX.verts;
+    mesh.write(meshes, frame, built.bytes, items);
+}
+
+/// A quad just inside the near plane, across the whole view, for a volume
+/// the eye is in (`update_volumes`).
+fn near_quad(cam: &Transform, projection: &Projection) -> [Vec3; 4] {
+    let (fov, aspect, near) = match projection {
+        Projection::Perspective(p) => (p.fov, p.aspect_ratio, p.near),
+        _ => (1.0, 1.6, 0.5),
+    };
+    let d = near * 3.0;
+    let half_h = d * (fov * 0.5).tan() * 1.3;
+    let half_w = half_h * aspect * 1.3;
+    let right = cam.rotation * Vec3::X * half_w;
+    let up = cam.rotation * Vec3::Y * half_h;
+    let centre = cam.translation + cam.rotation * Vec3::NEG_Z * d;
+    [centre - right - up, centre + right - up, centre + right + up, centre - right + up]
+}
+
+/// The flame volumes' boxes for the fire's state now (`VolumeBox`): the
+/// flaming band tiled by blocks of [`VOL_BLOCK`] cells a side, a box per
+/// block that holds a flaming cell or touches one, as tall as the ground
+/// under it varies plus the tallest flame it carries. Boxes abut and do
+/// not overlap: the shader samples the fire map and the noise in world
+/// space, so the flame runs across their faces without a seam, and no
+/// band is counted twice. Cells are read as `update_flames` reads them for
+/// the tongues, so the volumes stand where the tongues would.
+fn build_boxes(sim: &Sim, now: f32, eye: Vec3, out: &mut Vec<VolumeBox>) {
+    out.clear();
+    let scn = &sim.scn;
+    let w = scn.world;
+    let cs = w.cellsize;
+    let k = VOL_BLOCK as i32;
+    let mut blocks: std::collections::HashMap<(i32, i32), (f32, f32)> = std::collections::HashMap::new();
+    for cell in sim.fire.active_cells() {
+        let arrival = sim.fire.arrival_time(*cell).unwrap_or(now as i32) as f32;
+        let flaming = (1.0 - (now - arrival) / FLAMING_S).clamp(0.0, 1.0);
+        if flaming < 0.2 {
+            continue;
+        }
+        let fli = sim.fire.cell_intensity(*cell);
+        let flame_m = vol_flame_m(fli);
+        let heat = (fli / 2500.0).clamp(0.6, 1.1);
+        let (r, c) = (cell.row as i32, cell.col as i32);
+        for dr in -1..=1 {
+            for dc in -1..=1 {
+                let key = ((r + dr).div_euclid(k), (c + dc).div_euclid(k));
+                let e = blocks.entry(key).or_insert((0.0, 0.0));
+                e.0 = e.0.max(flame_m);
+                e.1 = e.1.max(heat);
+            }
+        }
+    }
+    let mut keys: Vec<_> = blocks.into_iter().collect();
+    keys.sort_by_key(|(key, _)| *key);
+    for ((br, bc), (flame_m, heat)) in keys {
+        if br < 0 || bc < 0 || (br * k) as usize >= w.fire_rows || (bc * k) as usize >= w.fire_cols {
+            continue;
+        }
+        let side = k as f32 * cs;
+        let x0 = bc as f32 * side;
+        let y1 = w.height_m - br as f32 * side;
+        let y0 = y1 - side;
+        // the ground's range in the block, sampled every half cell
+        let (mut g_lo, mut g_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for i in 0..=2 * k {
+            for j in 0..=2 * k {
+                let h = scn.terrain.height_at(Pos { x: x0 + i as f32 * cs * 0.5, y: y0 + j as f32 * cs * 0.5 });
+                g_lo = g_lo.min(h);
+                g_hi = g_hi.max(h);
+            }
+        }
+        let bottom = g_lo - 1.0;
+        // room for the flames as the shader grows them with distance toward
+        // the toy scale (`grow` in `fire_volume.wesl`), and no more: a box
+        // of empty air above the flames costs fragments
+        let foot = Vec3::new(x0 + side * 0.5, (g_lo + g_hi) * 0.5, -(y0 + y1) * 0.5);
+        let grow = 1.0 + 1.5 * smoothstep(150.0, VOL_END_M, eye.distance(foot));
+        let top = g_hi + flame_m * grow * 1.08 + 1.0;
+        out.push(VolumeBox {
+            centre: Vec3::new(x0 + side * 0.5, (bottom + top) * 0.5, -(y0 + y1) * 0.5),
+            half: Vec3::new(side * 0.5, (top - bottom) * 0.5, side * 0.5),
+            flame_m,
+            heat,
+        });
+    }
+}
+
+/// Write the flame volumes' mesh when the boxes changed (a new sim state,
+/// the eye moved) or the eye entered or left a box. A box around the eye has no front
+/// face to draw: it goes as a quad just inside the near plane that spans
+/// the view, and the shader marches from the eye.
+fn update_volumes(view: &mut FireView, cam: &Transform, projection: &Projection, meshes: &mut Assets<Mesh>, frame: &mut StreamedFrame) {
+    let Some(volumes) = view.volumes.as_mut() else { return };
+    let eye = cam.translation;
+    let inside = view.boxes.iter().position(|b| (eye - b.centre).abs().cmplt(b.half + 1.0).all());
+    if view.boxes_written == Some(inside) {
+        return;
+    }
+    view.boxes_written = Some(inside);
+    let mut built = QuadBuilder::new(true, 8 * view.boxes.len());
+    for (i, b) in view.boxes.iter().enumerate() {
+        let quad = (Some(i) == inside).then(|| near_quad(cam, projection));
+        built.volume(b, quad);
+    }
+    let items = built.verts as u32 / BOX.verts;
+    volumes.write(meshes, frame, built.bytes, items);
+}
+
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let k = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    k * k * (3.0 - 2.0 * k)
+}
+
+/// The burning plants near `eye`, at most [`MAX_TORCHES`], the nearest.
+fn gather_torches(veg: &crate::vegetation::Vegetation, eye: Vec3, out: &mut Vec<crate::vegetation::torch::Torch>) {
+    out.clear();
+    veg.torches(eye, TORCH_RADIUS_M, out);
+    if out.len() > MAX_TORCHES {
+        out.select_nth_unstable_by(MAX_TORCHES, |a, b| a.foot.distance_squared(eye).total_cmp(&b.foot.distance_squared(eye)));
+        out.truncate(MAX_TORCHES);
+    }
+}
+
+/// Flames on the burning plants (2026-11-04): the fire climbs a plant from
+/// its foot at [`CLIMB_S_PER_M`] and each point of it burns for
+/// [`CROWN_SHARE`] of the plant's flaming time, as the shader chars it
+/// (`plant_common.wesl`, `place`). So at any instant a band of the plant
+/// is alight, from the trunk up into the crown and then out at the top:
+/// the flames stand on that band, and where it holds the crown's foliage
+/// they torch well above the plant, as a crown fire does.
+fn plant_torches(flames: &mut QuadBuilder, torches: &[crate::vegetation::torch::Torch], eye: Vec3, right: Vec3, t: f32) {
+    let burn_s = crate::vegetation::PLANT_FLAMING_S * CROWN_SHARE;
+    let back = right.cross(Vec3::Y);
+    for p in torches {
+        let h = p.height.max(0.5);
+        // the alight band [y0, y1], metres above the foot
+        let y1 = (p.age / CLIMB_S_PER_M).min(h);
+        let y0 = ((p.age - burn_s * FLAME_SHARE) / CLIMB_S_PER_M).max(0.0);
+        if y1 <= y0 {
+            continue;
+        }
+        // the crown: where the model's foliage starts
+        let crown_lo = p.crown_lo.min(0.9 * h);
+        let crown = h - crown_lo;
+        let leafy = (y1.min(h) - y0.max(crown_lo)).max(0.0) / crown;
+        // lit over a few seconds
+        let onset = smoothstep(0.0, 6.0, p.age);
+        let band = y1 - y0;
+        let d = eye.distance(p.foot);
+        // a shrub's flames from afar are the front's own: alone, its single
+        // tongue drew a candle dotted over the burnt ground (2026-11-04)
+        if h < 3.0 && d > 250.0 {
+            continue;
+        }
+        // one tongue from afar, a crown of them up close
+        let n = if d > 600.0 {
+            1
+        } else if d > 300.0 {
+            2
+        } else {
+            (p.width / 2.2).round().clamp(2.0, 6.0) as usize
+        };
+        let heat = (0.45 + 0.85 * leafy) * onset;
+        let key = (p.seed * 1.0e6) as u64;
+        for k in 0..n {
+            let hk = hash01(key * 31 + k as u64 * 7919);
+            let hk2 = hash01(key * 97 + k as u64 * 104_729);
+            let hk3 = hash01(key * 13 + k as u64 * 3_571);
+            let phase = p.seed * 40.0 + k as f32 * 2.7;
+            let main = k == 0;
+            // where on the band the tongue stands, and how wide the plant is there
+            let fy = y0 + band * if main { 0.08 } else { 0.05 + 0.6 * hk2 };
+            let spread = if fy > crown_lo { p.width * 0.42 } else { p.width * 0.08 };
+            let side = right * (hk - 0.5) * 2.0 * spread * if main { 0.3 } else { 1.0 } + back * (hk3 - 0.5) * spread;
+            // the band itself, and above it a torch as long as the crown alight
+            let flame = if main {
+                band * 0.9 + 1.0 * leafy * crown
+            } else {
+                (y1 - fy) * (0.6 + 0.4 * hk3) + 0.45 * leafy * crown
+            };
+            let flicker = 0.85 + 0.15 * (t * 6.1 + phase).sin() * (t * 2.9 + phase * 1.3).cos();
+            let h_m = (flame * flicker * onset).max(0.4);
+            // narrow tongues: a burning crown is many of them, not one sheet
+            let half_w = (h_m * 0.22).min(p.width * if main { 0.2 } else { 0.13 }).max(0.25);
+            // the foot fades in (alpha 0 at the foot), the tongue stands in the air
+            flames.tongue(
+                p.foot + Vec3::Y * fy + side,
+                right,
+                h_m,
+                half_w,
+                t,
+                phase,
+                [3.6 * heat, 1.55 * heat, 0.28 * heat, 0.0],
+                [2.0 * heat, 0.50 * heat, 0.07 * heat, 1.0],
+            );
+        }
+    }
+}
+
+/// The plants' flames in the plant lab (`veg_lab`, `KIOSK_PIANTE`): the same
+/// [`plant_torches`] the island draws, with no fire map and no front.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct LabTorchesPlugin;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+struct LabTorches {
+    flames: Streamed,
+    torches: Vec<crate::vegetation::torch::Torch>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Plugin for LabTorchesPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((crate::fire_shader::FireShaderPlugin, crate::streamed_mesh::StreamedMeshPlugin))
+            .add_systems(Startup, lab_torches_setup)
+            .add_systems(PostUpdate, lab_torches.before(bevy::transform::TransformSystems::Propagate));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lab_torches_setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut fire_materials: ResMut<Assets<FireMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let flames = Streamed::new(&mut meshes, TONGUE, false);
+    let mat = fire_materials.add(FireMaterial { texture: images.add(textures::flame_flipbook()), mode: Vec4::X });
+    commands.spawn((
+        (Mesh3d(flames.handle.clone()), MeshMaterial3d(mat)),
+        bevy::camera::visibility::NoFrustumCulling,
+        bevy::light::NotShadowCaster,
+    ));
+    commands.insert_resource(LabTorches { flames, torches: Vec::new() });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lab_torches(
+    time: Res<Time>,
+    veg: Res<crate::vegetation::Vegetation>,
+    camera: Query<&Transform, With<Camera3d>>,
+    mut lab: ResMut<LabTorches>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut frame: ResMut<StreamedFrame>,
+) {
+    let Ok(cam) = camera.single() else { return };
+    let mut right = cam.rotation * Vec3::X;
+    right.y = 0.0;
+    let right = right.normalize_or_zero();
+    let lab = &mut *lab;
+    gather_torches(&veg, cam.translation, &mut lab.torches);
+    let mut flames = QuadBuilder::new(false, 16 * 4 * lab.torches.len());
+    plant_torches(&mut flames, &lab.torches, cam.translation, right, time.elapsed_secs());
+    let items = flames.verts as u32 / TONGUE.verts;
+    lab.flames.write(&mut meshes, &mut frame, flames.bytes, items);
+}
 
 /// The scene's distance fog as `colour * gain + offset`, evaluated on the CPU
 /// for one puff. `bevy_pbr::fog::atmospheric_fog` is affine in the colour it
@@ -723,6 +1467,61 @@ impl PuffFog {
     }
 }
 
+/// A puff's cover at `k` of its life: in fast, out slowly (a puff should
+/// never pop into existence); hundreds overlap, so each is thin, denser
+/// while young.
+fn puff_alpha(k: f32) -> f32 {
+    (k * 4.0).min(1.0) * (1.0 - k).powf(1.4) * (0.55 - 0.25 * k)
+}
+
+/// A puff's size at `k` of its life: grows as it disperses.
+fn puff_size(p: &Particle, k: f32) -> f32 {
+    p.size * (0.7 + 2.3 * k)
+}
+
+/// The plume's shadow on itself (2026-11-05): the puffs' optical depth
+/// binned on a coarse grid, read along the sun from each puff. A column of
+/// smoke is lit on top and on the side toward the sun and dark under and
+/// behind: without this the puffs drew a flat beige mass.
+struct PlumeShadow {
+    cells: std::collections::HashMap<IVec3, f32>,
+    sun: Vec3,
+}
+
+impl PlumeShadow {
+    /// Side of a bin (m), taps toward the sun, and their spacing (m).
+    const CELL_M: f32 = 40.0;
+    const TAPS: usize = 4;
+    const TAP_M: f32 = 45.0;
+
+    fn new(puffs: &[Particle], sun: Vec3) -> Self {
+        let mut cells = std::collections::HashMap::with_capacity(puffs.len() / 2);
+        for p in puffs {
+            let k = (p.age / p.life).clamp(0.0, 1.0);
+            // what a puff puts in the way of the light: its cover (as drawn,
+            // the texture's mean alpha is ~0.3) over its area, against the
+            // bin's
+            let size = puff_size(p, k);
+            let w = puff_alpha(k) * 0.3 * (size * size) / (Self::CELL_M * Self::CELL_M);
+            *cells.entry((p.pos / Self::CELL_M).floor().as_ivec3()).or_insert(0.0) += w;
+        }
+        PlumeShadow { cells, sun }
+    }
+
+    /// The sun's light reaching `p` through the plume, 0..1.
+    fn at(&self, p: Vec3) -> f32 {
+        let mut depth = 0.0;
+        for i in 1..=Self::TAPS {
+            let q = p + self.sun * (i as f32 * Self::TAP_M);
+            if let Some(w) = self.cells.get(&(q / Self::CELL_M).floor().as_ivec3()) {
+                depth += w;
+            }
+        }
+        // soft: smoke scatters light into its own shadow
+        (-depth * 0.7).exp()
+    }
+}
+
 /// Advance smoke and embers, and top both up from the active front.
 fn step_particles(view: &mut FireView, sim: &Sim, dt: f32, now: f32) {
     let scn = &sim.scn;
@@ -738,7 +1537,12 @@ fn step_particles(view: &mut FireView, sim: &Sim, dt: f32, now: f32) {
         // Buoyancy dies off as the plume cools and entrains air, after which
         // the puff simply goes where the wind goes.
         let k = (puff.age / puff.life).clamp(0.0, 1.0);
-        let buoyancy = Vec3::Y * (7.0 * (1.0 - k) * (1.0 - k));
+        // The column of a hot front rises hundreds of metres before it
+        // bends over (2026-11-05, from 7 (1 - k)^2, a dome 100 m high the
+        // play camera looked down through): the puff's size carries the
+        // plume's strength (`size` at the spawn site).
+        let plume = ((puff.size - 20.0) / 22.0).clamp(0.3, 3.0);
+        let buoyancy = Vec3::Y * ((7.0 + 5.0 * plume) * (1.0 - k).powf(1.5));
         let turbulence = Vec3::new(
             noise(puff.pos.x * 0.01, puff.age * 0.4 + puff.phase, 3) - 0.5,
             0.0,
@@ -828,7 +1632,10 @@ fn step_particles(view: &mut FireView, sim: &Sim, dt: f32, now: f32) {
     // does not get 20 000 plumes, it gets a full sky.
     // Truncating `n * dt` per frame used to lose the fraction every frame,
     // so the faster the renderer the thinner the smoke; it is carried over.
-    let (smoke_owed, ember_owed) = (view.owed.0 + active.len() as f32 * dt * 1.2, view.owed.1 + active.len() as f32 * dt * 0.375);
+    // the smoke volumes draw the front's smoke (`update_smoke_volumes`)
+    // and so does the screen-space march (`fire_volumetric`)
+    let puffs = if view.smoke_volumes.is_some() || crate::fire_volumetric::on() { 0.0 } else { 1.2 };
+    let (smoke_owed, ember_owed) = (view.owed.0 + active.len() as f32 * dt * puffs, view.owed.1 + active.len() as f32 * dt * 0.375);
     view.owed = (smoke_owed.fract(), ember_owed.fract());
     let smoke_budget = (smoke_owed as usize).min(MAX_SMOKE.saturating_sub(view.smoke.len()));
     let ember_budget = (ember_owed as usize).min(MAX_EMBERS.saturating_sub(view.embers.len()));
@@ -853,14 +1660,21 @@ fn step_particles(view: &mut FireView, sim: &Sim, dt: f32, now: f32) {
         let phase = hash01(view.seed ^ 0x1234);
 
         if i < smoke_budget {
-            // Smouldering ground smokes too — often more visibly than flame.
+            // Smouldering ground smokes too, but the column stands on the
+            // front (2026-11-05): a cell long past it smokes a quarter as
+            // often, so the plume rises from the flames and the scar
+            // behind it carries a thin haze, not the same smoke.
             let plume = (fli / 1200.0).clamp(0.3, 3.0);
+            if hash01(view.seed ^ 0x5A5A) > (0.25 + 0.75 * flaming) * (plume / 1.5).clamp(0.2, 1.0) {
+                continue;
+            }
             view.smoke.push(Particle {
-                pos: Vec3::new(p.x, ground + 25.0 + 20.0 * flaming, -p.y),
-                vel: Vec3::Y * (4.0 + 8.0 * plume * flaming) + drift * 0.3,
+                // just over the flames, so the smoke is theirs
+                pos: Vec3::new(p.x, ground + 8.0 + 10.0 * flaming, -p.y),
+                vel: Vec3::Y * (6.0 + 10.0 * plume * flaming) + drift * 0.3,
                 age: 0.0,
-                life: 22.0 + phase * 20.0,
-                size: 12.0 + 16.0 * plume,
+                life: 30.0 + phase * 30.0,
+                size: 20.0 + 22.0 * plume,
                 phase,
                 flare: false,
             });
@@ -946,10 +1760,9 @@ mod tests {
                 let s2 = s * s;
                 let w1 = (t * 7.0 - s * 4.5 + phase).sin();
                 let w2 = (t * 11.3 - s * 7.0 + phase * 1.7).sin();
-                let lateral = h * (0.30 * s2 * w1 + 0.12 * s2 * s * w2);
-                let drop = h * 0.06 * s2 * s * (w1 * w2).abs();
-                let width = half_w * (1.0 - s).powf(0.85) * (1.0 + 0.18 * (t * 9.0 + phase + s * 3.0).sin());
-                let centre = foot + Vec3::Y * (h * s - drop) + right * lateral;
+                let lateral = h * (0.08 * s2 * w1 + 0.04 * s2 * s * w2);
+                let width = half_w * (1.0 + 0.04 * (t * 9.0 + phase + s * 3.0).sin()) * (1.0 - 0.15 * s);
+                let centre = foot + Vec3::Y * (h * s) + right * lateral;
                 for (k, side) in [-1.0f32, 1.0].into_iter().enumerate() {
                     let want = centre + right * width * side;
                     let got = q.position(2 * j + k);

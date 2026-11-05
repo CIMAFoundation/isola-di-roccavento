@@ -483,6 +483,35 @@ fn ground_texture(w: usize, h: usize, data: Vec<u8>, format: TextureFormat) -> I
     image
 }
 
+/// An RGBA8 ground texture with its mip chain, box-filtered (only the alpha,
+/// the canopy's cover, is read from the mips: no sRGB care needed).
+fn with_mips(mut image: Image, w: usize, h: usize) -> Image {
+    let mut data = image.data.take().unwrap_or_default();
+    let (mut lw, mut lh, mut levels, mut offset) = (w, h, 1, 0);
+    while lw > 1 || lh > 1 {
+        let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
+        data.reserve(nw * nh * 4);
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let at = |xx: usize, yy: usize| data[offset + (yy.min(lh - 1) * lw + xx.min(lw - 1)) * 4 + c] as u32;
+                    let s = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
+                    data.push(((s + 2) / 4) as u8);
+                }
+            }
+        }
+        offset += lw * lh * 4;
+        (lw, lh) = (nw, nh);
+        levels += 1;
+    }
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = levels;
+    if let ImageSampler::Descriptor(d) = &mut image.sampler {
+        d.mipmap_filter = ImageFilterMode::Linear;
+    }
+    image
+}
+
 /// One chunk at one level: samples `c0..=c0+ncx` by `r0..=r0+ncy` of the base
 /// grid, every `f`-th, the last one always the chunk's edge; plus a skirt.
 #[allow(clippy::too_many_arguments)]
@@ -841,7 +870,13 @@ pub fn build(
             normal_px.extend_from_slice(&f16_bits(v).to_le_bytes());
         }
     }
-    let colour_tex = images.add(ground_texture(cols, rows, colour_px, TextureFormat::Rgba8UnormSrgb));
+    let colour_tex = images.add(if crate::vegetation::canopy::forest_shade() {
+        // with its mips: the canopy's cover averaged over 2^k samples, read by
+        // the terrain shader as the forest's occlusion (`forest_shade`)
+        with_mips(ground_texture(cols, rows, colour_px, TextureFormat::Rgba8UnormSrgb), cols, rows)
+    } else {
+        ground_texture(cols, rows, colour_px, TextureFormat::Rgba8UnormSrgb)
+    });
     let normal_tex = images.add(ground_texture(cols, rows, normal_px, TextureFormat::Rgba16Float));
     // world metres to texel-centre uv (`terrain_uv` in the shader)
     let tex_rect = Vec4::new(
@@ -861,6 +896,7 @@ pub fn build(
         normal_tex,
     );
     terrain_material.set_canopy(canopy.colours, canopy_fade(gfx));
+    terrain_material.set_forest_shade(if crate::vegetation::canopy::forest_shade() { 1.0 } else { 0.0 }, posting);
     let material = materials.add(terrain_material);
 
     let levels: &[usize] = if stride >= 4 { &LEVELS[..1] } else { &LEVELS };

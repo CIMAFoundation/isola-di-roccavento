@@ -29,8 +29,9 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use crate::materials;
 use crate::vegetation::{LabRow, PlantsDrawable, Vegetation, PLANT_FLAMING_S};
 
-/// Plants per row: the stages shown side by side.
-const COLUMNS: usize = 8;
+/// Plants per row (user, 2026-11-04: one tree, its fire run by the clock;
+/// it was eight, the stages side by side).
+const COLUMNS: usize = 1;
 /// Metres between rows; between columns, a plant and a half of the row's.
 const ROW_M: f32 = 22.0;
 
@@ -169,6 +170,9 @@ pub fn run() -> anyhow::Result<()> {
     .add_plugins(crate::shader_lib::ShaderLibPlugin)
     .add_plugins(materials::MaterialsPlugin)
     .add_plugins(crate::vegetation::PlantRenderPlugin)
+    .add_plugins(crate::hi_trees::HiTreesPlugin)
+    // the flames on the burning plants, as on the island (`fire_view`)
+    .add_plugins(crate::fire_view::LabTorchesPlugin)
     .insert_resource(ClearColor(Color::srgb(0.62, 0.74, 0.88)))
     .insert_resource(GlobalAmbientLight { brightness: 900.0, ..default() })
     .add_systems(Startup, setup)
@@ -206,8 +210,8 @@ fn setup(
         .unwrap_or(0);
     let mut lab = Lab {
         // from a plant about to catch to one burnt out
-        clock: env_f32("KIOSK_PIANTE_T").unwrap_or(270.0),
-        playing: false,
+        clock: env_f32("KIOSK_PIANTE_T").unwrap_or(-10.0),
+        playing: std::env::var_os("KIOSK_PIANTE_SNAP").is_none(),
         speed: 20.0,
         step: env_f32("KIOSK_PIANTE_STEP").unwrap_or(40.0).max(1.0),
         step_drawn: 0.0,
@@ -251,6 +255,31 @@ fn setup(
         Transform::default(),
         LabCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.22, distance: 120.0 },
     ));
+    let mut gallery = None;
+    // `KIOSK_PIANTE_HI=1`: the full-resolution models (`hi_trees`), every
+    // `.glb` under `BEVY_ASSET_ROOT/assets/`, in a row of their own south of
+    // the plants, as modelled; the camera starts on them (2026-11-04)
+    if std::env::var("KIOSK_PIANTE_HI").is_ok_and(|v| v == "1") {
+        let root = std::env::var("BEVY_ASSET_ROOT").map(std::path::PathBuf::from).unwrap_or_default().join("assets");
+        let mut files: Vec<String> = std::fs::read_dir(&root)
+            .map(|d| d.filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.ends_with(".glb")).collect())
+            .unwrap_or_default();
+        files.sort();
+        let step = 12.0;
+        let z = 40.0;
+        info!("lab: {} full models in {}: {:?}", files.len(), root.display(), files);
+        let spots: Vec<crate::hi_trees::HiSpot> = files
+            .iter()
+            .enumerate()
+            .map(|(k, f)| crate::hi_trees::HiSpot { path: f.clone(), foot: Vec3::new(k as f32 * step, 0.0, z), yaw: 0.0, height: None })
+            .collect();
+        if !spots.is_empty() {
+            let mid = (spots.len() - 1) as f32 * step * 0.5;
+            cam.insert(LabCamera { focus: Vec3::new(mid, 3.0, z), yaw: 0.0, pitch: 0.18, distance: (mid * 1.6).max(20.0) });
+            lab.row_drawn = Some(lab.row);
+            gallery = Some(crate::hi_trees::HiTrees { spots });
+        }
+    }
     if lab.snap.is_some() {
         let image = Image::new_target_texture(1600, 1000, TextureFormat::Rgba8UnormSrgb, None);
         lab.snap_target = images.add(image);
@@ -258,6 +287,9 @@ fn setup(
             handle: lab.snap_target.clone(),
             scale_factor: 1.0,
         }));
+    }
+    if let Some(g) = gallery {
+        commands.insert_resource(g);
     }
     commands.insert_resource(lab);
 }
@@ -309,7 +341,7 @@ fn camera(
         let r = lab.row;
         // the row seen from the front, its eight plants across the picture
         cam.focus = (lab.foot(r, 0) + lab.foot(r, COLUMNS - 1)) * 0.5 + Vec3::Y * lab.rows[r].2.y * 0.4;
-        cam.distance = ((COLUMNS - 1) as f32 * col_m(lab.rows[r].2) * 0.95 + lab.rows[r].2.y)
+        cam.distance = ((COLUMNS - 1) as f32 * col_m(lab.rows[r].2) * 0.95 + lab.rows[r].2.y * 1.8)
             * env_f32("KIOSK_PIANTE_DIST").unwrap_or(1.0);
         cam.yaw = 0.0;
         cam.pitch = 0.22;
@@ -339,16 +371,18 @@ fn panel(mut contexts: EguiContexts, mut lab: ResMut<Lab>, mut cams: Query<(&Cam
     let max = lab.max_clock();
     egui::Window::new("Piante in fiamme").default_pos([12.0, 12.0]).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            if ui.button(if lab.playing { "Pausa" } else { "Avanti" }).clicked() {
+            if ui.button(if lab.playing { "Pausa" } else { "Play" }).clicked() {
                 lab.playing = !lab.playing;
             }
             if ui.button("Da capo").clicked() {
                 lab.clock = -10.0;
             }
         });
-        ui.add(egui::Slider::new(&mut lab.clock, -10.0..=max).text("s dalla prima colonna"));
+        ui.add(egui::Slider::new(&mut lab.clock, -10.0..=max).text("s dall'innesco"));
         ui.add(egui::Slider::new(&mut lab.speed, 1.0..=120.0).logarithmic(true).text("velocità (s al secondo)"));
-        ui.add(egui::Slider::new(&mut lab.step, 2.0..=60.0).text("s tra una colonna e l'altra"));
+        if COLUMNS > 1 {
+            ui.add(egui::Slider::new(&mut lab.step, 2.0..=60.0).text("s tra una colonna e l'altra"));
+        }
         ui.label(format!("Una pianta brucia per {PLANT_FLAMING_S:.0} s, poi resta carbonizzata."));
         let current = lab.rows[lab.row].1;
         let mut row = lab.row;
@@ -406,7 +440,8 @@ fn snap_when_ready(mut commands: Commands, mut lab: ResMut<Lab>, mut exit: Messa
     }
     // a few frames for the picture to be written
     *done += 1;
-    if *done > 20 {
+    // (once written: a pipeline still compiling holds the picture back)
+    if (*done > 20 && std::path::Path::new(file.as_str()).exists()) || *done > 1200 {
         exit.write(AppExit::Success);
     }
 }

@@ -21,7 +21,9 @@ mod coast;
 mod field;
 mod fields;
 mod fire_shader;
+mod fire_lab;
 mod fire_view;
+mod fire_volumetric;
 mod forecast_view;
 mod forecast_zone;
 mod reach_zone;
@@ -68,6 +70,8 @@ mod near_cover;
 mod units;
 mod vegetation;
 #[cfg(not(target_arch = "wasm32"))]
+mod hi_trees;
+#[cfg(not(target_arch = "wasm32"))]
 mod veg_lab;
 mod visual_scale;
 #[cfg(not(target_arch = "wasm32"))]
@@ -98,6 +102,10 @@ fn main() -> anyhow::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     if veg_lab::wanted() {
         return veg_lab::run();
+    }
+    // `KIOSK_FUOCO=1`: the fire's volumes on flat ground, every knob in a panel
+    if fire_lab::wanted() {
+        return fire_lab::run();
     }
     let data = std::env::var("ROCCA_DATA").unwrap_or_else(|_| "data".to_string());
     let mut gfx = quality::Graphics::from_env();
@@ -244,8 +252,11 @@ fn main() -> anyhow::Result<()> {
     app.add_plugins(sound::SoundPlugin);
     app.add_plugins(horizon::HorizonPlugin);
     app.add_plugins(godrays::GodRaysPlugin);
+    app.add_plugins(fire_volumetric::FireVolumetricPlugin);
     app.add_plugins(render_scale::RenderScalePlugin);
     app.add_plugins(vegetation::PlantRenderPlugin);
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_plugins(hi_trees::HiTreesPlugin);
     kiosk_systems(&mut app);
     app.add_plugins(forecast_view::ForecastPlugin);
     app.add_systems(PostUpdate, kiosk::snap::redirect_camera);

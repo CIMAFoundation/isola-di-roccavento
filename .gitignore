@@ -19,3 +19,6 @@ __pycache__/
 .venv/
 /out/
 target-piante/
+
+# Plant source models (tools/vegetation/fetch_polyhaven.py), gigabytes
+/vegetation_src/

@@ -78,6 +78,47 @@ const UNIFORM_BYTES: u64 = 48;
 /// lobes are gone from the shadow map, and its outline is the proxy's.
 const FULL_SHADOW_M: f32 = 250.0;
 
+/// Where a scanned plant changes level (2026-11-04,
+/// `tools/vegetation/lod.py`): its `lod0` ([`Tier::Near`], built for
+/// 15 m) up to `NEAR_M`, its `lod1` ([`Tier::Mid`], built for 40 m) up to
+/// `MID_M`, then its `lod2` ([`Tier::Full`], built for 150 m) up to the
+/// LOD distance, its `lod3` (built for 600 m) beyond. Each a little
+/// farther than it was built for: «vorrei dei modelli dettagliati da
+/// vicino».
+/// Beyond `SCAN_FAR_M` (or the LOD distance, if nearer) a scanned plant
+/// draws its `lod3`, beyond `SCAN_LUMP_M` its opaque lumps
+/// ([`Tier::Far`], `meshes::Builder::scan_lumps`).
+/// `KIOSK_SCAN_LOD=<near>,<mid>,<far>,<lumps>` (m) for trials.
+const NEAR_M: f32 = 60.0;
+const MID_M: f32 = 250.0;
+const SCAN_FAR_M: f32 = 800.0;
+const SCAN_LUMP_M: f32 = 800.0;
+
+fn scan_lod() -> [f32; 4] {
+    static LOD: std::sync::OnceLock<[f32; 4]> = std::sync::OnceLock::new();
+    *LOD.get_or_init(|| {
+        let v: Vec<f32> = std::env::var("KIOSK_SCAN_LOD").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if v.len() == 4 { [v[0], v[1], v[2], v[3]] } else { [NEAR_M, MID_M, SCAN_FAR_M, SCAN_LUMP_M] }
+    })
+}
+
+/// The band of a plant at `d`: 3 near, 4 mid, 0 full (an authored plant
+/// draws its model in all three), 1 proxy, 2 far. A scanned plant
+/// (`scanned`) changes to its `lod3` (the proxy band) and to its lumps
+/// (the far band) at its own distances.
+fn plant_band(d: f32, lod_m: f32, far_m: f32, scanned: bool) -> u8 {
+    let [near, mid, scan_far, lumps] = scan_lod();
+    let full_m = if scanned { scan_far.min(lod_m) } else { lod_m };
+    let far_m = if scanned { lumps.max(full_m) } else { far_m };
+    if lod_m > 0.0 && d < full_m {
+        if d < near { 3 } else if d < mid { 4 } else { 0 }
+    } else if d > far_m {
+        2
+    } else {
+        1
+    }
+}
+
 /// Beyond this multiple of the LOD distance (and at least
 /// [`FAR_TIER_MIN_M`]) a tile draws its cheapest crowns.
 const FAR_TIER: f32 = 2.0;
@@ -229,6 +270,8 @@ fn vertex_buffers() -> Vec<VertexBufferLayout> {
                 attr(VertexFormat::Snorm8x4, 12, 1),
                 attr(VertexFormat::Unorm16x2, 16, 2),
                 attr(VertexFormat::Unorm16x4, 20, 3),
+                attr(VertexFormat::Snorm8x4, 28, 9),
+                attr(VertexFormat::Snorm8x4, 32, 10),
             ],
         },
         VertexBufferLayout {
@@ -733,7 +776,6 @@ fn queue_plants(
         }
         // per node: the models within the LOD distance, the cheapest crowns
         // beyond the far one, the proxies between
-        let band = |d: f32| if lod_m > 0.0 && d < lod_m { 0 } else if d > far_m { 2 } else { 1 };
         let mut list = Vec::new();
         let mut runs = Vec::new();
         for (t, tile) in scene.tiles.iter().enumerate() {
@@ -745,6 +787,8 @@ fn queue_plants(
             for g in tile.groups.clone() {
                 let group = &scene.groups[g];
                 let tier = |t: Tier| group.tiers[t as usize];
+                let scanned = tier(Tier::Near).is_some();
+                let band = |d: f32| plant_band(d, lod_m, far_m, scanned);
                 runs.clear();
                 if lod_per_tile() {
                     runs.push((whole(0.0), 0, drawn(g)));
@@ -752,7 +796,7 @@ fn queue_plants(
                     select(group, eye, &frustum, true, drawn(g), &band, &mut runs);
                 }
                 for &(b, first, end) in &runs {
-                    let plant = match b { 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
+                    let plant = match b { 3 => tier(Tier::Near).or(tier(Tier::Full)), 4 => tier(Tier::Mid).or(tier(Tier::Full)), 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
                     if let Some(mesh) = plant.filter(|_| end > first) {
                         list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: false, first, count: end - first });
                     }
@@ -822,7 +866,6 @@ fn queue_plants(
             // proxy's closed crown over a full model darkened the model
             // itself (2026-11-04, per node; per tile the camera's own tile
             // cast with its full models up to its edge, `FULL_SHADOW_M`)
-            let band = |d: f32| if lod_m > 0.0 && d < lod_m { 0 } else if d > far_m { 2 } else { 1 };
             let mut list = Vec::new();
             let mut runs = Vec::new();
             for (t, tile) in scene.tiles.iter().enumerate() {
@@ -834,6 +877,8 @@ fn queue_plants(
                 for g in tile.groups.clone() {
                     let group = &scene.groups[g];
                     let tier = |t: Tier| group.tiers[t as usize];
+                    let scanned = tier(Tier::Near).is_some();
+                    let band = |d: f32| plant_band(d, lod_m, far_m, scanned);
                     runs.clear();
                     if lod_per_tile() {
                         runs.push((if full { 0 } else if far { 2 } else { 1 }, 0, drawn(g)));
@@ -842,7 +887,7 @@ fn queue_plants(
                         select(group, eye, &cascade, false, drawn(g), &band, &mut runs);
                     }
                     for &(b, first, end) in &runs {
-                        let plant = match b { 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
+                        let plant = match b { 3 => tier(Tier::Near).or(tier(Tier::Full)), 4 => tier(Tier::Mid).or(tier(Tier::Full)), 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
                         if let Some(mesh) = plant.filter(|_| end > first) {
                             list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: false, first, count: end - first });
                         }

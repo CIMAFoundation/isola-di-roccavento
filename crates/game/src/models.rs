@@ -191,6 +191,128 @@ pub fn atlas_png() -> std::borrow::Cow<'static, [u8]> {
     bytes
 }
 
+/// The scanned plants' levels of detail (2026-11-04, on trial,
+/// `KIOSK_SCANS=1`; `tools/vegetation/to_game.py`): read from
+/// `assets/models/vegetation_scans.{json,bin}` and the card atlas
+/// `foliage_scans.png` of the source tree, desktop only. `None` when off or
+/// missing.
+#[derive(serde::Deserialize)]
+pub struct ScanIndex {
+    pub atlas: ScanAtlas,
+    pub vertex_bytes: usize,
+    pub plants: HashMap<String, HashMap<String, ScanLevel>>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ScanAtlas {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ScanLevel {
+    /// The leaves' mean colour (linear), brought to the variety's own.
+    #[serde(default = "grey3")]
+    pub leaf_rgb: [f32; 3],
+    pub offset: usize,
+    pub vertices: usize,
+    pub indices: usize,
+}
+
+fn grey3() -> [f32; 3] {
+    [0.5; 3]
+}
+
+pub struct Scans {
+    pub index: ScanIndex,
+    pub data: Vec<u8>,
+    pub atlas_png: Vec<u8>,
+}
+
+/// One vertex of a scanned level (`to_game.py`, `VERTEX_BYTES`).
+pub struct ScanVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub leaf: bool,
+    pub uv: [f32; 2],
+    pub color: [f32; 3],
+    pub card_a: [f32; 3],
+    pub card_b: [f32; 3],
+}
+
+impl Scans {
+    /// The vertices and indices of `plant`'s `level` (`lod0` .. `lod3`),
+    /// and the leaves' mean colour.
+    pub fn level(&self, plant: &str, level: &str) -> Option<(Vec<ScanVertex>, Vec<u32>, [f32; 3])> {
+        let l = self.index.plants.get(plant)?.get(level)?;
+        let vb = self.index.vertex_bytes;
+        let f = |o: usize| f32::from_le_bytes(self.data[o..o + 4].try_into().unwrap());
+        let sn = |o: usize| [0, 1, 2].map(|k| self.data[o + k] as i8 as f32 / 127.0);
+        let vertices = (0..l.vertices)
+            .map(|i| {
+                let o = l.offset + i * vb;
+                ScanVertex {
+                    position: [f(o), f(o + 4), f(o + 8)],
+                    normal: sn(o + 12),
+                    leaf: self.data[o + 15] != 0,
+                    uv: [f(o + 16), f(o + 20)],
+                    color: [0, 1, 2].map(|k| self.data[o + 24 + k] as f32 / 255.0),
+                    card_a: sn(o + 28),
+                    card_b: sn(o + 32),
+                }
+            })
+            .collect();
+        let start = l.offset + l.vertices * vb;
+        let indices = (0..l.indices).map(|i| u16::from_le_bytes([self.data[start + 2 * i], self.data[start + 2 * i + 1]]) as u32).collect();
+        Some((vertices, indices, l.leaf_rgb))
+    }
+}
+
+pub fn scans() -> Option<&'static Scans> {
+    static SCANS: OnceLock<Option<Scans>> = OnceLock::new();
+    SCANS
+        .get_or_init(|| {
+            if cfg!(target_arch = "wasm32") || std::env::var("KIOSK_SCANS").map_or(true, |v| v != "1") {
+                return None;
+            }
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models");
+            let read = |name: &str| std::fs::read(dir.join(name)).map_err(|e| warn!("scanned plants: {name}: {e}")).ok();
+            let index = serde_json::from_slice(&read("vegetation_scans.json")?).map_err(|e| warn!("scanned plants: {e}")).ok()?;
+            Some(Scans { index, data: read("vegetation_scans.bin")?, atlas_png: read("foliage_scans.png")? })
+        })
+        .as_ref()
+}
+
+/// The scanned plant a variety is drawn with, when the scans are on
+/// (2026-11-04: every species with a scan near enough; the cypress has
+/// none and keeps its model). Poly Haven's scans are not all of our
+/// species: the stone pine borrows the Aleppo pine's, the strawberry tree
+/// the larger *Searsia burchellii*, cistus and rosemary the smaller
+/// *Searsia lucida*, heather and broom the rooibos.
+pub fn scan_of(variety: &str) -> Option<&'static str> {
+    scans()?;
+    let (species, k) = variety.rsplit_once('_')?;
+    let k: usize = k.parse().ok()?;
+    let pick = |names: &'static [&'static str]| names[(k - 1) % names.len()];
+    Some(match species {
+        "holm" => pick(&["island_tree_01_0"]),
+        "olive" => pick(&["island_tree_02_0"]),
+        "carob" => pick(&["island_tree_03_0"]),
+        "cork" => pick(&["tree_small_02_0"]),
+        "aleppo" => pick(&["pine_tree_01_0", "pine_tree_01_1", "pine_tree_01_2"]),
+        "pine" => pick(&["pine_tree_01_1", "pine_tree_01_2", "pine_tree_01_0"]),
+        "lentisk" => pick(&["searsia_lucida_0", "searsia_lucida_1"]),
+        "myrtle" => pick(&["searsia_burchellii_1", "searsia_burchellii_2"]),
+        "arbutus" => pick(&["searsia_burchellii_0", "searsia_burchellii_1"]),
+        "cistus" => pick(&["searsia_lucida_2", "searsia_lucida_3", "searsia_lucida_4"]),
+        "rosemary" => pick(&["searsia_lucida_5", "searsia_lucida_6", "wild_rooibos_bush_4"]),
+        "heather" => pick(&["wild_rooibos_bush_0", "wild_rooibos_bush_1"]),
+        "broom" => pick(&["wild_rooibos_bush_2", "wild_rooibos_bush_3"]),
+        _ => return None,
+    })
+    .filter(|p| scans().is_some_and(|s| s.index.plants.contains_key(*p)))
+}
+
 /// Every species with varieties, as `vegetation.rs` places them.
 pub const SPECIES: [&str; 14] = [
     "pine", "aleppo", "cypress", "holm", "cork", "carob", "olive",

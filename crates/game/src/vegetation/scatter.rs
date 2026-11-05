@@ -381,9 +381,11 @@ fn scatter_plant(
 /// its group's outline: what is drawn is what burns.
 fn species_for(fuel: i32, p: Pos) -> &'static str {
     let table: &[(&'static str, f32)] = match fuel {
-        10 => &[("pine", 0.55), ("aleppo", 0.35), ("cypress", 0.10)],
-        11 => &[("aleppo", 0.60), ("pine", 0.30), ("cypress", 0.10)],
-        12 => &[("pine", 0.50), ("aleppo", 0.40), ("cypress", 0.10)],
+        // no cypresses in the woods (2026-11-05, the user: «possiamo
+        // togliere i cipressi»; they had no scanned model)
+        10 => &[("pine", 0.60), ("aleppo", 0.40)],
+        11 => &[("aleppo", 0.65), ("pine", 0.35)],
+        12 => &[("pine", 0.55), ("aleppo", 0.45)],
         4 => &[("holm", 0.50), ("cork", 0.30), ("carob", 0.20)],
         5 => &[("holm", 0.45), ("carob", 0.30), ("cork", 0.25)],
         6 => &[("holm", 0.40), ("olive", 0.35), ("carob", 0.25)],

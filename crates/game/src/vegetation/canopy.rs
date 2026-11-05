@@ -33,7 +33,7 @@ fn kind_code(s: Species) -> (usize, f32) {
 
 /// The painted colour of a variety's crown, linear: its canopy tile of the
 /// foliage atlas averaged where it is leaf, times the tone its leaves carry.
-fn crown_colour(name: &'static str) -> [f32; 3] {
+pub(super) fn crown_colour(name: &'static str) -> [f32; 3] {
     static ATLAS: std::sync::OnceLock<super::atlas::Atlas> = std::sync::OnceLock::new();
     let atlas = ATLAS.get_or_init(super::atlas::atlas);
     let [u0, v0, u1, v1] = crate::models::variety(name).canopy;
@@ -54,6 +54,91 @@ fn crown_colour(name: &'static str) -> [f32; 3] {
     }
     let shade = super::meshes::crown_tone(name);
     sum.map(|s| s / n.max(1e-3) * shade)
+}
+
+/// Whether the forest's occlusion is drawn (2026-11-04, on trial):
+/// `KIOSK_BOSCO=1`. Off, the ground texture has no mips and every plant's
+/// stand density is 0: nothing changes.
+pub fn forest_shade() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KIOSK_BOSCO").is_ok_and(|v| v == "1"))
+}
+
+/// How closed the stand around each fire cell is, 0..1: the woody fuels
+/// (trees 1, macchia 0.55) averaged over about [`STAND_RADIUS_CELLS`] cells.
+/// From the fuel raster, not from the scatter, so it is the same whatever
+/// share of the plants a machine draws.
+pub struct StandDensity {
+    cols: usize,
+    rows: usize,
+    cell: f32,
+    height_m: f32,
+    density: Vec<f32>,
+}
+
+/// Each pass of the box blur reaches this many cells; two passes make a tent
+/// of twice the reach (some 80 m on 20 m cells).
+const STAND_RADIUS_CELLS: usize = 2;
+
+impl StandDensity {
+    pub fn new(scn: &Scenario) -> Self {
+        let w = scn.world;
+        let (cols, rows) = (w.fire_cols, w.fire_rows);
+        let mut d: Vec<f32> = scn
+            .fuel
+            .iter()
+            .map(|&f| match Species::of_fuel(f) {
+                Some(Species::Conifer | Species::Broadleaf) => 1.0,
+                Some(Species::Shrub) => 0.55,
+                _ => 0.0,
+            })
+            .collect();
+        for _ in 0..2 {
+            d = box_blur(&d, cols, rows, STAND_RADIUS_CELLS);
+        }
+        StandDensity { cols, rows, cell: w.cellsize, height_m: w.height_m, density: d }
+    }
+
+    /// At a point of the scenario frame (bilinear between cell centres).
+    pub fn at(&self, p: Pos) -> f32 {
+        let fc = (p.x / self.cell - 0.5).clamp(0.0, (self.cols - 1) as f32);
+        let fr = ((self.height_m - p.y) / self.cell - 0.5).clamp(0.0, (self.rows - 1) as f32);
+        let (c0, r0) = (fc.floor() as usize, fr.floor() as usize);
+        let (c1, r1) = ((c0 + 1).min(self.cols - 1), (r0 + 1).min(self.rows - 1));
+        let (tx, ty) = (fc - c0 as f32, fr - r0 as f32);
+        let v = |r: usize, c: usize| self.density[r * self.cols + c];
+        let top = v(r0, c0) * (1.0 - tx) + v(r0, c1) * tx;
+        let bottom = v(r1, c0) * (1.0 - tx) + v(r1, c1) * tx;
+        top * (1.0 - ty) + bottom * ty
+    }
+}
+
+/// A separable box blur of `r` cells, the edges clamped.
+fn box_blur(src: &[f32], cols: usize, rows: usize, r: usize) -> Vec<f32> {
+    let n = (2 * r + 1) as f32;
+    let mut tmp = vec![0.0f32; src.len()];
+    for y in 0..rows {
+        for x in 0..cols {
+            let mut s = 0.0;
+            for k in 0..=2 * r {
+                let xx = (x + k).saturating_sub(r).min(cols - 1);
+                s += src[y * cols + xx];
+            }
+            tmp[y * cols + x] = s / n;
+        }
+    }
+    let mut out = vec![0.0f32; src.len()];
+    for y in 0..rows {
+        for x in 0..cols {
+            let mut s = 0.0;
+            for k in 0..=2 * r {
+                let yy = (y + k).saturating_sub(r).min(rows - 1);
+                s += tmp[yy * cols + x];
+            }
+            out[y * cols + x] = s / n;
+        }
+    }
+    out
 }
 
 /// The canopy on a grid of `cols` x `rows` samples `posting` metres apart,

@@ -69,7 +69,8 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
             rel = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
             # from assets/ only what the game reads: the bakes and the pictures
             # the logo: the game halves the 1200 px one (kiosk/characters.rs)
-            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or rel == "assets/brand/cima_logo_white.png"):
+            # the scanned plants are desktop only (`models::scans`, 2026-11-05)
+            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or "_scans" in rel or rel == "assets/brand/cima_logo_white.png"):
                 continue
             files.append(rel)
 files.append("data/fuels_eu12.json")

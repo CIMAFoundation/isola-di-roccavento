@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::shader::ShaderRef;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 
 const FLAME_SHADER_HANDLE: Handle<Shader> =
@@ -25,6 +25,10 @@ const SMOKE_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("6c025d4f-93b1-47a8-8e2d-0f19a3c7b456");
 const GROUND_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("4b7e119a-2cdd-44ff-9021-aabbccddeeff");
+const VOLUME_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("7e2a9c40-3b5f-4d61-9a8e-5c0f1d2b3a47");
+const SMOKE_VOLUME_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("c3d81f6e-2a74-4b05-9e17-8f6a0d2c5b39");
 
 /// Flame tongues and embers: a textured, additive billboard whose lookup UV
 /// is warped by animated noise. See `shaders/flame.wgsl`.
@@ -46,6 +50,15 @@ impl Material for FireMaterial {
 
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Add
+    }
+
+    /// Drawn after the smoke, every frame (2026-11-04): Bevy sorts the
+    /// transparent meshes by the centre of their bounds, and the flames',
+    /// embers' and smoke's are rebuilt each frame, so the order flipped
+    /// and the flames blinked behind the smoke. Added light on top of the
+    /// smoke; far more than the island across, in view-depth metres.
+    fn depth_bias(&self) -> f32 {
+        if self.mode.x > 1.5 { 2.0e4 } else { 3.0e4 }
     }
 
     fn specialize(
@@ -94,6 +107,137 @@ impl Material for SmokeMaterial {
     }
 }
 
+/// The volume shader's uniform (`shaders/fire_volume.wesl`, `Params`).
+#[derive(ShaderType, Clone, Copy, Default, Debug)]
+pub struct VolumeParams {
+    /// 1 / world width, 1 / world height, the terrain's posting, its height_m.
+    pub rect: Vec4,
+    /// Seconds a cell flames, fade start and end (m from the eye), spare.
+    pub fade: Vec4,
+    /// Emission gain, noise period (m), rise (periods / s), absorption (/ m).
+    pub look: Vec4,
+    /// The height texture's offset (m) and scale (m per code), spare.
+    pub elev: Vec4,
+}
+
+/// The flames as volumes (2026-11-04): boxes over the flaming band near the
+/// camera, ray-marched. See `shaders/fire_volume.wesl`. Additive like the
+/// tongues, with the same draw order against the smoke.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct FireVolumeMaterial {
+    #[uniform(0)]
+    pub params: VolumeParams,
+    /// Tileable fbm, `textures::noise_volume`.
+    #[texture(1, dimension = "3d")]
+    #[sampler(2)]
+    pub noise: Handle<Image>,
+    /// The fire map (`ground_mask::GRASS_MAP`).
+    #[texture(3)]
+    #[sampler(4)]
+    pub fire_map: Handle<Image>,
+    /// The terrain's heights, `Rg8Unorm` (high byte, low byte), read with
+    /// `textureLoad`.
+    #[texture(5, filterable = false)]
+    pub heights: Handle<Image>,
+    /// The flame length of every cell (`fire_view::FLAME_MAP`).
+    #[texture(6)]
+    #[sampler(7)]
+    pub flame_map: Handle<Image>,
+}
+
+impl Material for FireVolumeMaterial {
+    fn vertex_shader() -> ShaderRef {
+        VOLUME_SHADER_HANDLE.into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        VOLUME_SHADER_HANDLE.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Add
+    }
+
+    /// After the smoke, like the tongues (`FireMaterial::depth_bias`).
+    fn depth_bias(&self) -> f32 {
+        3.0e4
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // Front faces only: the march starts on the face the eye sees and
+        // the depth test hides what stands in front of the box. A box
+        // around the eye is sent as a quad across the view instead
+        // (`fire_view::update_volumes`).
+        descriptor.primitive.cull_mode = Some(bevy::render::render_resource::Face::Back);
+        Ok(())
+    }
+}
+
+/// The smoke shader's uniform (`shaders/smoke_volume.wesl`, `Params`).
+#[derive(ShaderType, Clone, Copy, Default, Debug)]
+pub struct SmokeParams {
+    /// 1 / world width, 1 / world height, the terrain's posting, its height_m.
+    pub rect: Vec4,
+    /// The plume's top (m), its rise (m/s), seconds a cell smokes, metres a step.
+    pub plume: Vec4,
+    /// The wind's drift (Bevy x, z, m/s), its speed, the lateral margin (m).
+    pub wind: Vec4,
+    /// Extinction (/ m), noise period (m), gain, seconds a cell flames.
+    pub look: Vec4,
+    /// The height texture's offset (m) and scale (m per code), spare.
+    pub elev: Vec4,
+}
+
+/// The smoke as a volume (2026-11-04): boxes over the smoking ground,
+/// sheared downwind, ray-marched. See `shaders/smoke_volume.wesl`.
+/// Blended like the puffs, and before the flames (their `depth_bias`).
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct SmokeVolumeMaterial {
+    #[uniform(0)]
+    pub params: SmokeParams,
+    #[texture(1, dimension = "3d")]
+    #[sampler(2)]
+    pub noise: Handle<Image>,
+    #[texture(3)]
+    #[sampler(4)]
+    pub fire_map: Handle<Image>,
+    #[texture(5, filterable = false)]
+    pub heights: Handle<Image>,
+    #[texture(6)]
+    #[sampler(7)]
+    pub flame_map: Handle<Image>,
+}
+
+impl Material for SmokeVolumeMaterial {
+    fn vertex_shader() -> ShaderRef {
+        SMOKE_VOLUME_SHADER_HANDLE.into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        SMOKE_VOLUME_SHADER_HANDLE.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // front faces only, as the flame volumes
+        descriptor.primitive.cull_mode = Some(bevy::render::render_resource::Face::Back);
+        Ok(())
+    }
+}
+
 pub struct FireShaderPlugin;
 
 impl Plugin for FireShaderPlugin {
@@ -106,5 +250,12 @@ impl Plugin for FireShaderPlugin {
             MaterialPlugin::<FireMaterial>::default(),
             MaterialPlugin::<SmokeMaterial>::default(),
         ));
+        // an experiment, off (`fire_view::volumes_on`): nothing of it is
+        // loaded unless asked for
+        if crate::fire_view::volumes_on() {
+            crate::load_wesl!(app, VOLUME_SHADER_HANDLE, "shaders/fire_volume.wesl");
+            crate::load_wesl!(app, SMOKE_VOLUME_SHADER_HANDLE, "shaders/smoke_volume.wesl");
+            app.add_plugins((MaterialPlugin::<FireVolumeMaterial>::default(), MaterialPlugin::<SmokeVolumeMaterial>::default()));
+        }
     }
 }

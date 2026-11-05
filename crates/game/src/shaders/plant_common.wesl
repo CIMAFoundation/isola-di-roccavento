@@ -4,6 +4,8 @@
 // on the CPU (`vegetation::plant_fire`), the instant it catches; the rest is
 // a function of the simulated clock.
 
+import game::shaders::noise::{hash21, value_noise};
+
 struct PlantUniform {
     // x: the simulated clock (s); y: how long a plant flames (s);
     // z: the share of plants shown (thinning); w: the tactical view's greying
@@ -40,6 +42,40 @@ struct PlantVertex {
     @location(7) seed: vec4<f32>,
     // x: the instant it catches (`NEVER` while the fire is not near); y = 1: cut by a crew
     @location(8) fire: vec2<f32>,
+    // a scanned plant's card: its right and up axes in model space as
+    // scanned (zero elsewhere), card_a.w half the stretch across
+    // (`meshes::Builder::scan`)
+    @location(9) card_a: vec4<f32>,
+    @location(10) card_b: vec4<f32>,
+}
+
+fn turn(x: vec3<f32>, c: f32, s: f32) -> vec3<f32> {
+    return vec3<f32>(c * x.x + s * x.z, x.y, -s * x.x + c * x.z);
+}
+
+// A scanned plant's card is one of three crossed on a cluster of leaves
+// (`tools/vegetation/lod.py`): only the one most square to `toward` (from
+// the plant to the viewer, or to the sun) is drawn. Its axes and normal are
+// the three cards' normals, so each card can tell alone. The three
+// vertices of a triangle agree: same card, same plant.
+//
+// The plant is stretched across (x, z) by `k` and scaled by its size: a
+// card's normal goes as the inverse of both, so its facing to `toward` is
+// the scanned card's to `toward` in model space, divided by the same.
+fn card_hidden(v: PlantVertex, toward: vec3<f32>) -> bool {
+    let a = v.card_a.xyz;
+    if dot(a, a) < 0.01 {
+        return false;
+    }
+    let b = v.card_b.xyz;
+    let n = cross(a, b);
+    // into the model's frame: turned back, unstretched, unscaled
+    let c = cos(v.foot_yaw.w);
+    let s = sin(v.foot_yaw.w);
+    let local = turn(toward, c, -s);
+    let k = max(v.card_a.w * 2.0, 0.1);
+    let t = local / vec3<f32>(k * v.size.x, v.size.y, k * v.size.x);
+    return abs(dot(n, t)) < max(abs(dot(a, t)), abs(dot(b, t))) - 1.0e-6;
 }
 
 // as `vegetation::NEVER`
@@ -146,4 +182,34 @@ fn place(v: PlantVertex) -> Placed {
     let n = v.normal.xyz / s;
     out.normal = normalize(vec3<f32>(c * n.x + sn * n.z, n.y, -sn * n.x + c * n.z) + vec3<f32>(0.0, 1.0e-5, 0.0));
     return out;
+}
+
+// --- fire, shared by the main and the shadow pass ------------------------
+
+// How far the front has got at a point: below 0 not yet, above 0.3 the
+// leaves there are mostly gone. Where the fire takes hold first is a
+// property of the place, so patches of one crown light up at different
+// moments and the front crawls. The skeleton uses the same field to show up
+// where the leaves go.
+fn burn_front(p: vec3<f32>, prog: f32) -> f32 {
+    let n = 0.45 * value_noise(p.xz * 0.8 + vec2<f32>(p.y * 0.5, 3.0))
+          + 0.55 * value_noise(p.xz * 2.7 + vec2<f32>(-p.y * 1.9, 7.0));
+    return prog * 1.6 - n * 0.9;
+}
+
+// Where a leaf is eaten first: holes cut at every distance, in cells about
+// a pixel wide (`px_m` metres), so a crown thins out instead of darkening
+// to grey. Only the cut-out passes call it.
+fn hole_at(p: vec3<f32>, px_m: f32) -> f32 {
+    let cell = max(0.3, px_m * 1.5);
+    let coarse = hash21(floor(p.xz / cell) + vec2<f32>(floor(p.y / cell) * 37.0, 5.0));
+    let fine = value_noise(p.xz * 3.1 + vec2<f32>(p.y * 2.3, 17.0));
+    return mix(coarse, fine, 1.0 - smoothstep(1.0, 3.5, px_m));
+}
+
+// How much of the leaves at `p` the front has eaten (`burn_plant`): what
+// the shadow pass must also leave out, or a crown burnt to its twigs goes
+// on casting the shadow of its foliage (2026-11-04).
+fn burn_gone(p: vec3<f32>, prog: f32) -> f32 {
+    return smoothstep(0.20, 0.48, burn_front(p, prog));
 }

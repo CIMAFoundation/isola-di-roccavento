@@ -24,9 +24,11 @@ struct Terrain {
     // z = half a texel in u, w = the north edge plus half a texel in v
     ground_rect: vec4<f32>,
     // x: tactical desaturation, 0 (full colour) to 1 (`tactical.rs`);
-    // y, z: the canopy's fade from shade to crowns, metres from the eye
+    // y, z: the canopy's fade from shade to crowns, metres from the eye;
+    // w: the forest's occlusion, 0 (off) to 1 (`forest_cover`)
     tactical: vec4<f32>,
-    // mean crown colour (linear) of conifers, broadleaves, macchia
+    // mean crown colour (linear) of conifers, broadleaves, macchia; in the
+    // conifers' w the samples' posting (m)
     canopy_conifer: vec4<f32>,
     canopy_broadleaf: vec4<f32>,
     canopy_macchia: vec4<f32>,
@@ -246,13 +248,47 @@ fn terrain_albedo(base: vec4<f32>, p: vec3<f32>, mask_s: vec4<f32>, meadow: f32,
 // the full-density forest as a disc, `cover` of the sample. Far from the eye
 // it is the crowns' colour, broken up a little so it does not read as paint;
 // near it, where the real plants stand, only their shade and litter.
-fn with_canopy(rgb: vec3<f32>, p: vec3<f32>, cover: f32, kind: f32, light: f32) -> vec3<f32> {
-    if cover < 0.004 {
-        return rgb;
+// The forest around a point, as the sky sees it (2026-11-04): the canopy's
+// cover averaged over ~25 m (x) and ~100 m (y), read from the mips of the
+// ground colour's alpha. Zero when the occlusion is off (the texture then has
+// no mips). A closed stand hides the sky from the ground under it and from
+// its own lower crowns; a clearing or an edge keeps it.
+const FOREST_MID_M: f32 = 25.0;
+const FOREST_WIDE_M: f32 = 100.0;
+fn forest_cover(guv: vec2<f32>) -> vec2<f32> {
+    if terrain.tactical.w <= 0.0 {
+        return vec2<f32>(0.0);
     }
-    let d_eye = distance(p, view.world_position.xyz);
-    let far = smoothstep(terrain.tactical.y, terrain.tactical.z, d_eye);
-    let crown = mix(
+    let lp = log2(max(terrain.canopy_conifer.w, 0.5));
+    let mid = textureSampleLevel(ground_col_tex, ground_col_samp, guv, max(log2(FOREST_MID_M) - lp, 0.0)).a;
+    let wide = textureSampleLevel(ground_col_tex, ground_col_samp, guv, max(log2(FOREST_WIDE_M) - lp, 0.0)).a;
+    return vec2<f32>(mid, wide) * terrain.tactical.w;
+}
+
+// The ground's ambient under the forest, and the crowns' (painted far away,
+// they stand above the stand and see most of the sky).
+fn forest_ao(forest: vec2<f32>, cover: f32, far: f32) -> f32 {
+    let ground = 1.0 - 0.38 * forest.x - 0.30 * forest.y;
+    let crowns = 1.0 - 0.15 * forest.y;
+    return mix(ground, crowns, cover * far);
+}
+
+fn canopy_far(p: vec3<f32>) -> f32 {
+    return smoothstep(terrain.tactical.y, terrain.tactical.z, distance(p, view.world_position.xyz));
+}
+
+fn with_canopy(rgb_in: vec3<f32>, p: vec3<f32>, cover: f32, kind: f32, light: f32, forest: vec2<f32>) -> vec3<f32> {
+    if cover < 0.004 {
+        return rgb_in;
+    }
+    // far away the gaps between the painted crowns are the shade deep in
+    // the stand, and the crowns of a big wood are darker than those at its
+    // edge or alone (they see less sky)
+    let far0 = canopy_far(p);
+    let rgb = rgb_in * mix(1.0, 1.0 - 0.45 * forest.x - 0.20 * forest.y, far0);
+    let crown_k = 1.0 + 0.10 * (1.0 - forest.y) * step(0.001, terrain.tactical.w) - 0.22 * forest.y;
+    let far = far0;
+    let crown = crown_k * mix(
         mix(terrain.canopy_conifer.rgb, terrain.canopy_broadleaf.rgb, clamp(kind * 2.0, 0.0, 1.0)),
         terrain.canopy_macchia.rgb,
         clamp(kind * 2.0 - 1.0, 0.0, 1.0),
@@ -283,7 +319,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let guv = vec2<f32>(p.x * gr.x + gr.z, p.z * gr.y + gr.w);
     let g_col4 = textureSampleLevel(ground_col_tex, ground_col_samp, guv, 0.0);
     let g_nrm4 = textureSampleLevel(ground_nrm_tex, ground_nrm_samp, guv, 0.0);
-    let g_col = with_canopy(g_col4.rgb, p, g_col4.a, g_nrm4.z, g_nrm4.w);
+    let forest = forest_cover(guv);
+    let g_col = with_canopy(g_col4.rgb, p, g_col4.a, g_nrm4.z, g_nrm4.w, forest);
     // the normal's y is always up: rebuilt from x and z
     var g_nrm = normalize(vec3<f32>(g_nrm4.x, sqrt(max(1.0 - g_nrm4.x * g_nrm4.x - g_nrm4.y * g_nrm4.y, 0.0)), g_nrm4.y));
     if !is_front {
@@ -306,6 +343,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr.material.metallic = 0.0;
     pbr.material.reflectance = vec3<f32>(REFLECTANCE);
     pbr.material.flags |= pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    pbr.diffuse_occlusion = vec3<f32>(forest_ao(forest, g_col4.a, canopy_far(p)));
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting_faded(pbr);

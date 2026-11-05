@@ -1,0 +1,1021 @@
+{
+ "atlas": {
+  "width": 4096,
+  "height": 4096
+ },
+ "vertex_bytes": 36,
+ "plants": {
+  "island_tree_01_0": {
+   "lod0": {
+    "height_m": 5.03,
+    "leaf_rgb": [
+     0.105,
+     0.1193,
+     0.0194
+    ],
+    "offset": 0,
+    "vertices": 51953,
+    "indices": 111312
+   },
+   "lod1": {
+    "height_m": 5.03,
+    "leaf_rgb": [
+     0.1021,
+     0.111,
+     0.0281
+    ],
+    "offset": 2092932,
+    "vertices": 7835,
+    "indices": 13515
+   },
+   "lod2": {
+    "height_m": 5.03,
+    "leaf_rgb": [
+     0.0984,
+     0.1023,
+     0.0368
+    ],
+    "offset": 2402024,
+    "vertices": 1232,
+    "indices": 1590
+   },
+   "lod3": {
+    "height_m": 5.03,
+    "leaf_rgb": [
+     0.119,
+     0.1065,
+     0.0734
+    ],
+    "offset": 2449556,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "island_tree_02_0": {
+   "lod0": {
+    "height_m": 3.41,
+    "leaf_rgb": [
+     0.1054,
+     0.1201,
+     0.0186
+    ],
+    "offset": 2452292,
+    "vertices": 36871,
+    "indices": 76485
+   },
+   "lod1": {
+    "height_m": 3.41,
+    "leaf_rgb": [
+     0.1024,
+     0.1111,
+     0.0286
+    ],
+    "offset": 3932620,
+    "vertices": 4965,
+    "indices": 8958
+   },
+   "lod2": {
+    "height_m": 3.41,
+    "leaf_rgb": [
+     0.0992,
+     0.1023,
+     0.0379
+    ],
+    "offset": 4129276,
+    "vertices": 830,
+    "indices": 1230
+   },
+   "lod3": {
+    "height_m": 3.41,
+    "leaf_rgb": [
+     0.1172,
+     0.1043,
+     0.0681
+    ],
+    "offset": 4161616,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "island_tree_03_0": {
+   "lod0": {
+    "height_m": 2.62,
+    "leaf_rgb": [
+     0.103,
+     0.1132,
+     0.0258
+    ],
+    "offset": 4164352,
+    "vertices": 14795,
+    "indices": 29316
+   },
+   "lod1": {
+    "height_m": 2.62,
+    "leaf_rgb": [
+     0.0965,
+     0.103,
+     0.0308
+    ],
+    "offset": 4755604,
+    "vertices": 2353,
+    "indices": 4002
+   },
+   "lod2": {
+    "height_m": 2.62,
+    "leaf_rgb": [
+     0.1082,
+     0.1069,
+     0.0518
+    ],
+    "offset": 4848316,
+    "vertices": 483,
+    "indices": 924
+   },
+   "lod3": {
+    "height_m": 2.62,
+    "leaf_rgb": [
+     0.2014,
+     0.1772,
+     0.1384
+    ],
+    "offset": 4867552,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "tree_small_02_0": {
+   "lod0": {
+    "height_m": 4.56,
+    "leaf_rgb": [
+     0.0861,
+     0.1427,
+     0.0447
+    ],
+    "offset": 4870288,
+    "vertices": 22439,
+    "indices": 39423
+   },
+   "lod1": {
+    "height_m": 4.56,
+    "leaf_rgb": [
+     0.0833,
+     0.1306,
+     0.0432
+    ],
+    "offset": 5756940,
+    "vertices": 3801,
+    "indices": 5241
+   },
+   "lod2": {
+    "height_m": 4.56,
+    "leaf_rgb": [
+     0.0841,
+     0.1158,
+     0.0426
+    ],
+    "offset": 5904260,
+    "vertices": 774,
+    "indices": 1209
+   },
+   "lod3": {
+    "height_m": 4.56,
+    "leaf_rgb": [
+     0.0985,
+     0.1113,
+     0.0439
+    ],
+    "offset": 5934544,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "pine_tree_01_0": {
+   "lod0": {
+    "height_m": 20.37,
+    "leaf_rgb": [
+     0.0444,
+     0.0424,
+     0.0217
+    ],
+    "offset": 5937280,
+    "vertices": 58405,
+    "indices": 223416
+   },
+   "lod1": {
+    "height_m": 20.37,
+    "leaf_rgb": [
+     0.0412,
+     0.039,
+     0.0203
+    ],
+    "offset": 8486692,
+    "vertices": 20423,
+    "indices": 42036
+   },
+   "lod2": {
+    "height_m": 20.37,
+    "leaf_rgb": [
+     0.0361,
+     0.0332,
+     0.0187
+    ],
+    "offset": 9305992,
+    "vertices": 5369,
+    "indices": 6612
+   },
+   "lod3": {
+    "height_m": 20.37,
+    "leaf_rgb": [
+     0.031,
+     0.0272,
+     0.0177
+    ],
+    "offset": 9512500,
+    "vertices": 432,
+    "indices": 432
+   }
+  },
+  "pine_tree_01_1": {
+   "lod0": {
+    "height_m": 14.88,
+    "leaf_rgb": [
+     0.0485,
+     0.0468,
+     0.0234
+    ],
+    "offset": 9528916,
+    "vertices": 46198,
+    "indices": 154434
+   },
+   "lod1": {
+    "height_m": 14.88,
+    "leaf_rgb": [
+     0.0449,
+     0.043,
+     0.0219
+    ],
+    "offset": 11500912,
+    "vertices": 18438,
+    "indices": 32586
+   },
+   "lod2": {
+    "height_m": 14.88,
+    "leaf_rgb": [
+     0.0367,
+     0.0337,
+     0.0189
+    ],
+    "offset": 12229852,
+    "vertices": 3824,
+    "indices": 4344
+   },
+   "lod3": {
+    "height_m": 14.88,
+    "leaf_rgb": [
+     0.031,
+     0.0273,
+     0.0177
+    ],
+    "offset": 12376204,
+    "vertices": 324,
+    "indices": 324
+   }
+  },
+  "pine_tree_01_2": {
+   "lod0": {
+    "height_m": 17.54,
+    "leaf_rgb": [
+     0.0454,
+     0.0435,
+     0.0221
+    ],
+    "offset": 12388516,
+    "vertices": 53740,
+    "indices": 198303
+   },
+   "lod1": {
+    "height_m": 17.54,
+    "leaf_rgb": [
+     0.0422,
+     0.04,
+     0.0207
+    ],
+    "offset": 14719764,
+    "vertices": 19768,
+    "indices": 38778
+   },
+   "lod2": {
+    "height_m": 17.54,
+    "leaf_rgb": [
+     0.0357,
+     0.0327,
+     0.0186
+    ],
+    "offset": 15508968,
+    "vertices": 4540,
+    "indices": 5145
+   },
+   "lod3": {
+    "height_m": 17.54,
+    "leaf_rgb": [
+     0.0311,
+     0.0274,
+     0.0179
+    ],
+    "offset": 15682700,
+    "vertices": 378,
+    "indices": 378
+   }
+  },
+  "searsia_lucida_0": {
+   "lod0": {
+    "height_m": 2.34,
+    "leaf_rgb": [
+     0.1798,
+     0.2002,
+     0.0722
+    ],
+    "offset": 15697064,
+    "vertices": 8421,
+    "indices": 14310
+   },
+   "lod1": {
+    "height_m": 2.34,
+    "leaf_rgb": [
+     0.1702,
+     0.1799,
+     0.0744
+    ],
+    "offset": 16028840,
+    "vertices": 1535,
+    "indices": 1851
+   },
+   "lod2": {
+    "height_m": 2.34,
+    "leaf_rgb": [
+     0.1573,
+     0.1581,
+     0.0733
+    ],
+    "offset": 16087804,
+    "vertices": 162,
+    "indices": 162
+   },
+   "lod3": {
+    "height_m": 2.34,
+    "leaf_rgb": [
+     0.1496,
+     0.1464,
+     0.0714
+    ],
+    "offset": 16093960,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_lucida_1": {
+   "lod0": {
+    "height_m": 1.99,
+    "leaf_rgb": [
+     0.178,
+     0.2006,
+     0.0697
+    ],
+    "offset": 16096696,
+    "vertices": 5061,
+    "indices": 8019
+   },
+   "lod1": {
+    "height_m": 1.99,
+    "leaf_rgb": [
+     0.1649,
+     0.179,
+     0.0682
+    ],
+    "offset": 16294932,
+    "vertices": 862,
+    "indices": 1155
+   },
+   "lod2": {
+    "height_m": 1.99,
+    "leaf_rgb": [
+     0.152,
+     0.1566,
+     0.0676
+    ],
+    "offset": 16328276,
+    "vertices": 108,
+    "indices": 108
+   },
+   "lod3": {
+    "height_m": 1.99,
+    "leaf_rgb": [
+     0.1477,
+     0.1517,
+     0.066
+    ],
+    "offset": 16332380,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_lucida_2": {
+   "lod0": {
+    "height_m": 1.68,
+    "leaf_rgb": [
+     0.1786,
+     0.2005,
+     0.0705
+    ],
+    "offset": 16335116,
+    "vertices": 3648,
+    "indices": 5298
+   },
+   "lod1": {
+    "height_m": 1.68,
+    "leaf_rgb": [
+     0.1664,
+     0.1825,
+     0.0677
+    ],
+    "offset": 16477040,
+    "vertices": 686,
+    "indices": 1050
+   },
+   "lod2": {
+    "height_m": 1.68,
+    "leaf_rgb": [
+     0.1532,
+     0.1602,
+     0.0664
+    ],
+    "offset": 16503836,
+    "vertices": 90,
+    "indices": 90
+   },
+   "lod3": {
+    "height_m": 1.68,
+    "leaf_rgb": [
+     0.1512,
+     0.1569,
+     0.066
+    ],
+    "offset": 16507256,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_lucida_3": {
+   "lod0": {
+    "height_m": 1.42,
+    "leaf_rgb": [
+     0.1772,
+     0.2008,
+     0.0689
+    ],
+    "offset": 16509992,
+    "vertices": 2151,
+    "indices": 2997
+   },
+   "lod1": {
+    "height_m": 1.42,
+    "leaf_rgb": [
+     0.1641,
+     0.1816,
+     0.0658
+    ],
+    "offset": 16593424,
+    "vertices": 482,
+    "indices": 867
+   },
+   "lod2": {
+    "height_m": 1.42,
+    "leaf_rgb": [
+     0.152,
+     0.1621,
+     0.0641
+    ],
+    "offset": 16612512,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 1.42,
+    "leaf_rgb": [
+     0.1511,
+     0.1618,
+     0.0633
+    ],
+    "offset": 16615248,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_lucida_4": {
+   "lod0": {
+    "height_m": 1.02,
+    "leaf_rgb": [
+     0.1779,
+     0.2004,
+     0.0699
+    ],
+    "offset": 16617984,
+    "vertices": 1240,
+    "indices": 1674
+   },
+   "lod1": {
+    "height_m": 1.02,
+    "leaf_rgb": [
+     0.164,
+     0.1797,
+     0.0664
+    ],
+    "offset": 16665972,
+    "vertices": 227,
+    "indices": 450
+   },
+   "lod2": {
+    "height_m": 1.02,
+    "leaf_rgb": [
+     0.1607,
+     0.1729,
+     0.0668
+    ],
+    "offset": 16675044,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 1.02,
+    "leaf_rgb": [
+     0.1607,
+     0.1723,
+     0.067
+    ],
+    "offset": 16677780,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_lucida_5": {
+   "lod0": {
+    "height_m": 0.74,
+    "leaf_rgb": [
+     0.1804,
+     0.2069,
+     0.0691
+    ],
+    "offset": 16680516,
+    "vertices": 626,
+    "indices": 993
+   },
+   "lod1": {
+    "height_m": 0.74,
+    "leaf_rgb": [
+     0.1676,
+     0.1822,
+     0.0681
+    ],
+    "offset": 16705040,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod2": {
+    "height_m": 0.74,
+    "leaf_rgb": [
+     0.1676,
+     0.1822,
+     0.0681
+    ],
+    "offset": 16707776,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.74,
+    "leaf_rgb": [
+     0.1676,
+     0.1822,
+     0.0681
+    ],
+    "offset": 16710512,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_lucida_6": {
+   "lod0": {
+    "height_m": 0.79,
+    "leaf_rgb": [
+     0.1771,
+     0.2015,
+     0.0688
+    ],
+    "offset": 16713248,
+    "vertices": 428,
+    "indices": 816
+   },
+   "lod1": {
+    "height_m": 0.79,
+    "leaf_rgb": [
+     0.1699,
+     0.1877,
+     0.068
+    ],
+    "offset": 16730288,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod2": {
+    "height_m": 0.79,
+    "leaf_rgb": [
+     0.1701,
+     0.1882,
+     0.0678
+    ],
+    "offset": 16733024,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.79,
+    "leaf_rgb": [
+     0.1708,
+     0.1894,
+     0.0679
+    ],
+    "offset": 16735760,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_burchellii_0": {
+   "lod0": {
+    "height_m": 3.24,
+    "leaf_rgb": [
+     0.1257,
+     0.1223,
+     0.0494
+    ],
+    "offset": 16738496,
+    "vertices": 37494,
+    "indices": 68508
+   },
+   "lod1": {
+    "height_m": 3.24,
+    "leaf_rgb": [
+     0.1222,
+     0.1131,
+     0.0523
+    ],
+    "offset": 18225296,
+    "vertices": 5749,
+    "indices": 6633
+   },
+   "lod2": {
+    "height_m": 3.24,
+    "leaf_rgb": [
+     0.1405,
+     0.1177,
+     0.0665
+    ],
+    "offset": 18445528,
+    "vertices": 830,
+    "indices": 1284
+   },
+   "lod3": {
+    "height_m": 3.24,
+    "leaf_rgb": [
+     0.1723,
+     0.1337,
+     0.0875
+    ],
+    "offset": 18477976,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_burchellii_1": {
+   "lod0": {
+    "height_m": 2.59,
+    "leaf_rgb": [
+     0.1237,
+     0.1215,
+     0.0477
+    ],
+    "offset": 18480712,
+    "vertices": 21474,
+    "indices": 33756
+   },
+   "lod1": {
+    "height_m": 2.59,
+    "leaf_rgb": [
+     0.1156,
+     0.1109,
+     0.0465
+    ],
+    "offset": 19321288,
+    "vertices": 4200,
+    "indices": 5154
+   },
+   "lod2": {
+    "height_m": 2.59,
+    "leaf_rgb": [
+     0.126,
+     0.1109,
+     0.0551
+    ],
+    "offset": 19482796,
+    "vertices": 493,
+    "indices": 939
+   },
+   "lod3": {
+    "height_m": 2.59,
+    "leaf_rgb": [
+     0.1705,
+     0.1355,
+     0.0799
+    ],
+    "offset": 19502424,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "searsia_burchellii_2": {
+   "lod0": {
+    "height_m": 1.94,
+    "leaf_rgb": [
+     0.1291,
+     0.1249,
+     0.0513
+    ],
+    "offset": 19505160,
+    "vertices": 6781,
+    "indices": 10947
+   },
+   "lod1": {
+    "height_m": 1.94,
+    "leaf_rgb": [
+     0.1263,
+     0.1161,
+     0.0552
+    ],
+    "offset": 19771172,
+    "vertices": 1243,
+    "indices": 1392
+   },
+   "lod2": {
+    "height_m": 1.94,
+    "leaf_rgb": [
+     0.135,
+     0.1151,
+     0.0644
+    ],
+    "offset": 19818704,
+    "vertices": 144,
+    "indices": 144
+   },
+   "lod3": {
+    "height_m": 1.94,
+    "leaf_rgb": [
+     0.1489,
+     0.1215,
+     0.074
+    ],
+    "offset": 19824176,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "wild_rooibos_bush_0": {
+   "lod0": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0696,
+     0.0501,
+     0.0172
+    ],
+    "offset": 19826912,
+    "vertices": 898,
+    "indices": 1086
+   },
+   "lod1": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0696,
+     0.0499,
+     0.0237
+    ],
+    "offset": 19861412,
+    "vertices": 90,
+    "indices": 90
+   },
+   "lod2": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0698,
+     0.0501,
+     0.0243
+    ],
+    "offset": 19864832,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0698,
+     0.0501,
+     0.0243
+    ],
+    "offset": 19867568,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "wild_rooibos_bush_1": {
+   "lod0": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.07,
+     0.0504,
+     0.0173
+    ],
+    "offset": 19870304,
+    "vertices": 556,
+    "indices": 870
+   },
+   "lod1": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0687,
+     0.0492,
+     0.0223
+    ],
+    "offset": 19892060,
+    "vertices": 157,
+    "indices": 456
+   },
+   "lod2": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0684,
+     0.0487,
+     0.0217
+    ],
+    "offset": 19898624,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.54,
+    "leaf_rgb": [
+     0.0683,
+     0.0488,
+     0.0218
+    ],
+    "offset": 19901360,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "wild_rooibos_bush_2": {
+   "lod0": {
+    "height_m": 0.45,
+    "leaf_rgb": [
+     0.0697,
+     0.0502,
+     0.0168
+    ],
+    "offset": 19904096,
+    "vertices": 430,
+    "indices": 798
+   },
+   "lod1": {
+    "height_m": 0.45,
+    "leaf_rgb": [
+     0.0654,
+     0.0466,
+     0.018
+    ],
+    "offset": 19921172,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod2": {
+    "height_m": 0.45,
+    "leaf_rgb": [
+     0.065,
+     0.0465,
+     0.0164
+    ],
+    "offset": 19923908,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.45,
+    "leaf_rgb": [
+     0.0658,
+     0.0472,
+     0.0182
+    ],
+    "offset": 19926644,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "wild_rooibos_bush_3": {
+   "lod0": {
+    "height_m": 0.42,
+    "leaf_rgb": [
+     0.0678,
+     0.0488,
+     0.0163
+    ],
+    "offset": 19929380,
+    "vertices": 343,
+    "indices": 741
+   },
+   "lod1": {
+    "height_m": 0.42,
+    "leaf_rgb": [
+     0.0662,
+     0.0475,
+     0.0178
+    ],
+    "offset": 19943212,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod2": {
+    "height_m": 0.42,
+    "leaf_rgb": [
+     0.0667,
+     0.0479,
+     0.0177
+    ],
+    "offset": 19945948,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.42,
+    "leaf_rgb": [
+     0.0662,
+     0.0474,
+     0.0188
+    ],
+    "offset": 19948684,
+    "vertices": 72,
+    "indices": 72
+   }
+  },
+  "wild_rooibos_bush_4": {
+   "lod0": {
+    "height_m": 0.31,
+    "leaf_rgb": [
+     0.0719,
+     0.052,
+     0.0168
+    ],
+    "offset": 19951420,
+    "vertices": 147,
+    "indices": 384
+   },
+   "lod1": {
+    "height_m": 0.31,
+    "leaf_rgb": [
+     0.0739,
+     0.0535,
+     0.0181
+    ],
+    "offset": 19957480,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod2": {
+    "height_m": 0.31,
+    "leaf_rgb": [
+     0.0726,
+     0.0526,
+     0.0177
+    ],
+    "offset": 19960216,
+    "vertices": 72,
+    "indices": 72
+   },
+   "lod3": {
+    "height_m": 0.31,
+    "leaf_rgb": [
+     0.0711,
+     0.0514,
+     0.018
+    ],
+    "offset": 19962952,
+    "vertices": 72,
+    "indices": 72
+   }
+  }
+ }
+}

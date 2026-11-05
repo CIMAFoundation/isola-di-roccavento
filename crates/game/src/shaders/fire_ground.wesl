@@ -12,7 +12,9 @@ import game::shaders::noise::{hash21, value_noise};
 // How long ground stays visibly incandescent after the front passes. Much
 // shorter than the 20-minute burn-out: past this it is a scar with smoke over
 // it, not a glowing surface, or the glow reads as orange fog on the hillside.
-const GLOWING_S: f32 = 1100.0;
+// 2026-11-04: from 1100 s, which painted a wide orange band; now the bright
+// line is the front's own, embers glint in the char behind it.
+const GLOWING_S: f32 = 600.0;
 
 // Fractal Brownian motion, domain-warped: the warp is what turns blobby
 // noise into the tendrilled, branching texture of a real fire front.
@@ -54,8 +56,10 @@ fn fire_ramp(h: f32) -> vec3<f32> {
     // ember red -> orange -> yellow -> near white, h in 0..1
     let c0 = vec3<f32>(0.80, 0.08, 0.02);
     let c1 = vec3<f32>(2.50, 0.60, 0.06);
-    let c2 = vec3<f32>(3.60, 1.80, 0.28);
-    let c3 = vec3<f32>(4.40, 3.50, 1.60);
+    // 2026-11-04: burning ground glows orange, never white (it drew white
+    // patches in the band seen from a hundred metres)
+    let c2 = vec3<f32>(2.90, 1.05, 0.12);
+    let c3 = vec3<f32>(3.30, 1.65, 0.30);
     let a = clamp(h * 3.0, 0.0, 1.0);
     let b = clamp(h * 3.0 - 1.0, 0.0, 1.0);
     let c = clamp(h * 3.0 - 2.0, 0.0, 1.0);
@@ -79,7 +83,7 @@ fn fire_colour(p: vec3<f32>, fire: vec4<f32>) -> vec4<f32> {
     // the interpolated arrival, unburnt corners dragging it later (`field::arrival`)
     let age = max(-fire.b / max(fire.g, 1e-3) - (1.0 - fire.g) * 90.0, 0.0);
     // Incandescent only just behind the front, then straight to scar.
-    let glow = pow(clamp(1.0 - age / GLOWING_S, 0.0, 1.0), 2.0);
+    let glow = pow(clamp(1.0 - age / GLOWING_S, 0.0, 1.0), 3.0);
     let embers = clamp(1.0 - age / (GLOWING_S * 4.0), 0.0, 1.0);
     // Char and ash at a scale the fire model has no opinion about.
     let ash = 0.72 + 0.85 * (0.6 * value_noise(wp / 23.0 + 7.0) + 0.4 * value_noise(wp / 8.0 + 13.0));
@@ -139,9 +143,13 @@ fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32) -> Fi
         // breaks into patches and fingers. Slow breathing of the whole front,
         // offset by position so it rolls along the line.
         let breath = 0.5 + 0.5 * sin(t * 2.2 + wpc.x * 0.035 + wpc.y * 0.027);
-        let local = heat * 1.75 - (1.0 - n) * 0.70 + (crackle - 0.5) * 0.30 + breath * 0.10;
-        let hot = smoothstep(0.0, 0.18, local);
-        let flame = fire_ramp(clamp(local, 0.0, 1.0)) * (0.85 + 0.55 * crackle);
+        // (2026-11-04: patchier, from heat * 1.75 - (1 - n) * 0.70: away
+        // from the front itself the band is char with glowing patches,
+        // not an orange carpet)
+        let local = heat * 1.5 - (1.0 - n) * 0.95 + (crackle - 0.5) * 0.40 + breath * 0.10;
+        let hot = smoothstep(0.05, 0.25, local);
+        // (2026-11-04: from 0.85 + 0.55: the hottest patches burnt out to white)
+        let flame = fire_ramp(clamp(local, 0.0, 1.0)) * (0.7 + 0.4 * crackle);
         // The cooler gaps: dark char with a faint red glint.
         let char_col = vec3<f32>(0.06, 0.03, 0.025) + vec3<f32>(0.9, 0.12, 0.0) * (1.0 - hot) * heat * n;
         let rgb = mix(col.rgb, mix(char_col, flame, hot), w);
@@ -183,22 +191,28 @@ fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32) -> Fi
         // grey ash and near-black charcoal by noise at three scales, then
         // broken up by fine grit and hairline cracks.
         let big = fbm_lod(wpc * 0.035 + 31.0, 0.035, mpp);
-        let mid = fbm_lod(wpc * 0.16 + warp * 1.5 + 9.0, 0.16, mpp);
+        // 2026-11-04: no warp on the middle scale (it drew swirls that read
+        // as wet asphalt from the play camera) and a warm grey, not a blue
+        // one: a burnt Mediterranean slope is charcoal and brown soil with
+        // pale ash where the shrubs stood
+        let mid = fbm_lod(wpc * 0.16 + 9.0, 0.16, mpp);
         let lum = dot(col.rgb, vec3<f32>(0.33, 0.45, 0.22));
-        let brown = vec3<f32>(1.35, 0.95, 0.68);
-        let grey = vec3<f32>(0.95, 1.0, 1.08);
+        let brown = vec3<f32>(1.35, 0.92, 0.62);
+        let grey = vec3<f32>(1.0, 0.96, 0.92);
         let hue = smoothstep(0.30, 0.70, big * 0.65 + mid * 0.35);
         let tone = mix(brown, grey, hue);
         // Ash drifts: pale grey patches, charcoal pockets, both patchy.
-        let ash = smoothstep(0.58, 0.82, mid) * (1.0 - fringe);
+        let ash = smoothstep(0.60, 0.84, mid) * (1.0 - fringe) * (0.5 + 0.5 * smoothstep(0.4, 0.7, grit));
         let coal = smoothstep(0.62, 0.20, mid * 0.7 + grit * 0.3);
         var base = vec3<f32>(lum) * tone * (0.9 + 0.7 * (mid - 0.5));
-        base = mix(base, vec3<f32>(0.30, 0.285, 0.27) * (0.8 + 0.4 * grit), ash * 0.65);
+        base = mix(base, vec3<f32>(0.27, 0.25, 0.23) * (0.8 + 0.4 * grit), ash * 0.6);
         base = mix(base, base * 0.35, coal * 0.6);
         // Hairline cracks and pits: dark ridges where two noise fields cross.
         let cr = abs(value_noise(wpc * 0.9 + warp * 6.0) - 0.5);
         let crack = (1.0 - smoothstep(0.0, 0.035, cr)) * (1.0 - smoothstep(0.6, 1.5, mpp));
-        base *= 1.0 - 0.45 * crack;
+        // faint: strong, they drew contour lines over the slope once the
+        // grass on it was burnt away (2026-11-04)
+        base *= 1.0 - 0.2 * crack;
         // Matte, gritty finish: high-frequency speckle, no uniform sheen.
         base *= 0.82 + 0.36 * grit;
         scar = base * scorch;

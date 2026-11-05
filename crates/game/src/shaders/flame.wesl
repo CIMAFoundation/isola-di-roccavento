@@ -15,24 +15,15 @@ import game::shaders::noise::{hash21, value_noise};
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var base_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var<uniform> mode: vec4<f32>;
 
-fn fbm2(p_in: vec2<f32>) -> f32 {
-    var p = p_in;
-    var a = 0.5;
-    var s = 0.0;
-    for (var i = 0; i < 3; i++) {
-        s += a * value_noise(p);
-        p = p * 2.13 + vec2<f32>(5.1, 1.7);
-        a *= 0.5;
-    }
-    return s / 0.875;
-}
-
 // Blackbody-ish ramp: deep red tip -> orange -> yellow -> white-hot core.
 fn flame_ramp(h: f32) -> vec3<f32> {
-    let c0 = vec3<f32>(0.9, 0.10, 0.02);
-    let c1 = vec3<f32>(2.4, 0.55, 0.06);
-    let c2 = vec3<f32>(3.4, 1.7, 0.25);
-    let c3 = vec3<f32>(4.2, 3.4, 1.8);
+    // 2026-11-04: deeper orange, a smaller white core: in daylight a
+    // wildfire's flames read orange-yellow, and the white sheets washed out
+    // against the realistic plants
+    let c0 = vec3<f32>(0.85, 0.20, 0.025);
+    let c1 = vec3<f32>(2.3, 0.48, 0.04);
+    let c2 = vec3<f32>(3.2, 1.35, 0.16);
+    let c3 = vec3<f32>(3.8, 2.5, 0.9);
     let a = clamp(h * 3.0, 0.0, 1.0);
     let b = clamp(h * 3.0 - 1.0, 0.0, 1.0);
     let c = clamp(h * 3.0 - 2.0, 0.0, 1.0);
@@ -100,40 +91,57 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         c0.a = tx.a * in.color.a;
         return c0;
     }
-    // A per-tongue phase from its own world position, so two billboards
-    // spawned on the same frame do not breathe in unison.
-    let seed = in.world_position.x * 0.13 + in.world_position.z * 0.071;
+    // 2026-11-05 (the user: «più realistico», a flipbook): every tongue
+    // plays a filmed flame (`textures::flame_flipbook`, 2 sequences of 64
+    // frames, CC0 Unity Labs). uv.x carries the tongue's number besides its
+    // place across (`QuadBuilder::tongue`: 2 id + 0.5 + u), so neighbours
+    // play different sequences, from different frames, at different rates,
+    // some mirrored: the front is a wall of flames that do not repeat.
+    let id = floor(in.uv.x * 0.5);
+    var u = clamp(in.uv.x - 2.0 * id - 0.5, 0.0, 1.0);
+    let v = clamp(in.uv.y, 0.0, 1.0);
+    let foot = v;
+    let up = 1.0 - v;
+    let seq = id % 2.0;
+    let start = floor(id * 0.5) % 64.0;
+    if id >= 128.0 {
+        u = 1.0 - u;
+    }
+    let h = hash21(vec2<f32>(id, 7.0));
+    // big flames move slower than a campfire's: about the film's own 24 fps
+    // stretched to 14-22
+    let f = t * (14.0 + 8.0 * h) + start;
+    let w = fract(f);
+    let f0 = floor(f) % 64.0;
+    let f1 = (f0 + 1.0) % 64.0;
+    let cell = vec2<f32>(1.0 / 16.0, 1.0 / 8.0);
+    let uv0 = (vec2<f32>(f0 % 16.0, floor(f0 / 16.0) + 4.0 * seq) + vec2<f32>(u, v)) * cell;
+    let uv1 = (vec2<f32>(f1 % 16.0, floor(f1 / 16.0) + 4.0 * seq) + vec2<f32>(u, v)) * cell;
+    let tx = mix(textureSample(base_texture, base_sampler, uv0), textureSample(base_texture, base_sampler, uv1), w);
+    // nothing at the quad's edges, whatever the frame
+    let edge = smoothstep(0.0, 0.04, u) * smoothstep(1.0, 0.96, u) * smoothstep(0.0, 0.03, v);
 
-    // uv.y: 0 at the tip, 1 at the foot (see QuadBuilder::billboard).
-    var uv = in.uv;
-    let foot = uv.y;
-
-    // Fire rises: noise scrolls upward fast, and the sideways warp grows
-    // toward the tip so the flame licks and curls instead of standing still.
-    let rise = vec2<f32>(uv.x * 4.0 + seed, uv.y * 3.5 + t * 3.4);
-    let warp = fbm2(rise) - 0.5;
-    // Lean: the tip streams sideways on a slow wave, the foot stays put, so
-    // the tongue bends and whips instead of bobbing up and down.
-    let lean = (value_noise(vec2<f32>(t * 1.7 + seed * 5.0, 3.0)) - 0.5) * 0.9;
-    uv.x += warp * (0.12 + 0.38 * (1.0 - foot)) + lean * (1.0 - foot) * (1.0 - foot);
-    uv.y += (value_noise(vec2<f32>(uv.x * 6.0 - seed, uv.y * 5.0 + t * 4.5)) - 0.5) * 0.06;
-
-    let tex = textureSample(base_texture, base_sampler, uv);
-
-    // Erode the silhouette with rising noise: tongues break into flickering
-    // wisps toward the tip, but the foot stays solid.
-    let erode = fbm2(vec2<f32>(uv.x * 7.0 + seed * 2.0, uv.y * 6.0 + t * 3.8));
-    // Hard guarantee that nothing is drawn at the quad's top edge.
-    let tipfade = smoothstep(0.0, 0.22, uv.y) * smoothstep(0.0, 0.06, uv.x) * smoothstep(1.0, 0.94, uv.x);
-    let body = tipfade * tex.a * smoothstep(0.0, 0.55, tex.a * 1.6 + (erode - 0.5) * (0.9 - 0.5 * foot));
-
-    // Heat: hot at the foot and core, cooling toward the tip and edges.
-    let flicker = 0.85 + 0.30 * value_noise(vec2<f32>(t * 9.0 + seed * 7.0, seed * 3.0));
-    let heat = clamp(body * (0.35 + 0.85 * foot) * flicker + (erode - 0.5) * 0.25, 0.0, 1.0);
-
-    // in.color carries the CPU's brightness (cell intensity); use it as a
-    // gain on the ramp, not as the colour itself.
+    // in.color carries the CPU's brightness (cell intensity): a gain on
+    // the ramp, not the colour itself
     let gain = clamp(in.color.r * 0.30, 0.55, 1.6);
-    var col = vec4<f32>(flame_ramp(heat) * gain * flicker, body * in.color.a);
-    return col;
+    // alpha carries the foot's fade: 1 on the ground's tongues; on a burning
+    // plant's (`fire_view::plant_torches`) 0 at the foot
+    let fade = smoothstep(0.0, 0.3, in.color.a);
+    // the film's light is the heat: a yellow core at the foot, orange
+    // licks, deep red where it thins into the air; the thin tops are soot
+    // (the film's core is near white: kept orange-yellow, as a wildfire's
+    // flames read in daylight; the white core only in the hottest)
+    // the licks keep orange: only the core goes yellow (from pow 1.7, which
+    // left the film's licks dark and the flame a ball of light at its foot)
+    let heat = clamp(0.08 + 0.55 * tx.r * (0.7 + 0.25 * gain), 0.0, 1.0);
+    let cover = clamp(tx.a * 1.3, 0.0, 1.0) * edge * fade;
+    let soot = smoothstep(0.55, 0.95, up) * (1.0 - smoothstep(0.0, 0.25, tx.r));
+    // dimmer than the noise sheets were: the film has more flame per
+    // pixel, and over a daylit slope the bloom washed it to cream
+    let fire = flame_ramp(heat) * gain * 0.5;
+    let dark = vec3<f32>(0.10, 0.075, 0.06);
+    // Bevy's Add is premultiplied (src + dst * (1 - alpha)): the colour
+    // carries its own coverage, and the body hides what is behind it
+    let col = mix(fire, dark, soot) * cover;
+    return vec4<f32>(col, cover * mix(0.7, 0.95, soot));
 }

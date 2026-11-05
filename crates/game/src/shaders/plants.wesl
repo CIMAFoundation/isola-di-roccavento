@@ -28,9 +28,9 @@ import bevy_pbr::render::mesh_view_types;
 @if(PLANT_SHADOWS) import game::shaders::scene_light::{view_depth, shadow_reach};
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 import bevy_pbr::render::{pbr_functions, pbr_types};
-import game::shaders::noise::{hash21, value_noise};
+import game::shaders::noise::value_noise;
 import game::shaders::scenery::tactical_grey;
-import game::shaders::plant_common::{plants, atlas, atlas_sampler, PlantVertex, place, GONE, ALPHA_CUT, CROWN_SHARE, kind_leaf, kind_remains, kind_debris};
+import game::shaders::plant_common::{plants, atlas, atlas_sampler, PlantVertex, place, card_hidden, GONE, ALPHA_CUT, CROWN_SHARE, kind_leaf, kind_remains, kind_debris, burn_front, hole_at, burn_gone};
 
 // Normal and uv at the centroid: with MSAA a pixel only partly covered by a
 // thin leaf card is shaded at its centre, outside the triangle, and the
@@ -59,7 +59,8 @@ const CANOPY_REPEAT: f32 = 6.0;
 fn vertex(v: PlantVertex) -> PlantOut {
     var out: PlantOut;
     let p = place(v);
-    out.clip = select(position_world_to_clip(p.world), GONE, p.gone);
+    let toward = normalize(view.world_position - v.foot_yaw.xyz - vec3<f32>(0.0, 0.5 * v.size.y, 0.0));
+    out.clip = select(position_world_to_clip(p.world), GONE, p.gone || card_hidden(v, toward));
     out.world = p.world;
     out.normal = p.normal;
     out.uv = v.uv;
@@ -74,7 +75,12 @@ fn vertex(v: PlantVertex) -> PlantOut {
     }
     // no two plants of a stand quite the same tone
     out.albedo = albedo * (0.9 + 0.2 * v.seed.z);
-    out.info = vec4<f32>(kind, p.burn, v.color.a, p.climb);
+    // the stand around it (`canopy::StandDensity`, 0 when off): deep in a
+    // closed wood the neighbours hide the sky from the lower crown and the
+    // trunk; the top still sees most of it (2026-11-04)
+    let stand = v.seed.w;
+    let sky = mix(1.0 - 0.55 * stand, 1.0 - 0.12 * stand, smoothstep(0.1, 0.95, clamp(v.position.y, 0.0, 1.0)));
+    out.info = vec4<f32>(kind, p.burn, v.color.a * sky, p.climb);
     @if(PLANT_CANOPY) {
         // on the plant at rest, so the leaves stay put as the crown sways;
         // no two plants of a variety alike
@@ -112,17 +118,6 @@ struct Burnt {
     gone: f32,
 }
 
-// How far the front has got at a point: below 0 not yet, above 0.3 the
-// leaves there are mostly gone. Where the fire takes hold first is a
-// property of the place, so patches of one crown light up at different
-// moments and the front crawls. The skeleton uses the same field to show up
-// where the leaves go.
-fn burn_front(p: vec3<f32>, prog: f32) -> f32 {
-    let n = 0.45 * value_noise(p.xz * 0.8 + vec2<f32>(p.y * 0.5, 3.0))
-          + 0.55 * value_noise(p.xz * 2.7 + vec2<f32>(-p.y * 1.9, 7.0));
-    return prog * 1.6 - n * 0.9;
-}
-
 // `prog`: 0 when the climb reaches the point, 1 when its leaves are gone;
 // `after`: 0 then, 1 when the plant turns to charcoal.
 //
@@ -143,7 +138,7 @@ fn burn_plant(base: vec3<f32>, p: vec3<f32>, prog: f32, after: f32, t: f32) -> B
     // behind the flames: char with red veins, dimming
     let smoulder = smoothstep(0.06, 0.14, l) * (1.0 - smoothstep(0.22, 0.45, l));
     let charred = smoothstep(0.02, 0.16, l);
-    let gone = smoothstep(0.20, 0.48, l);
+    let gone = burn_gone(p, prog);
     // embers are lines and dots in the char, never a coat of paint on a leaf
     let vein = smoothstep(0.66, 0.80, value_noise(p.xz * 4.8 + vec2<f32>(p.y * 3.4, 11.0)));
     let speck = smoothstep(0.80, 0.96, value_noise(p.xz * 9.0 + vec2<f32>(t * 0.6, p.y * 5.0)));
@@ -154,22 +149,15 @@ fn burn_plant(base: vec3<f32>, p: vec3<f32>, prog: f32, after: f32, t: f32) -> B
     rgb = mix(rgb, ash, max(charred, band * 0.85));
 
     // yellow at the root of a tongue, deep orange at its tips
-    let hot_col = mix(vec3<f32>(3.2, 1.5, 0.22), vec3<f32>(2.6, 0.55, 0.05), smoothstep(0.45, 0.80, tongue));
+    // 2026-11-04: deeper since the burning plants carry flames of their own
+    // (`fire_view::plant_torches`): the leaves glow at the front, the flame
+    // is the tongue in front of them, not a yellow paint on the cards
+    let hot_col = mix(vec3<f32>(2.3, 0.85, 0.10), vec3<f32>(1.7, 0.32, 0.03), smoothstep(0.45, 0.80, tongue));
     let ember_col = vec3<f32>(1.2, 0.16, 0.015);
     // the embers die down before the plant turns to charcoal
     let late = 1.0 - smoothstep(0.0, 0.85, after);
     let glow = hot * hot_col * flick + smoulder * ember_col * (0.7 * vein + 1.2 * speck) * flick * late;
     return Burnt(rgb, glow, gone);
-}
-
-// Where a leaf is eaten first: holes cut at every distance, in cells about
-// a pixel wide (`px_m` metres), so a crown thins out instead of darkening
-// to grey. Only the cut-out passes call it.
-fn hole_at(p: vec3<f32>, px_m: f32) -> f32 {
-    let cell = max(0.3, px_m * 1.5);
-    let coarse = hash21(floor(p.xz / cell) + vec2<f32>(floor(p.y / cell) * 37.0, 5.0));
-    let fine = value_noise(p.xz * 3.1 + vec2<f32>(p.y * 2.3, 17.0));
-    return mix(coarse, fine, 1.0 - smoothstep(1.0, 3.5, px_m));
 }
 
 // --- light ---------------------------------------------------------------

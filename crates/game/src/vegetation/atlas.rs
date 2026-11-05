@@ -19,22 +19,84 @@ pub struct Atlas {
     pub data: Vec<u8>,
 }
 
-pub fn atlas() -> Atlas {
+/// RGBA8 sRGB pixels and size of a PNG.
+fn decode(png: &[u8]) -> (Vec<u8>, u32, u32) {
     use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
     use bevy::asset::RenderAssetUsages;
-    let mut image = Image::from_buffer(
-        &crate::models::atlas_png(),
-        ImageType::Extension("png"),
-        CompressedImageFormats::NONE,
-        true,
-        ImageSampler::Default,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .expect("a valid foliage atlas");
+    let mut image = Image::from_buffer(png, ImageType::Extension("png"), CompressedImageFormats::NONE, true, ImageSampler::Default, RenderAssetUsages::RENDER_WORLD)
+        .expect("a valid foliage atlas");
     let (w, h) = (image.width(), image.height());
-    let base = image.data.take().expect("atlas pixels");
+    (image.data.take().expect("atlas pixels"), w, h)
+}
+
+/// The authored foliage atlas alone, with its mips (the crowns' colours are
+/// read from it, `canopy`).
+pub fn atlas() -> Atlas {
+    let (base, w, h) = decode(&crate::models::atlas_png());
     let (data, levels) = mip_chain(base, w as usize, h as usize, ATLAS_MIPS);
     Atlas { width: w, height: h, levels, data }
+}
+
+/// Where the authored atlas and the scanned plants' cards
+/// (`models::scans`) sit in the atlas the plants are drawn with: the
+/// authored one at the top left, the cards below it. Without the scans
+/// the authored atlas alone, uvs unchanged.
+#[derive(Clone, Copy)]
+pub struct Layout {
+    pub width: u32,
+    pub height: u32,
+    authored: [u32; 2],
+    scans_y: u32,
+    scans: [u32; 2],
+}
+
+/// Width and height of a PNG, from its header.
+fn png_size(png: &[u8]) -> [u32; 2] {
+    let be = |o: usize| u32::from_be_bytes(png[o..o + 4].try_into().unwrap());
+    [be(16), be(20)]
+}
+
+pub fn layout() -> Layout {
+    static LAYOUT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+    *LAYOUT.get_or_init(|| {
+        let authored = png_size(&crate::models::atlas_png());
+        match crate::models::scans() {
+            Some(s) => {
+                let scans = [s.index.atlas.width, s.index.atlas.height];
+                Layout { width: authored[0].max(scans[0]), height: authored[1] + scans[1], authored, scans_y: authored[1], scans }
+            }
+            None => Layout { width: authored[0], height: authored[1], authored, scans_y: authored[1], scans: [0, 0] },
+        }
+    })
+}
+
+impl Layout {
+    /// A uv of the authored atlas in the plants' atlas.
+    pub fn authored_uv(&self, uv: [f32; 2]) -> [f32; 2] {
+        [uv[0] * self.authored[0] as f32 / self.width as f32, uv[1] * self.authored[1] as f32 / self.height as f32]
+    }
+
+    /// A uv of the scans' card atlas in the plants' atlas.
+    pub fn scan_uv(&self, uv: [f32; 2]) -> [f32; 2] {
+        [uv[0] * self.scans[0] as f32 / self.width as f32, (self.scans_y as f32 + uv[1] * self.scans[1] as f32) / self.height as f32]
+    }
+}
+
+/// The atlas the plants are drawn with ([`Layout`]), with its mips.
+pub fn plant_atlas() -> Atlas {
+    let l = layout();
+    let Some(scans) = crate::models::scans() else { return atlas() };
+    let (authored, aw, ah) = decode(&crate::models::atlas_png());
+    let (cards, cw, ch) = decode(&scans.atlas_png);
+    let (w, h) = (l.width as usize, l.height as usize);
+    let mut base = vec![0u8; w * h * 4];
+    for (src, sw, sh, y0) in [(&authored, aw as usize, ah as usize, 0usize), (&cards, cw as usize, ch as usize, l.scans_y as usize)] {
+        for y in 0..sh {
+            base[((y0 + y) * w) * 4..((y0 + y) * w + sw) * 4].copy_from_slice(&src[y * sw * 4..(y + 1) * sw * 4]);
+        }
+    }
+    let (data, levels) = mip_chain(base, w, h, ATLAS_MIPS);
+    Atlas { width: l.width, height: l.height, levels, data }
 }
 
 /// `base` (RGBA8 sRGB, `w` x `h`) and its mips, concatenated. Colour is

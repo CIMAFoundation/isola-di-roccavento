@@ -51,6 +51,10 @@ pub const BANDS_M: [f32; RINGS] = [50.0, 140.0, 400.0];
 const RINGS: usize = 3;
 /// Real seconds between rewrites of the fire channel of the cover map.
 const FIRE_REFRESH_S: f32 = 0.25;
+/// Simulated seconds after the front's arrival that a cell's tufts stand
+/// scorched before they are burnt stubble (2026-11-04): grass goes in
+/// moments, the model's cell keeps burning for 20 minutes.
+const GRASS_FLAMING_S: f32 = 240.0;
 
 #[derive(Clone, Copy, ShaderType, Default)]
 struct Params {
@@ -337,7 +341,8 @@ pub fn update(
         state.written = Some(key);
         state.since_write_s = 0.0;
         let w = sim.scn.world;
-        let (st, cleared) = (sim.fire.state(), sim.fire.cleared());
+        let (st, cleared, arrival) = (sim.fire.state(), sim.fire.cleared(), sim.fire.arrival_times());
+        let now = sim.time_s() as f32;
         // 0 untouched, 128 burning, 255 burnt, 195 cleared to bare ground: the
         // shaders tell them apart by thresholds.
         {
@@ -348,6 +353,10 @@ pub fn update(
                     let code = match st[i] {
                         _ if cleared[i] => 195,
                         CellFire::Unburnt => 0,
+                        // grass and litter burn in the minutes after the front:
+                        // past them a cell the model keeps alight is stubble
+                        // and ash, not scorched grass standing on the scar
+                        CellFire::Burning if arrival[i] != i32::MIN && now - arrival[i] as f32 > GRASS_FLAMING_S => 255,
                         CellFire::Burning => 128,
                         CellFire::Burnt => 255,
                     };

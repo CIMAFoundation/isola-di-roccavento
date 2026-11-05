@@ -353,6 +353,11 @@ fn apply(st: &State, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter
     let on = |p: Pos| crate::frame::to_bevy(p, sim.scn.terrain.height_at(p));
     let (focus, span) = match st.at.as_str() {
         "home" => return Some((Vec3::NAN, st.dist, st.yaw, st.pitch)),
+        // a cell burning now, the middle one of the front's list
+        "front" => match sim.fire.active_cells() {
+            [] => return Some((Vec3::NAN, st.dist, st.yaw, st.pitch)),
+            cells => (on(sim.scn.world.centre_of(cells[cells.len() / 2])), None),
+        },
         "fire" => match super::view::fire_extent(sim) {
             Some((mid, span)) => (Vec3::new(mid.x, 0.0, mid.y), Some(span * 2.8)),
             None => return Some((Vec3::NAN, st.dist, st.yaw, st.pitch)),
@@ -454,7 +459,9 @@ pub fn drive(
     } else {
         *view = SnapView::default();
     }
-    let ready = (st.phase != "fine" || kiosk.baseline().is_some()) && (!st.mario || mario.snapshot_ready());
+    let ready = (st.phase != "fine" || kiosk.baseline().is_some())
+        && (!st.mario || mario.snapshot_ready())
+        && !hi_trees_pending();
     if let Some(b) = bench_s().filter(|_| p.waited > SETTLE_S && ready) {
         if p.frames.is_empty() {
             if let Some(c) = &costs {
@@ -590,5 +597,18 @@ pub fn hide_ui(hide: Res<SnapHide>, mut out: Query<&mut bevy_egui::EguiRenderOut
         for mut o in &mut out {
             o.paint_jobs = Default::default();
         }
+    }
+}
+
+/// Whether the full-resolution trees (`hi_trees`, desktop only) are still
+/// being built: a snapshot waits for them.
+fn hi_trees_pending() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::hi_trees::PENDING.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
     }
 }

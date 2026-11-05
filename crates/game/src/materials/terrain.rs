@@ -13,9 +13,11 @@ struct TerrainUniform {
     mask_rect: Vec4,
     ground_rect: Vec4,
     /// x: desaturation; y, z: the canopy's fade from shade to crowns, metres
-    /// from the eye.
+    /// from the eye; w: the forest's occlusion, 0 (off) to 1
+    /// (`vegetation::canopy::forest_shade`).
     tactical: Vec4,
-    /// Mean crown colour (linear) of conifers, broadleaves and macchia.
+    /// Mean crown colour (linear) of conifers, broadleaves and macchia; in
+    /// the conifers' w, the terrain samples' posting (m).
     canopy_conifer: Vec4,
     canopy_broadleaf: Vec4,
     canopy_macchia: Vec4,
@@ -86,6 +88,13 @@ impl TerrainMaterial {
         self.uniform.canopy_macchia = v(colours[2]);
         self.uniform.tactical.y = fade[0];
         self.uniform.tactical.z = fade[1];
+    }
+
+    /// The forest's occlusion on the ground: `amount` 0 (off) to 1, read from
+    /// the mips of the canopy's cover, `posting` metres a sample.
+    pub fn set_forest_shade(&mut self, amount: f32, posting: f32) {
+        self.uniform.tactical.w = amount;
+        self.uniform.canopy_conifer.w = posting;
     }
 }
 
