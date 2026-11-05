@@ -45,7 +45,7 @@ def fingerprint():
     score.rs formats/ranks completed outcomes; the probe never invokes it.
     Tests, other examples and graphical crates are not simulation inputs.
     """
-    crates = ('rocca','fire','abm','scenario','propagator-core','behavior','datafs')
+    crates = ('rocca','fire','abm','scenario','behavior','datafs')
     paths = []
     for crate in crates:
         directory = ROOT/'crates'/crate

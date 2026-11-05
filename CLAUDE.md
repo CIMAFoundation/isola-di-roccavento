@@ -28,7 +28,7 @@ Dettagli in `docs/01-GIOCO.md`.
 
 | Crate | Contenuto |
 |---|---|
-| `propagator-core` | Il nucleo PROPAGATOR (automa cellulare del fuoco, checkpoint). |
+| `propagator-core` | Il nucleo PROPAGATOR (automa cellulare del fuoco, checkpoint). Non sta in `crates/`: è una dipendenza Git da `CIMAFoundation/propagator_sim` (`rust/propagator-core`), fissata a un commit di `dev` nel `Cargo.toml` della radice (2026-11-05). Una modifica al nucleo si fa là, poi si sposta `rev`. |
 | `fire` | `FireSim`, esposizione delle case (`exposure`), pericolo per chi è all'aperto (`threat`), ensemble per la previsione (`ensemble`). |
 | `scenario` | Lettura dei dati dello scenario; `scenario::id()` legge `ROCCA_SCENARIO`. |
 | `abm` | Rete stradale (`network`), guida (`drive`), squadre e spegnimento (`suppression`), aree sicure (`refuge`). |

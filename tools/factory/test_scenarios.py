@@ -46,7 +46,7 @@ class ProvenanceTests(unittest.TestCase):
     def test_display_and_feedback_edits_do_not_invalidate_the_model(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for crate in ('rocca','fire','abm','scenario','propagator-core','behavior','datafs'):
+            for crate in ('rocca','fire','abm','scenario','behavior','datafs'):
                 (root/'crates'/crate/'src').mkdir(parents=True)
                 (root/'crates'/crate/'Cargo.toml').write_text('manifest')
                 (root/'crates'/crate/'src/lib.rs').write_text('model')

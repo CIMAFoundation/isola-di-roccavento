@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/scenario", "crates/fire", "crates/abm", "crates/game", "crates/propagator-core", "crates/behavior", "crates/rocca", "crates/datafs", "crates/libsm64-native", "crates/sfx"]
+members = ["crates/scenario", "crates/fire", "crates/abm", "crates/game", "crates/behavior", "crates/rocca", "crates/datafs", "crates/libsm64-native", "crates/sfx"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,11 +8,10 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [workspace.dependencies]
-# Vendored from CIMAFoundation/propagator_sim at bbdbacd (dev d3f40f0 + flame
-# height and radiant reach, branch feat/flame-height-radiant-reach). Cargo cannot refer
-# to a crate in a Git repository subdirectory, so keeping this small std-only
-# core here makes CI and GitHub Pages self-contained.
-propagator-core = { path = "crates/propagator-core" }
+# The PROPAGATOR core, from CIMAFoundation/propagator_sim (rust/propagator-core),
+# pinned to a commit of its dev branch. To move the pin: change `rev` and run
+# `cargo update -p propagator-core`.
+propagator-core = { git = "https://github.com/CIMAFoundation/propagator_sim.git", rev = "ea046d1da82f4f638154cdeb32250ca8fc4f3def" }
 
 scenario = { path = "crates/scenario" }
 fire = { path = "crates/fire" }
