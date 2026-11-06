@@ -315,6 +315,8 @@ pub fn scan_of(variety: &str) -> Option<&'static str> {
         "holm" => pick(&["island_tree_01_0"]),
         "olive" => pick(&["island_tree_02_0"]),
         "carob" => pick(&["island_tree_03_0"]),
+        // only in the towns (`vegetation::scatter::town_trees`), drawn slim
+        "cypress" => pick(&["fir_sapling_medium_0", "fir_sapling_medium_1"]),
         "cork" => pick(&["tree_small_02_0"]),
         "aleppo" => pick(&["pine_tree_01_0", "pine_tree_01_1", "pine_tree_01_2"]),
         "pine" => pick(&["pine_tree_01_1", "pine_tree_01_2", "pine_tree_01_0"]),

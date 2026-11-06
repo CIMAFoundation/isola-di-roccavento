@@ -395,10 +395,16 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
     let mut mesh_of: HashMap<(&'static str, Tier), Option<u32>> = HashMap::new();
     let (mut groups, mut tiles) = (Vec::new(), Vec::new());
     let mut plants = 0usize;
+    // the towns' trees, with the scanned plants (none without)
+    let town = scatter::town_trees(scn);
     for r0 in (0..rows).step_by(tile_cells) {
         for c0 in (0..cols).step_by(tile_cells) {
             let cells = (r0, (r0 + tile_cells).min(rows), c0, (c0 + tile_cells).min(cols));
             let mut stand = scatter::scatter_tile(scn, gfx.vegetation, cells);
+            stand.inst.extend(town.iter().filter(|i| {
+                let c = w.cell_of(Pos { x: i.base.x, y: -i.base.z });
+                (cells.0..cells.1).contains(&c.row) && (cells.2..cells.3).contains(&c.col)
+            }).cloned());
             if let Some(keys) = &hi {
                 stand.inst.retain(|i| !keys.contains(&(i.base.x.to_bits(), i.base.z.to_bits())));
             }

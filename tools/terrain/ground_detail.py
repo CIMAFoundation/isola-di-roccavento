@@ -34,6 +34,8 @@ LAYERS = [
     ("track", "rocky_trail_02", 2.0, 0.10),
     ("burnt", "burned_ground_01", 1.0, 0.12),
     ("asphalt", "aerial_asphalt_01", 30.0, 0.06),
+    # the towns' paved streets and yards, setts (2026-11-06)
+    ("paving", "cobblestone_floor_03", 3.5, 0.10),
 ]
 ENCODE = 0.33
 SIDE = 1024
@@ -55,7 +57,15 @@ def main():
     src, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
     index = {"encode": ENCODE, "side": SIDE, "layers": []}
+    # a layer whose photo is not in <downloads> keeps what is already there
+    old = {}
+    if (out / "ground.json").exists():
+        old = {l["name"]: l for l in json.loads((out / "ground.json").read_text())["layers"]}
     for name, asset, size_m, keep in LAYERS:
+        if not (src / asset / "diff_1k.jpg").exists() and name in old and (out / f"{name}.png").exists():
+            print(f"{name:8s} {asset:20s} not downloaded: kept as it is")
+            index["layers"].append(old[name])
+            continue
         img = Image.open(src / asset / "diff_1k.jpg").convert("RGB")
         if img.size != (SIDE, SIDE):
             img = img.resize((SIDE, SIDE), Image.LANCZOS)

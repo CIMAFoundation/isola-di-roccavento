@@ -166,11 +166,67 @@ fn scatter(scn: &Scenario) -> Vec<Rock> {
     rocks
 }
 
-/// Merge `rocks` of one tile into a mesh.
-fn tile_mesh(rocks: &[&Rock]) -> Mesh {
+/// A coast model as it is drawn: the bake, or with the photographed rock
+/// (`real`) the bake refined (`landmarks::rock::refine`: welded, split,
+/// rounded and broken up; a boulder of forty flat facets reads as a cut gem
+/// next to the scanned plants). Made once per model.
+struct Shape {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+}
+
+fn shape(name: &'static str, real: bool) -> &'static Shape {
+    use std::sync::OnceLock;
+    static PLAIN: OnceLock<HashMap<&'static str, Shape>> = OnceLock::new();
+    static REAL: OnceLock<HashMap<&'static str, Shape>> = OnceLock::new();
+    const NAMES: [&str; 6] = ["rock_a", "rock_b", "rock_c", "scree", "sea_stack", "reef"];
+    let of = |k: &Kit| Shape { positions: k.positions.clone(), normals: k.normals.clone(), colors: k.colors.clone(), indices: k.indices.clone() };
+    let set = if real {
+        REAL.get_or_init(|| {
+            use crate::landmarks::rock;
+            NAMES
+                .iter()
+                .map(|&n| {
+                    let k = models::coast(n);
+                    // scree is a heap of chips, small on screen: left as it is
+                    let how = match n {
+                        "scree" => return (n, of(k)),
+                        "sea_stack" => &rock::SEA_STACK,
+                        _ => &rock::COAST_BOULDER,
+                    };
+                    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, k.positions.clone());
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, k.colors.iter().map(|c| [c[0], c[1], c[2], 1.0]).collect::<Vec<_>>());
+                    mesh.insert_indices(Indices::U32(k.indices.clone()));
+                    rock::refine(&mut mesh, how);
+                    use bevy::mesh::VertexAttributeValues as V;
+                    let (Some(V::Float32x3(p)), Some(V::Float32x3(nr)), Some(V::Float32x4(c))) =
+                        (mesh.attribute(Mesh::ATTRIBUTE_POSITION), mesh.attribute(Mesh::ATTRIBUTE_NORMAL), mesh.attribute(Mesh::ATTRIBUTE_COLOR))
+                    else {
+                        return (n, of(k));
+                    };
+                    let indices = match mesh.indices() {
+                        Some(Indices::U16(i)) => i.iter().map(|&x| x as u32).collect(),
+                        Some(Indices::U32(i)) => i.clone(),
+                        None => (0..p.len() as u32).collect(),
+                    };
+                    (n, Shape { positions: p.clone(), normals: nr.clone(), colors: c.iter().map(|c| [c[0], c[1], c[2]]).collect(), indices })
+                })
+                .collect()
+        })
+    } else {
+        PLAIN.get_or_init(|| NAMES.iter().map(|&n| (n, of(models::coast(n)))).collect())
+    };
+    &set[name]
+}
+
+/// Merge `rocks` of one tile into a mesh (`real`: see [`shape`]).
+fn tile_mesh(rocks: &[&Rock], real: bool) -> Mesh {
     let (mut pos, mut nor, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for r in rocks {
-        let m: &Kit = models::coast(r.model);
+        let m: &Shape = shape(r.model, real);
         let rot = Quat::from_rotation_y(r.yaw);
         let origin = crate::frame::to_bevy(r.at, r.base);
         let start = pos.len() as u32;
@@ -247,10 +303,9 @@ fn spawn_coast(
         ))
     });
     for (_, tile) in tiles {
-        let mut mesh = tile_mesh(&tile);
+        let mesh = tile_mesh(&tile, real.is_some());
         match &real {
             Some(m) => {
-                masonry::smooth_normals(&mut mesh, 55.0, None);
                 commands.spawn(((Mesh3d(meshes.add(mesh)), MeshMaterial3d(m.clone())), crate::terrain_mesh::PauseSolid));
             }
             None => {

@@ -43,6 +43,8 @@ use crate::materials::masonry::{self, Masonry, MasonryMaterial, Part};
 
 #[path = "town_kit.rs"]
 mod town_kit;
+// the kit's toy trees, for the scanned trees put in their place (`vegetation`)
+pub(crate) use town_kit::kit_trees;
 
 /// Unlit window glass — dark enough that a daylit building reads as an
 /// ordinary wall with punched openings, not a lattice of black holes.
@@ -875,6 +877,9 @@ struct Builder {
     /// What the quads emitted now are (`masonry::Part`, or a structure
     /// surface id), when `real`; 0: a prop, as it is.
     part: u8,
+    /// Quads emitted now face straight up whatever their slope (paving
+    /// draped on the ground, `town_kit`).
+    up_normals: bool,
 }
 
 impl Builder {
@@ -893,7 +898,7 @@ impl Builder {
 
     /// A quad of a given vertex surface (`materials::surface_alpha`).
     fn quad_on(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], color: [f32; 3], surface: u8) {
-        let n = normal(a, b, c);
+        let n = if self.up_normals { [0.0, 1.0, 0.0] } else { normal(a, b, c) };
         let start = self.positions.len() as u32;
         let alpha = if surface == 0 { self.part_alpha() } else { materials::surface_alpha(surface) };
         for v in [a, b, c, d] {

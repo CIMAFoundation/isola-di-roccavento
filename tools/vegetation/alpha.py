@@ -12,7 +12,7 @@ SRC = Path(__file__).resolve().parents[2] / 'vegetation_src' / 'polyhaven'
 
 
 # a lower cut-out for the needles, a few texels wide in the 1k atlas
-CUTOFF = {'pine_tree_01': .2}
+CUTOFF = {'pine_tree_01': .2, 'fir_sapling_medium': .2}
 
 
 def maps(asset):

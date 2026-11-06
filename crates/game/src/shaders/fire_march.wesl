@@ -45,14 +45,111 @@ struct Params {
 struct Out {
     @location(0) color: vec4<f32>,
     // for the composite, in half floats: the scene's depth the ray stopped
-    // at (m, `FAR_M` the sky); then the flames' share of the opacity, how
+    // at (m, `FAR_M` the sky; below 0 where the footprint has a nearer
+    // surface too, `near_aux`); then the flames' share of the opacity, how
     // far they are, and how high up their tongues (0 foot, 1 tip), which
     // the composite carves finer
     @location(1) aux: vec4<f32>,
     // how far the volume's weighted middle is (the scene's, where none):
     // the resolve reprojects the frames before from there
     @location(2) mid: f32,
+    // the same ray stopped at the nearest surface of the pixel's footprint
+    // (`footprint`): its light, and that surface's depth (m) with the
+    // flames' share of the opacity in front of it. Where the footprint is
+    // one surface, as the first.
+    @location(3) near: vec4<f32>,
+    @location(4) near_aux: vec2<f32>,
 }
+
+// The screen pixels a march pixel stands for (`div` a side, all their
+// samples), split into a nearer and a farther surface where their depths
+// are farther apart than `ONE_SURFACE`. One depth a march pixel, the
+// composite had nothing for a pixel of another surface: a gap in a crown
+// whose march pixels all fell on leaves was the sky without its smoke, a
+// twig thinner than a march pixel had the smoke behind it over it
+// (2026-11-06). The ray goes on to the farther surface and notes what it
+// held at the nearer: the composite finds both.
+//
+// Each surface's depth is where the ray stops for it: the centre pixel's,
+// as before, for the surface it is of; the front of the other (stopped at
+// the back of a sloping footprint, a ray grazing the ground ran on under
+// it through the flames' foot, and the burning ground came out in bright
+// march pixels).
+struct Foot {
+    near: f32,
+    far: f32,
+    split: bool,
+}
+
+@if(MULTISAMPLED)
+fn depth_at(at: vec2<i32>, s: i32) -> f32 {
+    return metres(textureLoad(depth_tex, at, s));
+}
+@else
+fn depth_at(at: vec2<i32>, s: i32) -> f32 {
+    return metres(textureLoad(depth_tex, at, 0));
+}
+
+@if(MULTISAMPLED)
+fn samples() -> i32 {
+    return i32(textureNumSamples(depth_tex));
+}
+@else
+fn samples() -> i32 {
+    return 1;
+}
+
+fn footprint(base: vec2<i32>, d: i32, centre: vec2<i32>) -> Foot {
+    let n = samples();
+    let last = vec2<i32>(p.size.zw) - 1;
+    let o = vec2<i32>(p.origin.xy);
+    let zc = depth_at(o + min(centre, last), 0);
+    var lo = FAR_M;
+    var hi = 0.0;
+    for (var j = 0; j < d; j++) {
+        for (var i = 0; i < d; i++) {
+            let at = o + min(base + vec2<i32>(i, j), last);
+            for (var s = 0; s < n; s++) {
+                let z = depth_at(at, s);
+                lo = min(lo, z);
+                hi = max(hi, z);
+            }
+        }
+    }
+    if hi - lo <= ONE_SURFACE * lo {
+        return Foot(zc, zc, false);
+    }
+    let mid = sqrt(lo * hi);
+    if zc < mid {
+        // the front of the farther surface
+        var front = hi;
+        for (var j = 0; j < d; j++) {
+            for (var i = 0; i < d; i++) {
+                let at = o + min(base + vec2<i32>(i, j), last);
+                for (var s = 0; s < n; s++) {
+                    let z = depth_at(at, s);
+                    if z >= mid {
+                        front = min(front, z);
+                    }
+                }
+            }
+        }
+        return Foot(zc, front, front - zc > ONE_SURFACE * zc);
+    }
+    return Foot(lo, zc, zc - lo > ONE_SURFACE * lo);
+}
+
+// A depth as the distance along the camera's axis (m; `FAR_M` the sky).
+fn metres(d: f32) -> f32 {
+    if d > 0.0 {
+        return min(p.origin.w / d, FAR_M);
+    }
+    return FAR_M;
+}
+
+// Depths nearer to each other than this share of their distance are one
+// surface (as in `fire_composite.wesl`).
+const ONE_SURFACE = 0.1;
 
 // The sky's depth, and the farthest written (as `fire_composite.wesl`).
 const FAR_M = 6.0e4;
@@ -344,10 +441,10 @@ fn jitter(frag: vec2<f32>) -> f32 {
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> Out {
     var out: Out;
-    // the scene's depth under this pixel, from the full-resolution buffer
+    // the scene's depths under this pixel, from the full-resolution buffer
     let full = in.position.xy * p.origin.z;
-    let at = clamp(full, vec2<f32>(0.0), p.size.zw - 1.0);
-    let depth = textureLoad(depth_tex, vec2<i32>(p.origin.xy + at), 0);
+    let d = i32(p.origin.z);
+    let foot_z = footprint(vec2<i32>(floor(in.position.xy)) * d, d, vec2<i32>(clamp(full, vec2<f32>(0.0), p.size.zw - 1.0)));
     let ndc = ndc_of(full);
     let eye = view.world_position;
     // The ray through this pixel, from the camera's turn alone (`rays`,
@@ -359,15 +456,24 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     // nel lab non lo fa»: the lab is at the origin).
     let ray = (p.rays * vec4<f32>(ndc, 1.0, 1.0)).xyz;
     let dir = normalize(ray);
+    // the depth is the distance along the camera's axis
     var t_scene = 1.0e7;
-    var scene_z = FAR_M;
+    let scene_z = foot_z.far;
     var hit = eye + dir * 1.0e6;
-    if depth > 0.0 {
-        // the depth is the distance along the camera's axis
-        scene_z = min(p.origin.w / depth, FAR_M);
-        t_scene = p.origin.w / depth * length(ray);
+    if scene_z < FAR_M {
+        t_scene = scene_z * length(ray);
         hit = eye + dir * t_scene;
     }
+    // the nearest surface, where the footprint has two
+    let split = foot_z.split;
+    let t_near = select(1.0e7, foot_z.near * length(ray), foot_z.near < FAR_M);
+    // what the ray held when it reached it
+    var snapped = !split;
+    var n_col = vec3<f32>(0.0);
+    var n_trans = 1.0;
+    var n_fog_at = vec3<f32>(0.0);
+    var n_fog_w = 0.0;
+    var n_fl_w = 0.0;
     var col = vec3<f32>(0.0);
     var trans = 1.0;
     var fog_at = vec3<f32>(0.0);
@@ -401,6 +507,15 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     let t1 = min(min(min(tmax.x, tmax.y), tmax.z), t_scene);
     if t1 > t0 {
         in_box = 1.0;
+        // first to the nearest surface, then on from it to the farthest
+        var t_end = t1;
+        if !snapped {
+            if t_near <= t0 {
+                snapped = true;
+            } else {
+                t_end = min(t_near, t1);
+            }
+        }
         var sun_dir = vec3<f32>(0.0, 1.0, 0.0);
         var sun_col = vec3<f32>(0.0);
         if lights.n_directional_lights > 0u {
@@ -424,7 +539,20 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
         var first = true;
         let max_steps = i32(p.lo.w);
         for (var i = 0; i < max_steps; i++) {
-            if s >= t1 || trans < 0.02 {
+            if s >= t_end && !snapped {
+                // at the nearest surface: what the ray holds is its, and
+                // the ray goes on from there (a stride that went past it
+                // only counted the smoke up to it)
+                snapped = true;
+                n_col = col;
+                n_trans = trans;
+                n_fog_at = fog_at;
+                n_fog_w = fog_w;
+                n_fl_w = fl_w;
+                s = min(s, t_near);
+                t_end = t1;
+            }
+            if s >= t_end || trans < 0.02 {
                 break;
             }
             let pos = eye + dir * s;
@@ -498,8 +626,8 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                 // the scene, the far flames lost most of their light: a
                 // flame a few march pixels tall shows little else.
                 var run = ds;
-                if s + ds >= t1 {
-                    run = t1 - s + 0.5 * fine;
+                if s + ds >= t_end {
+                    run = t_end - s + 0.5 * fine;
                 }
                 let parts = clamp(i32(ceil(run / 3.5)), 1, 4);
                 let dpart = run / f32(parts);
@@ -648,7 +776,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                         let fire_lit = glow_col * glow * 0.9;
                         // no farther than the scene: a long stride of thin
                         // smoke ends in the ground
-                        let absorbed = 1.0 - exp(-dens * near_k * min(ds, t1 - s) * sigma);
+                        let absorbed = 1.0 - exp(-dens * near_k * min(ds, t_end - s) * sigma);
                         col += (lit + fire_lit) * p.smoke.w * absorbed * trans;
                         fog_at += pos * absorbed * trans;
                         fog_w += absorbed * trans;
@@ -659,6 +787,14 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
             s += ds;
         }
     }
+    if !snapped {
+        // the ray ended before the nearest surface (or never met the box)
+        n_col = col;
+        n_trans = trans;
+        n_fog_at = fog_at;
+        n_fog_w = fog_w;
+        n_fl_w = fl_w;
+    }
     let alpha = 1.0 - trans;
     var now = vec4<f32>(0.0);
     var mid = hit;
@@ -668,8 +804,20 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
         let fogged = apply_scene_fog(vec4<f32>(col / alpha, alpha), mid);
         now = vec4<f32>(fogged.rgb * alpha, alpha);
     }
+    var near = now;
+    if split {
+        near = vec4<f32>(0.0);
+        let n_alpha = 1.0 - n_trans;
+        if n_alpha >= 0.002 {
+            let n_mid = n_fog_at / max(n_fog_w, 1e-4);
+            let fogged = apply_scene_fog(vec4<f32>(n_col / n_alpha, n_alpha), n_mid);
+            near = vec4<f32>(fogged.rgb * n_alpha, n_alpha);
+        }
+    }
 
     out.color = now;
+    out.near = near;
+    out.near_aux = vec2<f32>(foot_z.near, select(fl_w, n_fl_w, split));
     let count = (u32(p.frame.z) >> 2u) & 3u;
     if count != 0u {
         var c = vec2<f32>(n_all, n_empty);
@@ -679,20 +827,24 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
             c = vec2<f32>(n_thin, n_flame);
         }
         out.color = vec4<f32>(c / 128.0, 1.0, 1.0) * in_box;
+        out.near = out.color;
     }
     // markers (`VolumeSettings::mark`): the flames' opacity, the samples
     // that found flame, the smoke's opacity
     let mark = (u32(p.frame.z) >> 5u) & 3u;
     if mark != 0u {
         out.color = vec4<f32>(fl_w, n_hit / 8.0, max(fog_w - fl_w, 0.0), alpha);
+        out.near = select(out.color, vec4<f32>(n_fl_w, 0.0, max(n_fog_w - n_fl_w, 0.0), 1.0 - n_trans), split);
     }
     // 3: the steps in the flames' reach (each a 32nd), those of them over
     // a flame's band (each a 16th)
     if mark == 3u {
         out.color = vec4<f32>(fl_w, n_flame / 32.0, n_band / 16.0, 1.0) * in_box;
+        out.near = out.color;
     }
     let fl_d = select(0.0, fl_s / max(fl_w, 1e-4), fl_w > 1e-4);
-    out.aux = vec4<f32>(scene_z, fl_w, min(fl_d, FAR_M), select(0.0, fl_yr / max(fl_w, 1e-4), fl_w > 1e-4));
+    // the scene's depth below 0 where the pixel has a nearer surface
+    out.aux = vec4<f32>(select(scene_z, -scene_z, split), fl_w, min(fl_d, FAR_M), select(0.0, fl_yr / max(fl_w, 1e-4), fl_w > 1e-4));
     out.mid = min(distance(mid, eye), 1.0e6);
     return out;
 }

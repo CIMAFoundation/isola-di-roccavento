@@ -2,10 +2,14 @@
 // target over the scene (`fire_volumetric.rs`). Each screen pixel reads the
 // 3x3 march texels round it, weighted by distance (a blur that hides the
 // march's jitter) and by how close their depth is to its own (so the smoke
-// behind a tree does not bleed over it). Where no texel has a depth like
-// its own, the sixteen round those are asked (a gap in a crown: every
-// march texel near it fell on a leaf, and the sky seen through it stayed
-// without its smoke), and failing those the closest in depth stands for
+// behind a tree does not bleed over it). Each march texel holds two
+// surfaces where its footprint has two, the nearer and the farther
+// (`footprint` in `fire_march.wesl`), so a pixel always finds its own
+// surface in its own texel: a gap in a crown is no longer the sky without
+// its smoke, nor a twig thinner than a march texel the smoke behind it
+// (2026-11-06; asking the sixteen texels round the nine, as was done
+// before, still left gaps in crowns wider than them). Where none is of its
+// surface (a third one in a footprint), the closest in depth stands for
 // it. Blended premultiplied.
 //
 // Under multisampling a pixel at the rim of a leaf holds two surfaces, the
@@ -59,6 +63,11 @@ struct Params {
 @group(0) @binding(4) var noise_tex: texture_3d<f32>;
 @group(0) @binding(5) var noise_samp: sampler;
 @group(0) @binding(6) var vol_samp: sampler;
+// the same march stopped at the nearest surface of each march pixel's
+// footprint (`fire_march.wesl`, `footprint`): its light, and that
+// surface's depth (m) with the flames' share in front of it
+@group(0) @binding(7) var vol_near: texture_2d<f32>;
+@group(0) @binding(8) var near_aux: texture_2d<f32>;
 
 // Detail finer than the march, carved into the flames at the screen's
 // resolution (2026-11-05): their opacity, upsampled soft from the march,
@@ -243,57 +252,60 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     for (var j = -1; j <= 1; j++) {
         for (var i = -1; i <= 1; i++) {
             let at = clamp(c + vec2<i32>(i, j), vec2<i32>(0), last);
-            let v = textureLoad(vol_tex, at, 0);
-            let aux = textureLoad(vol_aux, at, 0);
-            let zl = aux.r;
-            let fm = aux.gba;
             let off = vec2<f32>(at) - q;
             let ws = exp(-dot(off, off) * 1.4);
-            let dz = abs(zl - z) / max(min(z, zl), 1.0);
-            let wd = exp(-dz * dz * 400.0);
-            sum += v * ws * wd;
-            wsum += ws * wd;
-            // the flames' distance and height, weighted by their opacity
-            fsum += vec3<f32>(fm.x, fm.x * fm.y, fm.x * fm.z) * ws * wd;
-            if dz < best_dz {
-                best_dz = dz;
-                best = v;
-                best_f = vec3<f32>(fm.x, fm.x * fm.y, fm.x * fm.z);
+            // each march pixel holds its footprint's farthest surface and,
+            // where it has two, its nearest
+            // (the farther's depth below 0 where there are two)
+            let aux = textureLoad(vol_aux, at, 0);
+            let fm = aux.gba;
+            let two = aux.r < 0.0;
+            var na = vec2<f32>(0.0);
+            if two {
+                na = textureLoad(near_aux, at, 0).rg;
+            }
+            for (var k = 0; k < 2; k++) {
+                var zl = abs(aux.r);
+                var fa = fm.x;
+                if k == 1 {
+                    if !two {
+                        break;
+                    }
+                    zl = na.x;
+                    fa = na.y;
+                }
+                let dz = abs(zl - z) / max(min(z, zl), 1.0);
+                let wd = exp(-dz * dz * 400.0);
+                if wd < 1.0e-4 && dz >= best_dz {
+                    continue;
+                }
+                var v: vec4<f32>;
+                if k == 0 {
+                    v = textureLoad(vol_tex, at, 0);
+                } else {
+                    v = textureLoad(vol_near, at, 0);
+                }
+                // the flames' distance and height, weighted by their
+                // opacity (the nearer surface's from the farther's)
+                let fw = vec3<f32>(fa, fa * fm.y, fa * fm.z);
+                sum += v * ws * wd;
+                wsum += ws * wd;
+                fsum += fw * ws * wd;
+                if dz < best_dz {
+                    best_dz = dz;
+                    best = v;
+                    best_f = fw;
+                }
             }
         }
     }
+    // none of them is of this surface (a third one, between the two of
+    // its footprint): the closest in depth
     var col = best;
     var fl = best_f;
     if wsum > 0.05 {
         col = sum / wsum;
         fl = fsum / wsum;
-    } else {
-        // none of the nine is of this surface: the ring round them
-        var sum2 = vec4<f32>(0.0);
-        var fsum2 = vec3<f32>(0.0);
-        var wsum2 = 0.0;
-        for (var j = -2; j <= 2; j++) {
-            for (var i = -2; i <= 2; i++) {
-                if max(abs(i), abs(j)) < 2 {
-                    continue;
-                }
-                let at = clamp(c + vec2<i32>(i, j), vec2<i32>(0), last);
-                let aux = textureLoad(vol_aux, at, 0);
-                let dz = abs(aux.r - z) / max(min(z, aux.r), 1.0);
-                let wd = exp(-dz * dz * 400.0);
-                if wd < 0.05 {
-                    continue;
-                }
-                let fm = aux.gba;
-                sum2 += textureLoad(vol_tex, at, 0) * wd;
-                fsum2 += vec3<f32>(fm.x, fm.x * fm.y, fm.x * fm.z) * wd;
-                wsum2 += wd;
-            }
-        }
-        if wsum2 > 0.0 {
-            col = sum2 / wsum2;
-            fl = fsum2 / wsum2;
-        }
     }
     // no carving of the markers, nor of the history's offset (`scarto`)
     if fl.x > 1e-4 && ((u32(p.frame.z) >> 5u) & 7u) == 0u {

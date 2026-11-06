@@ -36,7 +36,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 
 # materials that are foliage although their name does not say so
-FOLIAGE = {'pine_tree_01': ('twig',)}
+FOLIAGE = {'pine_tree_01': ('twig',), 'fir_sapling_medium': ('twig',)}
 
 
 def is_leaf(mat_name, asset=''):

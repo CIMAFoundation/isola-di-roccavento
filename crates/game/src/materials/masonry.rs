@@ -175,36 +175,6 @@ fn file(name: &str) -> Option<Vec<u8>> {
     bytes.map_err(|e| warn!("masonry: assets/buildings/{name}: {e}")).ok()
 }
 
-/// Normals averaged across the facets of a rock (corners sharper than
-/// `crease_deg` stay hard): a baked boulder is a few dozen flat faces, and
-/// photographed rock on flat-lit facets still reads as a cut gem. Only with
-/// the photographed masonry; the mesh keeps its vertices, so whatever reads
-/// it back (Mario's collisions) sees the same shape.
-/// `only`: the vertices to smooth (all if `None`).
-pub fn smooth_normals(mesh: &mut Mesh, crease_deg: f32, only: Option<&[bool]>) {
-    use bevy::mesh::VertexAttributeValues;
-    use std::collections::HashMap;
-    let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { return };
-    let Some(VertexAttributeValues::Float32x3(nor)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL) else { return };
-    let key = |p: &[f32; 3]| [(p[0] * 50.0).round() as i64, (p[1] * 50.0).round() as i64, (p[2] * 50.0).round() as i64];
-    let mut at: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
-    for (i, p) in pos.iter().enumerate() {
-        if only.map_or(true, |o| o[i]) {
-            at.entry(key(p)).or_default().push(i);
-        }
-    }
-    let cos = crease_deg.to_radians().cos();
-    let mut out = nor.clone();
-    for group in at.values() {
-        for &i in group {
-            let ni = Vec3::from(nor[i]);
-            let sum: Vec3 = group.iter().map(|&j| Vec3::from(nor[j])).filter(|nj| nj.dot(ni) >= cos).sum();
-            out[i] = sum.try_normalize().unwrap_or(ni).to_array();
-        }
-    }
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, out);
-}
-
 /// PNGs of one size as the layers of an array texture, with box-filtered
 /// mips (a wall a kilometre off is a few texels, and without them it
 /// shimmers).

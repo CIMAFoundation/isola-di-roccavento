@@ -102,6 +102,61 @@ fn prop_albedo(c: vec3<f32>, p: vec3<f32>, n: vec3<f32>, px_m: f32) -> vec3<f32>
     return c * (1.0 + tone * gate);
 }
 
+// Value noise in 3-D (on a rounded rock a 2-D one read along a slant draws
+// stripes).
+fn value_noise3(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let k = vec2<f32>(57.0, 113.0);
+    let z0 = vec2<f32>(i.x, i.y) + k * i.z;
+    let z1 = z0 + k;
+    let a = mix(mix(hash21(z0), hash21(z0 + vec2<f32>(1.0, 0.0)), u.x), mix(hash21(z0 + vec2<f32>(0.0, 1.0)), hash21(z0 + vec2<f32>(1.0, 1.0)), u.x), u.y);
+    let b = mix(mix(hash21(z1), hash21(z1 + vec2<f32>(1.0, 0.0)), u.x), mix(hash21(z1 + vec2<f32>(0.0, 1.0)), hash21(z1 + vec2<f32>(1.0, 1.0)), u.x), u.y);
+    return mix(a, b, u.z);
+}
+
+// What grows on old stone left alone: crusts of lichen (grey-green and
+// ochre, in patches) and moss (dark olive, on what faces up), strongest
+// near, a faint tone far.
+fn overgrown(rgb: vec3<f32>, p: vec3<f32>, n: vec3<f32>, px_m: f32, amount: f32) -> vec3<f32> {
+    let near = 1.0 - smoothstep(0.5, 2.5, px_m);
+    let blotch = value_noise3(p * 0.19 + 31.0);
+    let fine = mix(0.55, value_noise3(p * 2.7), near);
+    let crust = smoothstep(0.6, 0.8, blotch) * smoothstep(0.35, 0.7, fine) * amount;
+    let ochre = value_noise3(p * 0.7 + 5.0);
+    let lichen = mix(vec3<f32>(0.24, 0.25, 0.19), vec3<f32>(0.40, 0.28, 0.10), smoothstep(0.6, 0.85, ochre));
+    var out = mix(rgb, lichen * (0.7 + 0.6 * fine), crust * 0.45);
+    let up = smoothstep(0.5, 0.9, n.y);
+    let moss = up * smoothstep(0.5, 0.72, value_noise3(p * 0.33 + 17.0)) * smoothstep(0.3, 0.6, fine) * amount;
+    out = mix(out, vec3<f32>(0.06, 0.07, 0.03) * (0.7 + 0.6 * fine), moss * 0.55);
+    return out;
+}
+
+// A world position (or its derivative) projected on the plane across `axis`
+// (0 x, 1 y, 2 z), as the terrain's cliffs lay their rock.
+fn rock_uv(v: vec3<f32>, axis: u32) -> vec2<f32> {
+    if axis == 0u {
+        return vec2<f32>(v.z, -v.y);
+    }
+    if axis == 1u {
+        return v.xz;
+    }
+    return vec2<f32>(v.x, -v.y);
+}
+
+// The photograph's tangent-space normal `m` on that plane, as a bend of the
+// world normal `n`.
+fn rock_bend(m: vec3<f32>, axis: u32, n: vec3<f32>) -> vec3<f32> {
+    if axis == 0u {
+        return vec3<f32>(0.0, m.y, m.x * sign(n.x));
+    }
+    if axis == 1u {
+        return vec3<f32>(m.x, 0.0, -m.y);
+    }
+    return vec3<f32>(m.x * sign(n.z), m.y, 0.0);
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr = pbr_input_from_standard_material(in, is_front);
@@ -187,41 +242,44 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var tn = vec3<f32>(0.0, 0.0, 1.0);
     var rock_bent = n;
     if layer == L_ROCK {
-        // Rock: triplanar on the world's axes, as the terrain's cliffs, so a
-        // rounded boulder is never stretched and never seams.
-        var w = pow(abs(n), vec3<f32>(4.0));
-        w = w / (w.x + w.y + w.z);
+        // Rock: on the world's axes, as the terrain's cliffs, so a rounded
+        // boulder is never stretched and never seams. Biplanar (the two
+        // axes the normal leans on most, never the third), and the second
+        // only where it weighs: one or two reads of colour and of relief
+        // instead of up to three of each (2026-11-06, ~1 ms at the rocca).
+        let a = abs(n);
+        let major = select(select(2u, 1u, a.y > a.z), 0u, a.x > a.y && a.x > a.z);
+        let minor = select(select(2u, 1u, a.y < a.z), 0u, a.x < a.y && a.x < a.z);
+        let median = 3u - major - minor;
+        // past 1/sqrt(3) a normal leans on an axis; sharpened so the seam is short
+        var w = clamp((vec2<f32>(a[major], a[median]) - 0.5773) / (1.0 - 0.5773), vec2<f32>(0.0), vec2<f32>(1.0));
+        w = w * w;
+        w = w / (w.x + w.y);
         let k = 1.0 / SIZE_ROCK;
         let relief = px_m < 2.5;
-        var acc = vec4<f32>(0.0);
+        let q0 = rock_uv(p, major) * k;
+        let gx0 = rock_uv(dpx, major) * k;
+        let gy0 = rock_uv(dpy, major) * k;
+        tex = textureSampleGrad(masonry_color, masonry_sampler, q0, L_ROCK, gx0, gy0) * w.x;
         var bend = vec3<f32>(0.0);
-        if w.x > 0.02 {
-            let q = vec2<f32>(p.z, -p.y) * k;
-            acc += w.x * textureSampleGrad(masonry_color, masonry_sampler, q, L_ROCK, vec2<f32>(dpx.z, -dpx.y) * k, vec2<f32>(dpy.z, -dpy.y) * k);
-            if relief {
-                let m = textureSampleGrad(masonry_normal, masonry_sampler, q, L_ROCK, vec2<f32>(dpx.z, -dpx.y) * k, vec2<f32>(dpy.z, -dpy.y) * k).xyz * 2.0 - 1.0;
-                bend += w.x * vec3<f32>(0.0, m.y, m.x * sign(n.x));
-            }
+        if relief {
+            let m = textureSampleGrad(masonry_normal, masonry_sampler, q0, L_ROCK, gx0, gy0).xyz * 2.0 - 1.0;
+            bend = rock_bend(m, major, n) * w.x;
         }
         if w.y > 0.02 {
-            let q = vec2<f32>(p.x, p.z) * k;
-            acc += w.y * textureSampleGrad(masonry_color, masonry_sampler, q, L_ROCK, dpx.xz * k, dpy.xz * k);
+            let q1 = rock_uv(p, median) * k;
+            let gx1 = rock_uv(dpx, median) * k;
+            let gy1 = rock_uv(dpy, median) * k;
+            tex += textureSampleGrad(masonry_color, masonry_sampler, q1, L_ROCK, gx1, gy1) * w.y;
             if relief {
-                let m = textureSampleGrad(masonry_normal, masonry_sampler, q, L_ROCK, dpx.xz * k, dpy.xz * k).xyz * 2.0 - 1.0;
-                bend += w.y * vec3<f32>(m.x, 0.0, -m.y);
+                let m = textureSampleGrad(masonry_normal, masonry_sampler, q1, L_ROCK, gx1, gy1).xyz * 2.0 - 1.0;
+                bend += rock_bend(m, median, n) * w.y;
             }
+        } else {
+            tex = tex / w.x;
+            bend = bend / w.x;
         }
-        if w.z > 0.02 {
-            let q = vec2<f32>(p.x, -p.y) * k;
-            acc += w.z * textureSampleGrad(masonry_color, masonry_sampler, q, L_ROCK, vec2<f32>(dpx.x, -dpx.y) * k, vec2<f32>(dpy.x, -dpy.y) * k);
-            if relief {
-                let m = textureSampleGrad(masonry_normal, masonry_sampler, q, L_ROCK, vec2<f32>(dpx.x, -dpx.y) * k, vec2<f32>(dpy.x, -dpy.y) * k).xyz * 2.0 - 1.0;
-                bend += w.z * vec3<f32>(m.x * sign(n.z), m.y, 0.0);
-            }
-        }
-        let wsum = select(w.x, 0.0, w.x <= 0.02) + select(w.y, 0.0, w.y <= 0.02) + select(w.z, 0.0, w.z <= 0.02);
-        tex = acc / max(wsum, 1e-3);
-        rock_bent = normalize(n + bend / max(wsum, 1e-3));
+        rock_bent = normalize(n + bend);
     } else if layer >= 0 {
         tex = textureSampleGrad(masonry_color, masonry_sampler, uv, layer, duv_x, duv_y);
         if px_m < 2.5 {
@@ -273,6 +331,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             let detail = luma(tex.rgb) / luma(MEAN_STONE);
             let photo = tex.rgb * (luma(c) / luma(MEAN_STONE)) * mix(vec3<f32>(1.0), c / max(luma(c), 1e-3) / (MEAN_STONE / luma(MEAN_STONE)), 0.5);
             rgb = mix(c * detail, photo, 0.7 * ordinary);
+            @if(MASONRY_LANDMARK) {
+                rgb = overgrown(rgb, p, n, px_m, 1.0);
+            }
             set_pbr(&pbr, clamp(0.55 + tex.a * 0.4, 0.6, 0.95), 0.0, 0.3);
             normal_mix = 1.0;
         }
@@ -303,8 +364,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 // the photograph brings the grain and the cracks
                 if surface == 0u {
                     let detail = tex.rgb / MEAN_ROCK;
-                    rgb = c * mix(vec3<f32>(luma(detail)), detail, 0.5);
+                    // a reef's salt-white crown, under the photograph's
+                    // grain, read as snow: kept to a pale limestone
+                    let cc = c * min(1.0, 0.42 / max(luma(c), 1e-3));
+                    rgb = cc * mix(vec3<f32>(luma(detail)), detail, 0.5);
                 }
+            }
+            @if(MASONRY_CRAG) {
+                rgb = overgrown(rgb, p, n, px_m, 0.8);
+            }
+            if surface == PART_ROCK {
+                rgb = overgrown(rgb, p, n, px_m, 0.6);
             }
             // dark and wet where the spray reaches, as on the cliffs
             let edge_n = value_noise(p.xz * 0.35) - 0.5;

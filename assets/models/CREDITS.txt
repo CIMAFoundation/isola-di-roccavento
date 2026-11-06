@@ -15,3 +15,7 @@ Riferimenti visivi (solo guardati, per sagome, densità della chioma, colori e c
 - Arbouse.jpg (Arbutus unedo, CC BY-SA 4.0)
 - Spartium junceum, Erica arborea, Rosmarinus officinalis, Cistus monspeliensis: prime immagini della ricerca su Commons con questi nomi (CC BY-SA)
 Per usare in futuro una foto come texture servono CC0 o pubblico dominio (per esempio Poly Haven, ambientCG), da annotare qui.
+
+Piante scansionate (vegetation_scans.json, vegetation_scans.bin, foliage_scans.png; KIOSK_SCANS=1, sul web ?scans=1): modelli di Poly Haven, licenza CC0 (pubblico dominio, https://polyhaven.com/license), scaricati con tools/vegetation/fetch_polyhaven.py e ridotti a livelli di dettaglio con tools/vegetation/normalize.py, lod.py, to_game.py:
+- island_tree_01, island_tree_02, island_tree_03, tree_small_02, pine_tree_01, searsia_lucida, searsia_burchellii, wild_rooibos_bush (https://polyhaven.com/a/<nome>)
+- fir_sapling_medium (2026-11-06; Rob Tuytel, Rico Cilliers; https://polyhaven.com/a/fir_sapling_medium): due dei suoi abeti, disegnati stretti e a tre per volta, sono i cipressi dei borghi

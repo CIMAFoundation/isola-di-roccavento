@@ -30,7 +30,12 @@
 //! composite reads the 3x3 low-resolution texels round each screen pixel,
 //! weighted by distance and by how alike their depth is (a bilateral blur
 //! and upsample in one), and blends the result over the scene before the
-//! post effects. Nothing is drawn where the plume's box is off the screen.
+//! post effects. A march pixel whose footprint holds two surfaces (a leaf
+//! and the sky behind it) marches to the farther and notes what it held at
+//! the nearer, in a second layer with its own history: each screen pixel
+//! finds its own surface in its own march pixel (`footprint` in
+//! `fire_march.wesl`; 2026-11-06, gaps in crowns and twigs against the
+//! smoke). Nothing is drawn where the plume's box is off the screen.
 //!
 //! Off in the game unless `KIOSK_VOLUMI=1` (in the browser `?volumi=1`, the
 //! WebGPU build), never on WebGL2; the lab (`fire_lab`, `KIOSK_FUOCO=1`)
@@ -915,6 +920,11 @@ fn init_pipelines(
                 sampler(SamplerBindingType::Filtering),
                 // what this frame's march noted of the scene
                 texture_2d(TextureSampleType::Float { filterable: false }),
+                // the nearest surfaces: this frame's march, the frames
+                // before, their depths
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
     );
@@ -933,6 +943,9 @@ fn init_pipelines(
                     texture_3d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
                     sampler(SamplerBindingType::Filtering),
+                    // the nearest surfaces: their volume, their depths
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    texture_2d(TextureSampleType::Float { filterable: false }),
                 ),
             ),
         )
@@ -952,7 +965,7 @@ fn init_pipelines(
         vertex: fullscreen.to_vertex_state(),
         fragment: Some(FragmentState {
             shader: RESOLVE_SHADER,
-            targets: vec![Some(ColorTargetState { format: COLOR_FORMAT, blend: None, write_mask: ColorWrites::ALL })],
+            targets: vec![Some(ColorTargetState { format: COLOR_FORMAT, blend: None, write_mask: ColorWrites::ALL }); 2],
             ..default()
         }),
         ..default()
@@ -1016,6 +1029,10 @@ struct History {
     aux: (Texture, TextureView),
     mid: (Texture, TextureView),
     color: [(Texture, TextureView); 2],
+    /// The same for the nearest surface of each march pixel's footprint.
+    raw_near: (Texture, TextureView),
+    near_aux: (Texture, TextureView),
+    color_near: [(Texture, TextureView); 2],
     frame: u32,
     /// Last frame's clip from world, in doubles (see [`prev_from_eye`]).
     prev: Option<DMat4>,
@@ -1029,6 +1046,9 @@ impl History {
             aux: target(device, "fire_volume_aux", AUX_FORMAT, size),
             mid: target(device, "fire_volume_mid", MID_FORMAT, size),
             color: [0, 1].map(|_| target(device, "fire_volume_color", COLOR_FORMAT, size)),
+            raw_near: target(device, "fire_volume_raw_near", COLOR_FORMAT, size),
+            near_aux: target(device, "fire_volume_near_aux", NEAR_AUX_FORMAT, size),
+            color_near: [0, 1].map(|_| target(device, "fire_volume_color_near", COLOR_FORMAT, size)),
             frame: 0,
             prev: None,
         }
@@ -1062,6 +1082,10 @@ const COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const AUX_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// The volume's distance (m).
 const MID_FORMAT: TextureFormat = TextureFormat::R32Float;
+/// The nearest surface of a march pixel's footprint: its depth (m) and the
+/// flames' share of the opacity in front of it. The march's five targets
+/// are 32 bytes a pixel, WebGPU's most (`maxColorAttachmentBytesPerSample`).
+const NEAR_AUX_FORMAT: TextureFormat = TextureFormat::Rg16Float;
 
 fn pass<'a>(
     encoder: &'a mut CommandEncoder,
@@ -1152,7 +1176,7 @@ fn prepare(
                 fragment: Some(FragmentState {
                     shader: MARCH_SHADER,
                     shader_defs: defs,
-                    targets: vec![t(COLOR_FORMAT), t(AUX_FORMAT), t(MID_FORMAT)],
+                    targets: vec![t(COLOR_FORMAT), t(AUX_FORMAT), t(MID_FORMAT), t(COLOR_FORMAT), t(NEAR_AUX_FORMAT)],
                     ..default()
                 }),
                 ..default()
@@ -1219,10 +1243,13 @@ fn prepare(
             history.raw = target(&device, "fire_volume_raw", COLOR_FORMAT, low);
             history.aux = target(&device, "fire_volume_aux", AUX_FORMAT, low);
             history.mid = target(&device, "fire_volume_mid", MID_FORMAT, low);
+            history.raw_near = target(&device, "fire_volume_raw_near", COLOR_FORMAT, low);
+            history.near_aux = target(&device, "fire_volume_near_aux", NEAR_AUX_FORMAT, low);
         }
         let slot = &history.color[write].0;
         if (slot.width(), slot.height()) != (low.x, low.y) {
             history.color[write] = target(&device, "fire_volume_color", COLOR_FORMAT, low);
+            history.color_near[write] = target(&device, "fire_volume_color_near", COLOR_FORMAT, low);
         }
         let world_from_view = view.world_from_view.to_matrix();
         let clip_from_world = clip_from_world(world_from_view, view.clip_from_view);
@@ -1327,6 +1354,9 @@ fn draw(
             &history.color[r].1,
             &pipelines.history_sampler,
             &history.aux.1,
+            &history.raw_near.1,
+            &history.color_near[r].1,
+            &history.near_aux.1,
         )),
     );
     let composite_group = device.create_bind_group(
@@ -1340,6 +1370,8 @@ fn draw(
             &noise.texture_view,
             &noise.sampler,
             &pipelines.history_sampler,
+            &history.color_near[w].1,
+            &history.near_aux.1,
         )),
     );
 
@@ -1367,7 +1399,14 @@ fn draw(
     };
     {
         let stamp = stamp(encoder, 0);
-        let mut p = pass(encoder, "fire_march", &[attach(&history.raw.1), attach(&history.aux.1), attach(&history.mid.1)], stamp);
+        let targets = [
+            attach(&history.raw.1),
+            attach(&history.aux.1),
+            attach(&history.mid.1),
+            attach(&history.raw_near.1),
+            attach(&history.near_aux.1),
+        ];
+        let mut p = pass(encoder, "fire_march", &targets, stamp);
         p.set_pipeline(march);
         p.set_bind_group(0, &view_bind_group.main, &view_bind_group.main_offsets);
         p.set_bind_group(1, &march_group, &[]);
@@ -1375,7 +1414,7 @@ fn draw(
     }
     {
         let stamp = stamp(encoder, 1);
-        let mut p = pass(encoder, "fire_resolve", &[attach(&history.color[w].1)], stamp);
+        let mut p = pass(encoder, "fire_resolve", &[attach(&history.color[w].1), attach(&history.color_near[w].1)], stamp);
         p.set_pipeline(resolve);
         p.set_bind_group(0, &resolve_group, &[]);
         p.draw(0..3, 0..1);

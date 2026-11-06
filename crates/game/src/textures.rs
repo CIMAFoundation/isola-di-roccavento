@@ -231,7 +231,7 @@ pub fn heights(t: &scenario::Terrain) -> (Image, f32, f32) {
 /// `KIOSK_SCANS=1`), in the order of the array and of `terrain.wesl`'s
 /// `L_*` constants. Photos from Poly Haven, CC0 (`assets/ground/CREDITS.txt`),
 /// high-passed into a ratio around one by `tools/terrain/ground_detail.py`.
-pub const GROUND_LAYERS: [&str; 9] = ["grass", "soil", "needles", "leaves", "rock", "sand", "track", "burnt", "asphalt"];
+pub const GROUND_LAYERS: [&str; 10] = ["grass", "soil", "needles", "leaves", "rock", "sand", "track", "burnt", "asphalt", "paving"];
 
 /// The ground's detail layers and their mean colours (linear), read once.
 pub struct GroundDetail {

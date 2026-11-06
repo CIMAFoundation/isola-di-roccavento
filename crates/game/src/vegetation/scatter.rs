@@ -375,6 +375,66 @@ fn scatter_plant(
     Some(p)
 }
 
+/// How wide a town cypress is for its height, against the scanned fir it
+/// is drawn with (its crown about two thirds as wide as tall): a column a
+/// quarter as wide as tall, like the toy.
+const CYPRESS_SLIM: f32 = 0.4;
+/// Scanned firs drawn in one cypress, and how much darker its leaves.
+const CYPRESS_LAYERS: u32 = 3;
+const CYPRESS_DARK: f32 = 0.7;
+
+/// The trees of the towns, with the scanned plants: where the kit's toy
+/// trees stand (`buildings::kit_trees`: piazzas, cemeteries, gardens), a
+/// scanned tree of about the toy's size. Without the scans, none: the toys
+/// are drawn. The piazzas get holm oaks, the gardens olives with a few holm
+/// and cork oaks, the cypresses the scanned fir drawn slim (a dark column,
+/// as a cypress reads from the game's view; without that scan, a slim holm
+/// oak). They are plants like the others: same levels, shadows and fire.
+/// `KIOSK_TOWN_TREES=0` leaves the towns bare, for a before/after.
+pub(super) fn town_trees(scn: &Scenario) -> Vec<Inst> {
+    let off = cfg!(not(target_arch = "wasm32")) && std::env::var("KIOSK_TOWN_TREES").as_deref() == Ok("0");
+    if crate::models::scans().is_none() || off {
+        return Vec::new();
+    }
+    // the cypress: the scanned fir drawn slim, or (without it) a holm oak
+    let (cypress, slim) = if crate::models::scan_of("cypress_1").is_some() { ("cypress", CYPRESS_SLIM) } else { ("holm", 0.3) };
+    let mut out = Stand::default();
+    for (k, t) in crate::buildings::kit_trees(scn).into_iter().enumerate() {
+        let mut rng = Rng::seeded((0x7EE5_0000 + k as u64) ^ ((t.at.x.to_bits() as u64) << 20) ^ t.at.y.to_bits() as u64);
+        let ground = scn.terrain.height_at(t.at);
+        let base = Vec3::new(t.at.x, ground, -t.at.y);
+        let shade = 0.9 + rng.unit() * 0.2;
+        let leaf = [shade * (0.95 + rng.unit() * 0.1), shade, shade * (0.95 + rng.unit() * 0.1)];
+        let wood = [lin1(0.88 + rng.unit() * 0.2); 3];
+        // the scanned trees turn as they like: their variety follows the yaw
+        let yaw = (t.yaw + rng.unit() * std::f32::consts::TAU).rem_euclid(std::f32::consts::TAU);
+        let toy = crate::visual_scale::TREE * t.scale;
+        if t.cypress {
+            // the toy cypress is 10.5 m tall and a quarter as wide
+            let height = 10.5 * toy * (0.9 + rng.unit() * 0.2);
+            // a sapling's whorls are open: three of them in one column, each
+            // turned, close it into the dense dark spindle of a cypress
+            let layers = if cypress == "cypress" { CYPRESS_LAYERS } else { 1 };
+            for l in 0..layers {
+                let turn = (yaw + l as f32 * std::f32::consts::TAU / layers as f32 + 0.4).rem_euclid(std::f32::consts::TAU);
+                let h = height * (1.0 - 0.06 * l as f32);
+                out.model(cypress, base, Vec3::new(h * slim, h, h * slim), turn, mul(leaf, CYPRESS_DARK), wood);
+            }
+        } else {
+            // the toy street tree is 6.2 m tall, about as wide as tall
+            let height = 6.2 * toy * (0.9 + rng.unit() * 0.2);
+            let species = match (rng.unit() * 10.0) as u32 {
+                _ if t.scale >= 1.6 => "holm",
+                0..=5 => "olive",
+                6..=8 => "holm",
+                _ => "cork",
+            };
+            out.model(species, base, Vec3::new(height * 1.1, height, height * 1.1), yaw, leaf, wood);
+        }
+    }
+    out.inst
+}
+
 /// Which species a plant of fuel class `fuel` at `p` is (`models::SPECIES`).
 /// Species come in patches of a few tens of metres (a holm oak grove, a
 /// cistus clearing) with single plants mixed in, and every class keeps to

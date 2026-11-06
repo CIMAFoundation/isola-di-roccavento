@@ -13,6 +13,8 @@ filtro passa-alto in luce lineare (rapporto attorno a 1, salvato * 0.33), media 
 - track.png   <- Rocky Trail 02, Amal Kumar           https://polyhaven.com/a/rocky_trail_02
 - burnt.png   <- Burned Ground 01, Rob Tuytel         https://polyhaven.com/a/burned_ground_01
 - asphalt.png <- Aerial Asphalt 01, Rob Tuytel        https://polyhaven.com/a/aerial_asphalt_01
+- paving.png  <- Cobblestone Floor 03, Rob Tuytel     https://polyhaven.com/a/cobblestone_floor_03
+                 (selciato di strade e piazzali dei borghi, 2026-11-06)
 
 Per rigenerarle: scaricare in una cartella <dl>/<asset>/diff_1k.jpg
 (https://api.polyhaven.com/files/<asset>, voce Diffuse 1k jpg), poi

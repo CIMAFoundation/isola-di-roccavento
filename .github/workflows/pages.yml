@@ -35,6 +35,9 @@ jobs:
           curl -sSL https://github.com/WebAssembly/binaryen/releases/download/$v/$f.sha256 | awk '{print $1"  '"$f"'"}' | sha256sum -c
           tar xzf $f
           echo "$PWD/binaryen-$v/bin" >> "$GITHUB_PATH"
+      # Pillow shrinks the scanned textures for ?scans=1; build_web.sh runs
+      # python3 -I, which skips user site-packages, hence the system package
+      - run: sudo apt-get install -y python3-pil
       - run: ./scripts/build_web.sh
       # games.cimafoundation.org/isola-di-roccavento: CIMA hosting (Ergonet),
       # FTPS with password, certificate checked (docs/web.md). Only from main.

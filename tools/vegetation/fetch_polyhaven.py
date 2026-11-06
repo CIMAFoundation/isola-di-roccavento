@@ -28,6 +28,7 @@ ASSETS = {
     'didelta_spinosa': 'corbezzolo',
     'leipoldtia_schultzei': 'cisto',
     'wild_rooibos_bush': 'erica, ginestra',
+    'fir_sapling_medium': 'cipresso (nei borghi, stretto)',
     'shrub_03': 'rosmarino',
     'shrub_04': 'rosmarino',
 }

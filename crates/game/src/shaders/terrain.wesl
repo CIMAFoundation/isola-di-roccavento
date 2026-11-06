@@ -66,6 +66,8 @@ const PAVING: vec3<f32> = vec3<f32>(0.74, 0.67, 0.55);
 const TRACK: vec3<f32> = vec3<f32>(0.296, 0.234, 0.141);
 // the realistic ground's: old asphalt, darker than the painted one
 const ASPHALT_REAL: vec3<f32> = vec3<f32>(0.115, 0.112, 0.118);
+// and the stone of its paved streets and yards, weathered grey
+const PAVING_REAL: vec3<f32> = vec3<f32>(0.15, 0.142, 0.125);
 const TRACK_KERB: vec3<f32> = vec3<f32>(0.119, 0.091, 0.056);
 
 // One layer of tussocks on a jittered grid of `size` metres. Returns
@@ -120,6 +122,9 @@ const L_SAND: i32 = 5;
 const L_TRACK: i32 = 6;
 const L_BURNT: i32 = 7;
 const L_ASPHALT: i32 = 8;
+// the towns' setts (Poly Haven «Cobblestone Floor 03»), and their tile
+const L_PAVING: i32 = 9;
+const SIZE_PAVING: f32 = 3.5;
 
 // One photo layer at `uv` (in tiles), with the gradients of the uv: read
 // with explicit gradients, so it may be called in any branch.
@@ -363,8 +368,13 @@ fn terrain_albedo(base: vec4<f32>, p: vec3<f32>, mask_s: vec4<f32>, meadow: f32,
     let patch_tone = 0.90 + 0.16 * value_noise(wp * 0.05) + 0.06 * value_noise(wp * 0.4);
     var paving = PAVING * patch_tone * mix(vec3<f32>(0.97), stone * (1.0 - 0.22 * seam), detail);
     @if(REAL_GROUND) {
-        // worn grey stone, not fresh plaster
-        paving = paving * vec3<f32>(0.58, 0.60, 0.62);
+        // worn grey setts, photographed: one scale only, so the courses
+        // stay straight; their mip fades to the mean far away
+        if paved > 0.01 {
+            let k = 1.0 / SIZE_PAVING;
+            let setts = photo_at(L_PAVING, wp * k, grads.xy * k, grads.zw * k);
+            paving = PAVING_REAL * patch_tone * setts;
+        }
     }
     rgb = mix(rgb, paving, paved);
     let t_kerb = 1.0 - smoothstep(grow_t + KERB_M - aa, grow_t + KERB_M + aa, mask_d.y);
