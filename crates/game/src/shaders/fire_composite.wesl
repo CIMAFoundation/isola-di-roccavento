@@ -4,6 +4,12 @@
 // march's jitter) and by how close their depth is to its own (so the smoke
 // behind a tree does not bleed over it). Where no texel has a depth like
 // its own, the closest in depth stands for it. Blended premultiplied.
+//
+// Most of the screen has no volume over it, and this pass runs at the
+// screen's resolution (2026-11-05: at 9x the pixels it was two thirds of
+// the volumes' cost): a pixel with nothing in the 3x3 texels round it
+// leaves after four filtered taps. The pass still covers the whole screen:
+// drawing it only over the plume's box is not done.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
@@ -22,9 +28,10 @@ struct Params {
     drift: array<vec4<f32>, 4>,
     shear: array<vec4<f32>, 2>,
     prev: mat4x4<f32>,
-    world_from_clip: mat4x4<f32>,
+    rays: mat4x4<f32>,
     eye: vec4<f32>,
     more: vec4<f32>,
+    stride: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -33,10 +40,12 @@ struct Params {
 @else
 @group(0) @binding(1) var depth_tex: texture_depth_2d;
 @group(0) @binding(2) var vol_tex: texture_2d<f32>;
-@group(0) @binding(3) var vol_depth: texture_2d<f32>;
-@group(0) @binding(4) var vol_mid: texture_2d<f32>;
-@group(0) @binding(5) var noise_tex: texture_3d<f32>;
-@group(0) @binding(6) var noise_samp: sampler;
+// the scene's depth the march stopped at (m), then the flames' share of
+// the opacity, their distance (m) and how high up their tongues
+@group(0) @binding(3) var vol_aux: texture_2d<f32>;
+@group(0) @binding(4) var noise_tex: texture_3d<f32>;
+@group(0) @binding(5) var noise_samp: sampler;
+@group(0) @binding(6) var vol_samp: sampler;
 
 // Detail finer than the march, carved into the flames at the screen's
 // resolution (2026-11-05): their opacity, upsampled soft from the march,
@@ -44,19 +53,27 @@ struct Params {
 // where the flames are, so their edges break into licks a few pixels wide.
 // Torn more toward the tips. The smoke is left as it is.
 fn carve(col: vec4<f32>, fl: vec3<f32>, pix: vec2<f32>) -> vec4<f32> {
-    let amount = p.more.y;
     let fa = fl.x;
-    if amount <= 0.0 || fa < 0.004 || fl.y <= 0.0 {
+    if p.more.y <= 0.0 || fa < 0.004 || fl.y <= 0.0 {
+        return col;
+    }
+    // a screen pixel at the flames (m). From far the licks cannot be their
+    // size (`more.z`), only as many pixels: a few pixels wide and rising
+    // tens of pixels a second, they made the fire shake (user, 2026-11-05:
+    // «continua a vibrare, si nota maggiormente a grandi distanze»; from
+    // 2.5 km they were most of what changed in the flames from a frame to
+    // the next). Faded out as they outgrow their size.
+    let foot = fl.y * p.frame.y / p.origin.z;
+    let amount = p.more.y * (1.0 - smoothstep(1.0, 2.0, foot * 4.0 / p.more.z));
+    if amount <= 0.0 {
         return col;
     }
     // where the flames are, in the world
     let f = (pix - p.origin.xy) / p.size.zw;
     let ndc = vec2<f32>(f.x * 2.0 - 1.0, 1.0 - f.y * 2.0);
-    let far = p.world_from_clip * vec4<f32>(ndc, 1.0, 1.0);
-    let dir = normalize(far.xyz / far.w - p.eye.xyz);
+    let dir = normalize((p.rays * vec4<f32>(ndc, 1.0, 1.0)).xyz);
     let pos = p.eye.xyz + dir * fl.y;
-    // a screen pixel there (m), and licks never finer than a few of them
-    let foot = fl.y * p.frame.y / p.origin.z;
+    // licks never finer than a few pixels
     let size_m = max(p.more.z, foot * 4.0);
     let lod = log2(max(foot * 48.0 / size_m, 1.0));
     let t = p.more.w;
@@ -82,6 +99,10 @@ fn carve(col: vec4<f32>, fl: vec3<f32>, pix: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, a);
 }
 
+// The sky's depth, and the farthest the march writes (m): its depths are
+// half floats (`fire_march.wesl`).
+const FAR_M = 6.0e4;
+
 fn noise_tex_at(q: vec3<f32>, lod: f32) -> vec4<f32> {
     return textureSampleLevel(noise_tex, noise_samp, q, lod);
 }
@@ -89,15 +110,32 @@ fn noise_tex_at(q: vec3<f32>, lod: f32) -> vec4<f32> {
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let pix = in.position.xy;
-    let d = textureLoad(depth_tex, vec2<i32>(pix), 0);
-    var z = 1.0e7;
-    if d > 0.0 {
-        z = p.origin.w / d;
-    }
     // this pixel's place on the march's grid
     let q = (pix - p.origin.xy) / p.origin.z - 0.5;
     let c = vec2<i32>(round(q));
     let last = vec2<i32>(p.size.xy) - 1;
+    // nothing in the 3x3 texels round it: four filtered taps at the centre
+    // texel's corners weigh each of the nine a quarter or more, and what
+    // the nine can make is discarded below under 0.002
+    let corner = vec2<f32>(c) / p.size.xy;
+    let texel = 1.0 / p.size.xy;
+    let near_a = textureSampleLevel(vol_tex, vol_samp, corner, 0.0).a
+        + textureSampleLevel(vol_tex, vol_samp, corner + vec2<f32>(texel.x, 0.0), 0.0).a
+        + textureSampleLevel(vol_tex, vol_samp, corner + vec2<f32>(0.0, texel.y), 0.0).a
+        + textureSampleLevel(vol_tex, vol_samp, corner + texel, 0.0).a;
+    // `solo`: the volumes over black, not over the scene
+    let solo = (u32(p.frame.z) & 16u) != 0u;
+    if near_a < 0.0005 {
+        if solo {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        discard;
+    }
+    let d = textureLoad(depth_tex, vec2<i32>(pix), 0);
+    var z = FAR_M;
+    if d > 0.0 {
+        z = min(p.origin.w / d, FAR_M);
+    }
     var sum = vec4<f32>(0.0);
     var fsum = vec3<f32>(0.0);
     var wsum = 0.0;
@@ -108,8 +146,9 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         for (var i = -1; i <= 1; i++) {
             let at = clamp(c + vec2<i32>(i, j), vec2<i32>(0), last);
             let v = textureLoad(vol_tex, at, 0);
-            let zl = textureLoad(vol_depth, at, 0).r;
-            let fm = textureLoad(vol_mid, at, 0).yzw;
+            let aux = textureLoad(vol_aux, at, 0);
+            let zl = aux.r;
+            let fm = aux.gba;
             let off = vec2<f32>(at) - q;
             let ws = exp(-dot(off, off) * 1.4);
             let dz = abs(zl - z) / max(min(z, zl), 1.0);
@@ -131,8 +170,12 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         col = sum / wsum;
         fl = fsum / wsum;
     }
-    if fl.x > 1e-4 {
+    // no carving of the markers, nor of the history's offset (`scarto`)
+    if fl.x > 1e-4 && ((u32(p.frame.z) >> 5u) & 7u) == 0u {
         col = carve(col, vec3<f32>(fl.x, fl.y / fl.x, fl.z / fl.x), pix);
+    }
+    if solo {
+        return vec4<f32>(col.rgb, 1.0);
     }
     if col.a < 0.002 {
         discard;

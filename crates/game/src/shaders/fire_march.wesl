@@ -25,9 +25,10 @@ struct Params {
     drift: array<vec4<f32>, 4>,
     shear: array<vec4<f32>, 2>,
     prev: mat4x4<f32>,
-    world_from_clip: mat4x4<f32>,
+    rays: mat4x4<f32>,
     eye: vec4<f32>,
     more: vec4<f32>,
+    stride: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> p: Params;
@@ -42,13 +43,18 @@ struct Params {
 
 struct Out {
     @location(0) color: vec4<f32>,
-    @location(1) depth: f32,
+    // for the composite, in half floats: the scene's depth the ray stopped
+    // at (m, `FAR_M` the sky); then the flames' share of the opacity, how
+    // far they are, and how high up their tongues (0 foot, 1 tip), which
+    // the composite carves finer
+    @location(1) aux: vec4<f32>,
     // how far the volume's weighted middle is (the scene's, where none):
-    // the resolve reprojects the frames before from there; then the
-    // flames' share of the opacity, how far they are, and how high up
-    // their tongues (0 foot, 1 tip): the composite carves them finer
-    @location(2) mid: vec4<f32>,
+    // the resolve reprojects the frames before from there
+    @location(2) mid: f32,
 }
+
+// The sky's depth, and the farthest written (as `fire_composite.wesl`).
+const FAR_M = 6.0e4;
 
 // The plume map at a point of the ground (Bevy x, z): r smoke given off,
 // g how alight, b flame height (m), a ground height (m).
@@ -116,65 +122,197 @@ fn shear_at(age: f32) -> f32 {
     return mix(a, p.shear[k / 4][k % 4], f);
 }
 
-// The smoke at `pos`, `h` metres over the ground below it: density (x;
-// below 0 where nothing smokes, so the march may stride) and the fire's
-// glow from below (y). The parcel left the ground `h / rise` seconds ago
-// and drifted since; the map is read where it left, at a mip as wide as
-// the plume has grown.
-fn smoke_at(pos: vec3<f32>, h: f32, detail: bool, lod: f32) -> vec2<f32> {
+// The smoke's body at a point, before the billows tear it.
+struct Body {
+    // density (below 0 where nothing smokes, so the march may stride)
+    dens: f32,
+    // metres the map was averaged over there: nothing of the body is
+    // narrower
+    wide: f32,
+    // where the parcel left the ground
+    src: vec2<f32>,
+}
+
+// The smoke's body at `pos`, `h` metres over the ground below it. The
+// parcel left the ground `h / rise` seconds ago and drifted since; the map
+// is read where it left, at a mip as wide as the plume has grown; `sway`:
+// through the column's sway (not for the taps toward the sun).
+fn smoke_body(pos: vec3<f32>, h: f32, sway: bool) -> Body {
     let top = p.wind.w;
-    if h < -8.0 || h > top {
-        return vec2<f32>(-1.0, 0.0);
-    }
     let hh = max(h, 0.0);
     let k = hh / top;
-    let t = globals.time;
-    var src = pos.xz - drift_at(hh / p.wind.z);
-    if detail {
-        // the column sways as it rises
-        src -= (noise(vec3<f32>(pos.x, hh * 1.5, pos.z) / 600.0 + vec3<f32>(0.0, -t * 0.02, 0.0), 0.0).gb - 0.5) * (40.0 + 160.0 * k);
-    }
+    let age = hh / p.wind.z;
     let base = 1.0 + hh / p.smoke.z;
     // the winds the parcel met spread it further, and thin it: the mip
     // averages it over the wider ground, only the plume's own growth is
     // made up below, and the widening thins it once more (seen slanting
     // through a wide layer, a spread that only averaged read as a haze as
     // thick as the column)
-    let spread = base + shear_at(hh / p.wind.z);
-    let s = plume(src, log2(spread) + 0.5).r;
+    let spread = base + shear_at(age);
+    var out: Body;
+    out.dens = -1.0;
+    out.wide = spread * p.map.z;
+    out.src = pos.xz - drift_at(age);
+    if h < -8.0 || h > top {
+        return out;
+    }
+    if sway {
+        // the column sways as it rises
+        out.src -= (noise(vec3<f32>(pos.x, hh * 1.5, pos.z) / 600.0 + vec3<f32>(0.0, -globals.time * 0.02, 0.0), 0.0).gb - 0.5) * (40.0 + 160.0 * k);
+    }
+    let s = plume(out.src, log2(spread) + 0.5).r;
     if s < 0.002 {
-        return vec2<f32>(-1.0, 0.0);
+        return out;
     }
     // the mip averages the column over its width: a line of fire would
     // fade as the square of it, the plume spreads mostly across the wind;
     // thin over the flames (the column lifts off the fire, the front shows
     // under it), thickest some tens of metres up, gone at the top
     let lift = 0.06 + 0.94 * smoothstep(p.look.x * 0.07, p.look.x, hh);
-    var dens = min(s * pow(base, 0.85), 1.6) * (base / spread) * lift * (1.0 - smoothstep(top * 0.5, top, hh));
-    if !detail {
-        return vec2<f32>(dens * 0.6, 0.0);
-    }
-    // billows, carried by the wind and rising with the plume; a slow warp
-    // first, so they roll instead of sliding
+    out.dens = min(s * pow(base, 0.85), 1.6) * (base / spread) * lift * (1.0 - smoothstep(top * 0.5, top, hh));
+    return out;
+}
+
+// What the billows leave of the body's density at `pos` (0 to 1.4): 3D
+// noise carried by the wind and rising with the plume, read at mip `lod`.
+fn billows(pos: vec3<f32>, h: f32, lod: f32) -> f32 {
+    let k = clamp(h / p.wind.w, 0.0, 1.0);
+    let t = globals.time;
     let adv = vec3<f32>(p.wind.x, p.wind.z * 0.7, p.wind.y) * t;
     // turned off the axes: the noise repeats every few hundred metres,
     // and a repeat along the vertical reads as horizontal layers
     let q = NOISE_TURN * ((pos - adv) / p.smoke.y);
+    // a slow warp first, so they roll instead of sliding
     let warp = (noise(q * 0.37 + vec3<f32>(0.0, -t * 0.01, 0.0), max(lod - 1.4, 0.0)).gb - 0.5) * 1.2;
     let qw = q + vec3<f32>(warp.x, 0.0, warp.y);
     var n = 0.64 * noise(qw, lod).r + 0.36 * noise(qw * 2.7 + vec3<f32>(0.0, -t * 0.03, 0.0), lod + 1.4).g;
-    n = 0.87 * n + 0.13 * noise(qw * 7.1, lod + 2.8).b;
+    // the finest octave: past the noise's last mip (3 texels a side) it is
+    // its mean, and no tap
+    var finest = 0.5;
+    if lod < 1.2 {
+        finest = mix(noise(qw * 7.1, lod + 2.8).b, 0.5, smoothstep(0.7, 1.2, lod));
+    }
+    n = 0.87 * n + 0.13 * finest;
     // dense at the source, torn into shreds toward the top: a narrow
     // window, so the billows have edges
     let edge = p.look.y + 0.16 * k - 0.14 * (1.0 - k);
-    dens *= smoothstep(edge, edge + 0.12, n) * (0.6 + 0.8 * n);
-    // lit from below by the alight ground under it, widening with height
-    var glow = 0.0;
-    if hh < 300.0 {
-        glow = plume(pos.xz, 1.0 + hh / 40.0).g * exp(-hh / 70.0);
-    }
-    return vec2<f32>(dens, glow);
+    return smoothstep(edge, edge + 0.12, n) * (0.6 + 0.8 * n);
 }
+
+// The flames' pattern: `base` is the place in the noise (x and z in tongue
+// widths, y up the flame), `tq` how far it has risen.
+fn tongues(base: vec3<f32>, tq: f32, flod: f32, near_w: f32) -> f32 {
+    let q = base - vec3<f32>(0.0, tq, 0.0);
+    let w = noise(q * 0.37 + vec3<f32>(0.0, -tq * 0.3, 0.0), max(flod - 1.4, 0.0)).gb - 0.5;
+    var n = noise(q + vec3<f32>(w.x, 0.0, w.y) * 0.9, flod).r;
+    // a finer flicker, where it is more than a pixel
+    if near_w > 0.0 {
+        let fine_n = noise(q * vec3<f32>(2.9, 2.2, 2.9) + vec3<f32>(w.y, -tq, w.x) * 1.4, flod + 1.5).g;
+        n = mix(n, 0.62 * n + 0.38 * fine_n * 1.15, near_w);
+    }
+    return n;
+}
+
+// The flames' pattern at `pos`, `yr` up the flame (0 to 1), in tongues
+// `wide` metres across, where a march pixel spans `foot` metres; `small` 1
+// where the flame is a few march pixels tall.
+fn tongues_at(pos: vec3<f32>, yr: f32, wide: f32, foot: f32, small: f32, t: f32) -> f32 {
+    // the noise has 48 texels a period
+    let flod = log2(max(foot * 48.0 / wide, 1.0));
+    // the phase slanted across the ground: with the same one everywhere,
+    // every flame read the same level of the noise at once, whose mean
+    // changes from level to level, and the whole front rose and sank
+    // together each 0.9 s (user, 2026-11-05: «sembra muoversi su e giù»)
+    let qx = pos.x / wide;
+    let qz = pos.z / wide;
+    let base = vec3<f32>(qx, yr * 0.9 + 0.41 * qx + 0.29 * qz, qz);
+    let near_w = 1.0 - smoothstep(0.12, 0.35, foot / wide);
+    // rising a flame's height in about a second. A flame a few march
+    // pixels tall shows no rising: its pattern is a few dots, each going
+    // on and off in place as the noise passes through it, 1.1 times a
+    // second. There the pattern passes slowly. Two patterns, each at its
+    // own speed, faded one into the other: one speed changing with the
+    // distance would race as the camera moved
+    var n = 0.5;
+    if small < 1.0 {
+        n = tongues(base, t * 1.1, flod, near_w);
+    }
+    if small > 0.0 {
+        let slow = tongues(base + vec3<f32>(0.37, 0.0, 0.61), t * FAR_PACE, flod, near_w);
+        // two patterns mixed are flatter than either
+        n = 0.5 + (mix(n, slow, small) - 0.5) / sqrt(small * small + (1.0 - small) * (1.0 - small));
+    }
+    return n;
+}
+
+// The flames at `pos`, `h` over the ground, where a march pixel spans
+// `foot` metres: x how far the noise is over the flame's edge there (the
+// flame is where it is over 0, soft over `look2.x`), y how high up the
+// flame (0 to 1), z 1 where there is a flame to speak of, else 0.
+fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
+    // the band read through a wobble of a cell or so: no squares
+    let wob = noise(vec3<f32>(pos.xz / 90.0, 0.71), 0.0).rg - 0.5;
+    let fire = plume(pos.xz + wob * p.map.z * 2.2, 0.0);
+    if fire.g <= 0.02 {
+        return vec3<f32>(0.0);
+    }
+    let clumps = noise(vec3<f32>(pos.xz * 0.028, 0.37), 0.0).b;
+    let clump = smoothstep(0.3, 0.75, clumps);
+    let band = fire.g * (0.25 + 0.75 * clump);
+    let hf = max(fire.b * grow * p.look2.y * (0.45 + 0.35 * clump), max(0.5, foot * 3.0));
+    // under the coarse ground: the real ground is drawn, the depth stops
+    // the ray there
+    let yr = max(h, 0.0) / hf;
+    if yr >= 1.0 || h <= -8.0 {
+        return vec3<f32>(0.0);
+    }
+    // a tongue as tall as the flame and a third as wide (`lingue` scales
+    // the width), never under a few march pixels: a fixed size cut the
+    // flame into slabs where it was lower than the pattern
+    let wide = max(hf * 0.32 * p.look.w / 14.0, foot * 3.0);
+    // The pattern is read at the place in the world over a width, and the
+    // width changes from place to place (the flame's height, the distance
+    // from the eye): over the width itself, kilometres from the origin, a
+    // metre along the ray moved the reading by whole periods, each sample
+    // read the noise at random and the jitter drew other flames each frame
+    // (measured with `marca`: a quarter of their opacity from a frame to
+    // the next, a fortieth with the jitter still; user, 2026-11-05:
+    // «continua a vibrare, si nota maggiormente a grandi distanze»). Over
+    // a width that holds still instead, the power of two under it, faded
+    // into the next near the top of its span.
+    let octave = log2(wide);
+    let under = exp2(floor(octave));
+    let up = smoothstep(0.6, 1.0, fract(octave));
+    // a flame a few march pixels tall shows no rising, see `tongues_at`
+    let small = 1.0 - smoothstep(6.0, 24.0, hf / foot);
+    var n = tongues_at(pos, yr, under, foot, small, t);
+    if up > 0.0 {
+        let above = tongues_at(pos, yr, under * 2.0, foot, small, t);
+        // two patterns mixed are flatter than either
+        n = 0.5 + (mix(n, above, up) - 0.5) / sqrt(up * up + (1.0 - up) * (1.0 - up));
+    }
+    return vec3<f32>(n - (0.33 + 0.26 * yr + 0.20 * (1.0 - band)), yr, 1.0);
+}
+
+// The mean of `smoothstep(0, w, f)` while `f` runs straight from `a` to
+// `b`: how much of a stretch of the ray is inside an edge that its two
+// ends see at `a` and `b`.
+fn edge_mean(a: f32, b: f32, w: f32) -> f32 {
+    if abs(b - a) < 1.0e-4 {
+        return smoothstep(0.0, w, 0.5 * (a + b));
+    }
+    return (edge_sum(b, w) - edge_sum(a, w)) / (b - a);
+}
+
+// The integral of `smoothstep(0, w, f)` up to `f`.
+fn edge_sum(f: f32, w: f32) -> f32 {
+    let x = clamp(f / w, 0.0, 1.0);
+    return w * x * x * x * (1.0 - 0.5 * x) + max(f - w, 0.0);
+}
+
+// Flame heights a second the pattern rises where the flame is a few march
+// pixels tall (1.1 where it is tall).
+const FAR_PACE = 0.25;
 
 // The march pixel's place on the screen, as full-resolution pixels of
 // the main pass.
@@ -199,16 +337,23 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     let depth = textureLoad(depth_tex, vec2<i32>(p.origin.xy + at), 0);
     let ndc = ndc_of(full);
     let eye = view.world_position;
-    let near = view.world_from_clip * vec4<f32>(ndc, 1.0, 1.0);
-    let dir = normalize(near.xyz / near.w - eye);
+    // The ray through this pixel, from the camera's turn alone (`rays`,
+    // `fire_volumetric::rays_from_clip`): its run along the camera's axis
+    // is 1. Not a point of the near plane less the eye: a decimetre apart
+    // and kilometres from the world's origin, their difference kept a few
+    // hundred steps of direction, and each ray pointed up to a march pixel
+    // off its own (user, 2026-11-06: «vibra tutto ciò che è volumetrico …
+    // nel lab non lo fa»: the lab is at the origin).
+    let ray = (p.rays * vec4<f32>(ndc, 1.0, 1.0)).xyz;
+    let dir = normalize(ray);
     var t_scene = 1.0e7;
-    out.depth = 1.0e7;
+    var scene_z = FAR_M;
     var hit = eye + dir * 1.0e6;
     if depth > 0.0 {
-        let h4 = view.world_from_clip * vec4<f32>(ndc, depth, 1.0);
-        hit = h4.xyz / h4.w;
-        t_scene = distance(hit, eye);
-        out.depth = p.origin.w / depth;
+        // the depth is the distance along the camera's axis
+        scene_z = min(p.origin.w / depth, FAR_M);
+        t_scene = p.origin.w / depth * length(ray);
+        hit = eye + dir * t_scene;
     }
     var col = vec3<f32>(0.0);
     var trans = 1.0;
@@ -217,6 +362,20 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     var fl_w = 0.0;
     var fl_s = 0.0;
     var fl_yr = 0.0;
+    // what the steps were spent on (`VolumeSettings::count`): all, on
+    // nothing, on smoke too thin to show, on smoke shaded, of which
+    // behind smoke that hides seven tenths, in the flames' reach
+    var n_all = 0.0;
+    var n_empty = 0.0;
+    var n_thin = 0.0;
+    var n_shaded = 0.0;
+    var n_dim = 0.0;
+    // samples that found flame (`VolumeSettings::mark`)
+    var n_hit = 0.0;
+    // steps over a flame's band
+    var n_band = 0.0;
+    var n_flame = 0.0;
+    var in_box = 0.0;
 
     // the plume's box
     let safe = select(dir, vec3<f32>(1e-6), abs(dir) < vec3<f32>(1e-6));
@@ -228,6 +387,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     let t0 = max(max(tmin.x, tmin.y), max(tmin.z, 0.0));
     let t1 = min(min(min(tmax.x, tmax.y), tmax.z), t_scene);
     if t1 > t0 {
+        in_box = 1.0;
         var sun_dir = vec3<f32>(0.0, 1.0, 0.0);
         var sun_col = vec3<f32>(0.0);
         if lights.n_directional_lights > 0u {
@@ -259,30 +419,36 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
             let here = plume(pos.xz, 0.0);
             let h = pos.y - here.a;
             // steps: coarse through the smoke, fine through the flames,
-            // never jumping over the flames' zone on the way down
-            let coarse = clamp(max(coarse0, s * 0.02), 4.0, 90.0);
+            // never jumping over the flames' zone on the way down. The
+            // coarse step is the ray's length shared among the steps, but
+            // no shorter than `stride.x`: the billows have nothing finer,
+            // and a short ray near the ground took as many steps as one
+            // through the whole plume
+            let coarse = clamp(max(coarse0, s * 0.02), p.stride.x, 90.0);
             // the flames grow toward the toy scale with distance, as the
             // tongues and the houses do: a true flame from the play camera
             // is a few pixels (`VolumeSettings::flame_toy`)
             let grow = 1.0 + (p.more.x - 1.0) * smoothstep(p.flame.z, p.flame.w, s);
             let fine = clamp(s * 0.005, 0.8, 6.0) * (0.5 + 0.5 * grow);
-            let flames_on = 1.0;
             var ds = coarse;
             var in_flames = false;
-            if zone > 0.0 && flames_on > 0.0 && h < zone * grow {
+            // the tallest flame round here (m over the ground)
+            var cap = 0.0;
+            if zone > 0.0 && h < zone * grow {
                 // the tallest flame round here: the cell's own, or three
                 // times the mean over 80 m (the mip averages the band with
                 // the ground beside it)
-                let cap = max(here.b, plume(pos.xz, 2.0).b * 3.0) * grow * p.look2.y + 2.0;
-                if h < cap && plume(pos.xz, 2.0).g > 0.0005 {
+                let round = plume(pos.xz, 2.0);
+                cap = max(here.b, round.b * 3.0) * grow * p.look2.y + 2.0;
+                if h < cap && round.g > 0.0005 {
                     in_flames = true;
                     // fine steps only over a cell alight (and its edge),
                     // half a cell elsewhere in the band's reach
-                    ds = select(max(fine, p.map.z * 0.5), fine, plume(pos.xz, 0.0).g > 0.005);
+                    ds = select(max(fine, p.map.z * 0.5), fine, here.g > 0.005);
                 } else if dir.y < 0.0 {
                     ds = clamp((h - cap) / -dir.y, fine, coarse);
                 }
-            } else if zone > 0.0 && flames_on > 0.0 && dir.y < 0.0 {
+            } else if zone > 0.0 && dir.y < 0.0 {
                 ds = min(coarse, max((h - zone * grow) / -dir.y, fine));
             }
             if first {
@@ -295,86 +461,173 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
             let foot = s * p.frame.y;
 
             // the flames
-            // the band read through a wobble of a cell or so: no squares
-            var fire_here = here;
-            if in_flames {
-                let wob = noise(vec3<f32>(pos.xz / 90.0, 0.71), 0.0).rg - 0.5;
-                fire_here = plume(pos.xz + wob * p.map.z * 2.2, 0.0);
-            }
             let show = u32(p.frame.z);
-            if in_flames && fire_here.g > 0.02 && (show & 1u) != 0u {
-                let here = fire_here;
-                let clumps = noise(vec3<f32>(pos.xz * 0.028, 0.37), 0.0).b;
-                let clump = smoothstep(0.3, 0.75, clumps);
-                let band = here.g * (0.25 + 0.75 * clump);
-                let hf = max(here.b * grow * p.look2.y * (0.45 + 0.35 * clump), max(0.5, foot * 3.0));
-                // under the coarse ground: the real ground is drawn, the
-                // depth stops the ray there
-                let yr = max(h, 0.0) / hf;
-                if yr < 1.0 && h > -8.0 {
-                    // a tongue as tall as the flame and a third as wide
-                    // (`lingue` scales the width), never under a few march
-                    // pixels: a fixed size cut the flame into slabs where
-                    // it was lower than the pattern
-                    let wide = max(hf * 0.32 * fperiod / 14.0, foot * 3.0);
-                    // the noise has 48 texels a period
-                    let flod = log2(max(foot * 48.0 / wide, 1.0));
-                    // rising a flame's height in about a second
-                    let tq = t * 1.1;
-                    let q = vec3<f32>(pos.x / wide, yr * 0.9 - tq, pos.z / wide);
-                    let w = noise(q * 0.37 + vec3<f32>(0.0, -tq * 0.3, 0.0), max(flod - 1.4, 0.0)).gb - 0.5;
-                    var n = noise(q + vec3<f32>(w.x, 0.0, w.y) * 0.9, flod).r;
-                    // a finer flicker, where it is more than a pixel
-                    let near_w = 1.0 - smoothstep(0.12, 0.35, foot / wide);
-                    if near_w > 0.0 {
-                        let fine_n = noise(q * vec3<f32>(2.9, 2.2, 2.9) + vec3<f32>(w.y, -tq, w.x) * 1.4, flod + 1.5).g;
-                        n = mix(n, 0.62 * n + 0.38 * fine_n * 1.15, near_w);
+            if in_flames && (show & 1u) != 0u {
+                let sharp = p.look2.x;
+                // A long step through the flames (from far it is 12 m)
+                // found flame in one or two samples of a ray: the jitter
+                // added one or took one away, and the history could not
+                // hold what changed so much (measured with `marca`, the
+                // world still, from 2.5 km: a third of the flames'
+                // opacity from each frame to the next with one sample a
+                // step, a tenth so; both only once the pattern's width
+                // holds still, `flame_at`). The step is cut in parts of
+                // 3.5 m at most, and the flame's edge is not read at a
+                // point but averaged along each part, as if what it is
+                // cut from ran straight from one end to the other: what a
+                // part holds changes smoothly as the ray slides.
+                let parts = clamp(i32(ceil(ds / 3.5)), 1, 4);
+                let dpart = ds / f32(parts);
+                var a = flame_at(pos, h, foot, grow, t);
+                n_band += a.z;
+                if parts == 1 {
+                    if a.z > 0.0 {
+                        let dens = smoothstep(0.0, sharp, a.x) * (1.0 - a.y * a.y * a.y);
+                        if dens > 0.002 {
+                            n_hit += 1.0;
+                            let temp = clamp((1.0 - 0.75 * a.y) * (0.25 + 0.55 * dens) * p.look2.z, 0.0, 1.0);
+                            let absorbed = 1.0 - exp(-dens * ds * p.flame.y);
+                            col += flame_ramp(temp) * p.flame.x * absorbed * trans;
+                            fog_at += pos * absorbed * trans;
+                            fog_w += absorbed * trans;
+                            fl_w += absorbed * trans;
+                            fl_s += s * absorbed * trans;
+                            fl_yr += a.y * absorbed * trans;
+                            trans *= 1.0 - absorbed;
+                        }
                     }
-                    let thresh = 0.33 + 0.26 * yr + 0.20 * (1.0 - band);
-                    let dens = smoothstep(thresh, thresh + p.look2.x, n) * (1.0 - yr * yr * yr) * flames_on;
-                    if dens > 0.002 {
-                        let temp = clamp((1.0 - 0.75 * yr) * (0.25 + 0.55 * dens) * p.look2.z, 0.0, 1.0);
-                        let absorbed = 1.0 - exp(-dens * ds * p.flame.y);
-                        col += flame_ramp(temp) * p.flame.x * absorbed * trans;
-                        fog_at += pos * absorbed * trans;
-                        fog_w += absorbed * trans;
-                        fl_w += absorbed * trans;
-                        fl_s += s * absorbed * trans;
-                        fl_yr += yr * absorbed * trans;
-                        trans *= 1.0 - absorbed;
+                } else {
+                    for (var k = 1; k <= parts; k++) {
+                        let sk = s + dpart * f32(k);
+                        let pk = eye + dir * sk;
+                        let b = flame_at(pk, pk.y - plume(pk.xz, 0.0).a, foot, grow, t);
+                        if a.z > 0.0 || b.z > 0.0 {
+                            // no flame at an end: under the edge there
+                            let fa = select(-sharp, a.x, a.z > 0.0);
+                            let fb = select(-sharp, b.x, b.z > 0.0);
+                            let yr = (a.y * a.z + b.y * b.z) / (a.z + b.z);
+                            let dens = edge_mean(fa, fb, sharp) * (1.0 - yr * yr * yr);
+                            if dens > 0.002 {
+                                n_hit += 1.0;
+                                let temp = clamp((1.0 - 0.75 * yr) * (0.25 + 0.55 * dens) * p.look2.z, 0.0, 1.0);
+                                let absorbed = 1.0 - exp(-dens * dpart * p.flame.y);
+                                let sm = sk - dpart * 0.5;
+                                col += flame_ramp(temp) * p.flame.x * absorbed * trans;
+                                fog_at += (eye + dir * sm) * absorbed * trans;
+                                fog_w += absorbed * trans;
+                                fl_w += absorbed * trans;
+                                fl_s += sm * absorbed * trans;
+                                fl_yr += yr * absorbed * trans;
+                                trans *= 1.0 - absorbed;
+                            }
+                        }
+                        a = b;
                     }
                 }
             }
 
-            // the smoke
-            // the billows averaged over what one sample stands for: the
-            // pixel's width and part of the stride (the jitter and the
-            // history average the rest); sampled finer, the smoke sparkles
-            // as the camera moves
-            let slod = log2(max(max(foot, ds * 0.35) * 48.0 / p.smoke.y, 1.0));
-            let dn = smoke_at(pos, h, true, slod);
-            if (show & 2u) == 0u {
-                // no smoke drawn: only its strides
-            } else if dn.x < 0.0 && !in_flames {
-                // empty: a longer stride
-                ds *= 1.8;
-            } else if dn.x > 0.002 {
-                let k = clamp(h / p.wind.w, 0.0, 1.0);
-                // two taps toward the sun: the plume shades itself
-                let d1 = max(smoke_at(pos + sun_dir * 35.0, h + sun_dir.y * 35.0, false, 0.0).x, 0.0);
-                let d2 = max(smoke_at(pos + sun_dir * 110.0, h + sun_dir.y * 110.0, false, 0.0).x, 0.0);
-                let shade = exp(-sigma * (d1 * 80.0 + d2 * 130.0) * p.look.z);
-                let albedo = mix(brown, grey, smoothstep(0.0, 0.5, k));
-                let lit = albedo * (ambient * (0.45 + 0.4 * k) * (0.5 + 0.5 * shade) + sun_col * shade * phase * 0.9);
-                let fire_lit = glow_col * dn.y * 0.9;
-                // thinned round the eye
-                let clear = p.frame.w;
-                let near_k = select(1.0, smoothstep(clear * 0.25, clear, s), clear > 1.0);
-                let absorbed = 1.0 - exp(-dn.x * near_k * ds * sigma);
-                col += (lit + fire_lit) * p.smoke.w * absorbed * trans;
-                fog_at += pos * absorbed * trans;
-                fog_w += absorbed * trans;
-                trans *= 1.0 - absorbed;
+            // the smoke, thinned round the eye
+            let clear = p.frame.w;
+            let near_k = select(1.0, smoothstep(clear * 0.25, clear, s), clear > 1.0);
+            n_all += 1.0;
+            n_flame += f32(in_flames);
+            // How far a stride longer than the step may go: not into
+            // the flames. A stride that lands past their top skips their
+            // tips, by as much as the jitter has it, and they flicker
+            // (2026-11-05: the flames changed half as much again from each
+            // frame to the next). Above the zone, down to its top; in it,
+            // where no flame is in reach (`round`, the map over 80 m: none
+            // within two cells), down to the tallest flame's height and
+            // two cells along the ground.
+            let free = !in_flames;
+            var reach = 1.0e9;
+            if zone > 0.0 {
+                if h >= zone * grow {
+                    if dir.y < 0.0 {
+                        reach = max((h - zone * grow) / -dir.y, ds);
+                    }
+                } else {
+                    reach = max(2.0 * p.map.z / max(length(dir.xz), 0.05), ds);
+                    if dir.y < 0.0 {
+                        reach = min(reach, max((h - cap) / -dir.y, ds));
+                    }
+                }
+            }
+            if near_k <= 0.0 || (show & 2u) == 0u {
+                // none drawn here: nothing read, only the stride (not cut
+                // to end where the smoke begins: every ray would sample
+                // the same shells round the eye from there, and they show)
+                if free {
+                    ds = min(ds * 1.8, reach);
+                }
+                n_empty += 1.0;
+            } else {
+                let body = smoke_body(pos, h, true);
+                if body.dens < 0.0 {
+                    n_empty += 1.0;
+                    if free {
+                        // empty: a longer stride. Nothing of the smoke is
+                        // narrower than what the map was averaged over at
+                        // this height, so a stride of a part of that
+                        // cannot step over it.
+                        var far = max(ds * 1.8, min(body.wide * p.stride.y, 300.0));
+                        // Near the ground that is a cell or two; there, if
+                        // the map averaged eight times wider holds nothing
+                        // either, nothing smokes for 2.5 times that width
+                        // round here (less the sway and the drift's slant)
+                        let c = ceil(log2(body.wide / p.map.z) + 0.5);
+                        if p.stride.y > 0.0 && far < 60.0 && c + 3.0 < p.map.w {
+                            if plume(body.src, c + 3.0).r < 8.0e-6 {
+                                far = max(far, 1.4 * exp2(c) * p.map.z - 30.0);
+                            }
+                        }
+                        ds = min(far, reach);
+                    }
+                } else {
+                    // thin smoke in longer steps, up to three times: each
+                    // step takes its share of the light whatever its
+                    // length, and what a step of thin smoke adds is under
+                    // the eye's notice (2026-11-05: inside the plume three
+                    // steps in four shaded a haze)
+                    if free && p.stride.z > 0.0 {
+                        ds = min(ds * clamp(p.stride.z / max(body.dens * sigma * ds, 1.0e-5), 1.0, p.stride.w), reach);
+                    }
+                    // the billows averaged over what one sample stands for:
+                    // the pixel's width and part of the stride (the jitter
+                    // and the history average the rest); sampled finer, the
+                    // smoke sparkles as the camera moves
+                    let slod = log2(max(max(foot, ds * 0.35) * 48.0 / p.smoke.y, 1.0));
+                    let dens = body.dens * billows(pos, h, slod);
+                    if dens <= 0.002 {
+                        n_thin += 1.0;
+                    } else {
+                        n_shaded += 1.0;
+                        n_dim += f32(trans < 0.3);
+                        let hh = max(h, 0.0);
+                        let k = clamp(h / p.wind.w, 0.0, 1.0);
+                        // two taps toward the sun: the plume shades itself
+                        var shade = 1.0;
+                        if p.look.z > 0.0 {
+                            let d1 = max(smoke_body(pos + sun_dir * 35.0, h + sun_dir.y * 35.0, false).dens, 0.0);
+                            let d2 = max(smoke_body(pos + sun_dir * 110.0, h + sun_dir.y * 110.0, false).dens, 0.0);
+                            shade = exp(-sigma * (d1 * 48.0 + d2 * 78.0) * p.look.z);
+                        }
+                        let albedo = mix(brown, grey, smoothstep(0.0, 0.5, k));
+                        let lit = albedo * (ambient * (0.45 + 0.4 * k) * (0.5 + 0.5 * shade) + sun_col * shade * phase * 0.9);
+                        // lit from below by the alight ground under it,
+                        // widening with height
+                        var glow = 0.0;
+                        if hh < 300.0 {
+                            glow = plume(pos.xz, 1.0 + hh / 40.0).g * exp(-hh / 70.0);
+                        }
+                        let fire_lit = glow_col * glow * 0.9;
+                        let absorbed = 1.0 - exp(-dens * near_k * ds * sigma);
+                        col += (lit + fire_lit) * p.smoke.w * absorbed * trans;
+                        fog_at += pos * absorbed * trans;
+                        fog_w += absorbed * trans;
+                        trans *= 1.0 - absorbed;
+                    }
+                }
             }
             s += ds;
         }
@@ -390,7 +643,29 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     }
 
     out.color = now;
+    let count = (u32(p.frame.z) >> 2u) & 3u;
+    if count != 0u {
+        var c = vec2<f32>(n_all, n_empty);
+        if count == 2u {
+            c = vec2<f32>(n_shaded, n_dim);
+        } else if count == 3u {
+            c = vec2<f32>(n_thin, n_flame);
+        }
+        out.color = vec4<f32>(c / 128.0, 1.0, 1.0) * in_box;
+    }
+    // markers (`VolumeSettings::mark`): the flames' opacity, the samples
+    // that found flame, the smoke's opacity
+    let mark = (u32(p.frame.z) >> 5u) & 3u;
+    if mark != 0u {
+        out.color = vec4<f32>(fl_w, n_hit / 8.0, max(fog_w - fl_w, 0.0), alpha);
+    }
+    // 3: the steps in the flames' reach (each a 32nd), those of them over
+    // a flame's band (each a 16th)
+    if mark == 3u {
+        out.color = vec4<f32>(fl_w, n_flame / 32.0, n_band / 16.0, 1.0) * in_box;
+    }
     let fl_d = select(0.0, fl_s / max(fl_w, 1e-4), fl_w > 1e-4);
-    out.mid = vec4<f32>(min(distance(mid, eye), 1.0e6), fl_w, fl_d, select(0.0, fl_yr / max(fl_w, 1e-4), fl_w > 1e-4));
+    out.aux = vec4<f32>(scene_z, fl_w, min(fl_d, FAR_M), select(0.0, fl_yr / max(fl_w, 1e-4), fl_w > 1e-4));
+    out.mid = min(distance(mid, eye), 1.0e6);
     return out;
 }

@@ -23,9 +23,10 @@ struct Params {
     drift: array<vec4<f32>, 4>,
     shear: array<vec4<f32>, 2>,
     prev: mat4x4<f32>,
-    world_from_clip: mat4x4<f32>,
+    rays: mat4x4<f32>,
     eye: vec4<f32>,
     more: vec4<f32>,
+    stride: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -40,7 +41,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let last = vec2<i32>(p.size.xy) - 1;
     let now = textureLoad(raw_tex, pix, 0);
     let keep = p.look2.w;
-    if keep <= 0.0 {
+    // `marca=2`: this frame's march as it is
+    if keep <= 0.0 || ((u32(p.frame.z) >> 5u) & 3u) >= 2u {
         return now;
     }
     // the neighbourhood's spread
@@ -66,10 +68,13 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let full = in.position.xy * p.origin.z;
     let f = full / p.size.zw;
     let ndc = vec2<f32>(f.x * 2.0 - 1.0, 1.0 - f.y * 2.0);
-    let far = p.world_from_clip * vec4<f32>(ndc, 1.0, 1.0);
-    let dir = normalize(far.xyz / far.w - p.eye.xyz);
-    let pos = p.eye.xyz + dir * textureLoad(mid_tex, pix, 0).r;
-    let pc = p.prev * vec4<f32>(pos, 1.0);
+    // the ray from the camera's turn alone, and `prev` takes a place given
+    // from this frame's eye: nothing here is a difference of two places
+    // kilometres from the world's origin (as such a difference the ray was
+    // up to a march pixel off, and with the camera still each pixel read
+    // the history of a neighbour, `fire_march.wesl`)
+    let dir = normalize((p.rays * vec4<f32>(ndc, 1.0, 1.0)).xyz);
+    let pc = p.prev * vec4<f32>(dir * textureLoad(mid_tex, pix, 0).r, 1.0);
     if pc.w <= 0.0 {
         return now;
     }
@@ -77,6 +82,12 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let uv = vec2<f32>(ndc_p.x + 1.0, 1.0 - ndc_p.y) * 0.5 * p.size.zw / (p.size.xy * p.origin.z);
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
         return now;
+    }
+    // `scarto`: how far from itself the pixel was found, in march pixels
+    // (red across, green down); black with the camera still
+    if (u32(p.frame.z) & 128u) != 0u {
+        let off = abs(uv * p.size.xy - in.position.xy);
+        return vec4<f32>(off.x, off.y, 0.0, 1.0);
     }
     let past = clamp(textureSampleLevel(hist_tex, hist_samp, uv, 0.0), box_lo, box_hi);
     return mix(now, past, keep);

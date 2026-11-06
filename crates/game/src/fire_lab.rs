@@ -18,6 +18,21 @@
 //! and quits; `KIOSK_FUOCO_T` (sim seconds), `KIOSK_FUOCO_DIST`,
 //! `KIOSK_FUOCO_PITCH`, `KIOSK_FUOCO_YAW` (degrees), `KIOSK_FUOCO_FORMA`
 //! (`linea`, `cerchio`, `chiazza`), `KIOSK_VOL_DIV` choose it.
+//!
+//! The cost (2026-11-05): the picture's log line gives the median frame
+//! time and the GPU time of the volumes' passes (`volumi`,
+//! `bench::PassStamps`; `KIOSK_VOL_STAMP=marcia|storia|composizione` reads
+//! up to the end of that pass). With no window to present to, the frame
+//! time is the CPU's: only `volumi` says what the volumes cost, and only
+//! with `KIOSK_FUOCO_SIZE=<w>x<h>` several times the pixels (4800x3000)
+//! is it steady. `conta=1|2|3` in `KIOSK_FUOCO_SET` draws what the
+//! march's steps were spent on (`VolumeSettings::count`); `solo=1` the
+//! volumes over black and `marca=1|2|3` marker colours for each stage
+//! (`VolumeSettings::mark`): what shakes is found there, not in the
+//! picture. `scarto=1` draws how far from itself the history finds each
+//! pixel (`VolumeSettings::offset`): black with the camera still. The lab
+//! stands at the world's origin: what goes wrong kilometres from it (the
+//! island) does not show here.
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
@@ -83,6 +98,8 @@ struct Lab {
     sun_az: f32,
     /// Frame time, smoothed (ms).
     frame_ms: f32,
+    /// Every frame's time while a picture settles (ms), for the cost.
+    frame_times: Vec<f32>,
     since_rebuild: f32,
     drawn: Option<(VolumeSettings, f32, Shape, [f32; 7])>,
     snap: Option<(String, u32)>,
@@ -177,11 +194,20 @@ pub fn run() -> anyhow::Result<()> {
     .add_plugins(EguiPlugin::default())
     .add_plugins(crate::shader_lib::ShaderLibPlugin)
     .add_plugins(crate::fire_volumetric::FireVolumetricPlugin)
+    .add_plugins(crate::bench::BenchPlugin)
     .insert_resource(ClearColor(Color::srgb(0.62, 0.74, 0.88)))
     .insert_resource(GlobalAmbientLight { brightness: 900.0, ..default() })
     .add_systems(Startup, setup)
     .add_systems(Update, (tick, fire, camera, sun, snap_when_ready).chain())
     .add_systems(EguiPrimaryContextPass, panel);
+    if snap.is_some() {
+        // a picture's frames are a sixtieth of a second each, however long
+        // they take: the flames and billows move on the shaders' clock, so
+        // on the real one every run pictured another instant. Stepped, two
+        // runs give the same picture pixel for pixel (checked, 2026-11-05)
+        // and two builds' pictures and sequences can be compared
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / 60.0)));
+    }
     app.run();
     Ok(())
 }
@@ -276,9 +302,16 @@ fn setup(
         },
         FireVolumeCamera,
     ));
+    let cam_id = cam.id();
     let mut snap_target = Handle::default();
     if snap.is_some() {
-        let image = Image::new_target_texture(1600, 1000, TextureFormat::Rgba8UnormSrgb, None);
+        // `KIOSK_FUOCO_SIZE=<w>x<h>`: several times the pixels, so that the
+        // frame time is the GPU's (as `KIOSK_SNAP_BENCH`, see `bench.rs`)
+        let (w, h) = std::env::var("KIOSK_FUOCO_SIZE")
+            .ok()
+            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or((1600, 1000));
+        let image = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
         snap_target = images.add(image);
         cam.insert(bevy::camera::RenderTarget::Image(bevy::camera::ImageRenderTarget {
             handle: snap_target.clone(),
@@ -300,6 +333,7 @@ fn setup(
         sun_up: 38.0,
         sun_az: 150.0,
         frame_ms: 16.0,
+        frame_times: Vec::new(),
         since_rebuild: f32::INFINITY,
         drawn: None,
         // frames for the history to settle before the picture
@@ -316,6 +350,10 @@ fn setup(
     };
     if let Ok(spec) = std::env::var("KIOSK_FUOCO_SET") {
         apply_spec(&spec, &mut lab, &mut settings);
+    }
+    if settings.count > 0 {
+        // the counts are read off the picture: as written
+        commands.entity(cam_id).insert(Tonemapping::None).remove::<Bloom>();
     }
     commands.insert_resource(lab);
 }
@@ -364,9 +402,21 @@ fn apply_spec(spec: &str, lab: &mut Lab, s: &mut VolumeSettings) {
     }
 }
 
-fn tick(time: Res<Time>, mut lab: ResMut<Lab>, settings: Res<VolumeSettings>, mut state: ResMut<PlumeState>) {
+fn tick(
+    time: Res<Time>,
+    mut lab: ResMut<Lab>,
+    settings: Res<VolumeSettings>,
+    mut state: ResMut<PlumeState>,
+    mut last: Local<Option<std::time::Instant>>,
+) {
     let mut dt = time.delta_secs();
-    lab.frame_ms = lab.frame_ms * 0.95 + dt * 1000.0 * 0.05;
+    // what the frame took, whatever the clock says it lasted
+    let now = std::time::Instant::now();
+    let took = last.replace(now).map_or(dt, |t| (now - t).as_secs_f32());
+    lab.frame_ms = lab.frame_ms * 0.95 + took * 1000.0 * 0.05;
+    if lab.snap.is_some() {
+        lab.frame_times.push(took * 1000.0);
+    }
     if lab.playing {
         lab.clock = (lab.clock + dt * lab.speed).min(6.0 * 3600.0);
         state.clock += dt * settings.pace;
@@ -600,15 +650,31 @@ fn panel(
     }
 }
 
-fn snap_when_ready(mut commands: Commands, mut lab: ResMut<Lab>, mut exit: MessageWriter<AppExit>, mut done: Local<u32>) {
+fn snap_when_ready(
+    mut commands: Commands,
+    mut lab: ResMut<Lab>,
+    costs: Res<crate::bench::Costs>,
+    mut exit: MessageWriter<AppExit>,
+    mut done: Local<u32>,
+) {
     let target = lab.snap_target.clone();
-    let ms = lab.frame_ms;
+    // the cost: the median of the frames since the first third settled, and
+    // of the GPU's time for the volumes' passes in them (with no window to
+    // present to, the frame time alone says little; the whole frame's GPU
+    // stamps, `Costs::gpu_pass`, read 0.4 or 9 ms for the same picture here)
+    let median = |all: &[f32]| {
+        let mut times = all[all.len() / 3..].to_vec();
+        times.sort_by(f32::total_cmp);
+        times.get(times.len() / 2).copied()
+    };
+    let ms = median(&lab.frame_times).unwrap_or(lab.frame_ms);
+    let vol = median(&costs.volume.lock().unwrap()).unwrap_or(0.0);
     let sequence = lab.sequence;
     let Some((file, frames)) = &mut lab.snap else { return };
     if *frames > 0 {
         *frames -= 1;
         if *frames == 0 && sequence == 0 {
-            info!("fuoco_lab: {ms:.2} ms a fotogramma");
+            info!("fuoco_lab: {ms:.2} ms a fotogramma, volumi {vol:.2} ms");
             commands.spawn(Screenshot::image(target)).observe(save_to_disk(file.clone()));
         }
         return;

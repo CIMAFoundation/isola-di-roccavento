@@ -23,7 +23,8 @@
 //!
 //! Each frame jitters the march's first step and blends with the frames
 //! before, reprojected (`VolumeSettings::history`): the noise of the coarse
-//! grid averages out and the volume stays put as the camera moves. The
+//! grid averages out and the volume stays put as the camera moves (as long
+//! as each ray points through its own pixel: [`rays_from_clip`]). The
 //! composite reads the 3x3 low-resolution texels round each screen pixel,
 //! weighted by distance and by how alike their depth is (a bilateral blur
 //! and upsample in one), and blends the result over the scene before the
@@ -31,6 +32,34 @@
 //!
 //! Off in the game unless `KIOSK_VOLUMI=1`, never on WebGL2; the lab
 //! (`fire_lab`, `KIOSK_FUOCO=1`) always has it and sets every knob.
+//!
+//! What it costs (2026-11-05, the lab at 4800x3000 on an M4 Pro, GPU time
+//! of the three passes, `bench::PassStamps`): 3.8 to 10.5 ms as first
+//! written, 1.9 to 7.1 ms after the changes below, five views; the flames
+//! held still (the pattern's width by octaves, long steps through them cut
+//! in parts, `fire_march.wesl`) cost a tenth more from near (250 m: 5.5 to
+//! 6.1 ms). What was changed, and what was tried and taken out again:
+//!
+//! - the composite, at the screen's resolution, was half the cost of an
+//!   ordinary view: a pixel with nothing in the 3x3 march texels round it
+//!   now leaves after four filtered taps, and the others read two textures
+//!   a texel instead of three (`AUX_FORMAT`);
+//! - the march's steps were the ray's length shared among `steps`, so a
+//!   short ray took as many as a long one, and three in four found
+//!   nothing: a floor on the step, longer strides where nothing smokes and
+//!   through thin smoke, nothing read where the smoke is cleared round the
+//!   eye (`VolumeSettings::step_min_m` and the three after it); no such
+//!   stride reaches into the flames (`reach` in `fire_march.wesl`: when
+//!   they did, the flames changed half as much again from frame to frame);
+//! - `VolumeSettings::count` (the lab's `conta`) draws what each ray's
+//!   steps were spent on: read it before changing the march again;
+//! - taken out: a grid of where smoke may be, to stride through the rest
+//!   (the plume is read from mips as wide as it has spread, so what may
+//!   hold smoke is nearly all of the box: 83 % of the grid, and the march
+//!   was a third slower for reading it); coarser billows and the last
+//!   sample's shade behind smoke that hides seven tenths (one step a ray:
+//!   no gain, and the switch drew veins); not reading the sway's noise
+//!   before the map says something is there (no gain).
 
 use std::collections::VecDeque;
 
@@ -39,6 +68,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::MainPassResolutionOverride;
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::math::DMat4;
 use bevy::pbr::{MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, ViewKeyCache};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
@@ -143,9 +173,48 @@ pub struct VolumeSettings {
     /// The smoke thins out nearer the eye than this (m): from inside the
     /// plume the player would see nothing but brown.
     pub clear_m: f32,
+    /// The march's strides (2026-11-05). The shortest coarse step (m): the
+    /// step is the ray's length shared among `steps`, and a short ray took
+    /// as many as a long one.
+    pub step_min_m: f32,
+    /// Where nothing smokes, a stride of this share of the width the map
+    /// is averaged over at that height (0: the old 1.8 steps only).
+    pub step_empty: f32,
+    /// Thin smoke in longer steps: the optical depth a step aims at, and
+    /// how many times longer at most (0: off).
+    pub step_thin: f32,
+    pub step_thin_max: f32,
     /// What is drawn (the lab's switches).
     pub show_flames: bool,
     pub show_smoke: bool,
+    /// Instead of the picture, what each ray's steps were spent on, as
+    /// colours (each a count over 128; blue marks the rays through the
+    /// plume's box): 1 red all the steps, green those that found nothing;
+    /// 2 those that shaded smoke, of which behind smoke that hides seven
+    /// tenths; 3 those on smoke too
+    /// thin to show, those in the flames' reach. For the lab (`conta`).
+    pub count: u32,
+    /// The volumes alone, over black instead of the scene (which still
+    /// stops the rays): what moves in the picture is theirs (`solo`; user,
+    /// 2026-11-05: «un rendering solo con fiamme e fumo per isolare il
+    /// problema»).
+    pub solo: bool,
+    /// Marker colours instead of the picture (`marca`; user, 2026-11-05:
+    /// «un rendering di test invece di quello realistico, con dei colori
+    /// marker»): red the flames' opacity alone, green how many samples of
+    /// the ray found flame (each an eighth), blue the smoke's opacity
+    /// alone; no fog, no carving. 1 after the history, 2 this frame's
+    /// march as it is, before the history; 3 as 2, with in green the
+    /// steps spent in the flames' reach (each a 32nd) and in blue those of
+    /// them over a flame's band (each a 16th). With `solo`, each stage's
+    /// change from frame to frame is measured by itself.
+    pub mark: u32,
+    /// Instead of the picture, how far from itself the history finds each
+    /// march pixel, in march pixels (`scarto`): red across, green down.
+    /// Black with the camera still, or the rays and the history are built
+    /// wrong ([`rays_from_clip`]: half a pixel all over the screen, on the
+    /// island, and the lab showed nothing).
+    pub offset: bool,
 }
 
 impl Default for VolumeSettings {
@@ -181,8 +250,16 @@ impl Default for VolumeSettings {
             pace: 5.0,
             smooth_s: 1.5,
             shear: 0.4,
+            step_min_m: 9.0,
+            step_empty: 0.45,
+            step_thin: 0.06,
+            step_thin_max: 3.0,
             show_flames: true,
             show_smoke: true,
+            count: 0,
+            solo: false,
+            mark: 0,
+            offset: false,
         }
     }
 }
@@ -223,6 +300,14 @@ impl VolumeSettings {
             "temp" => self.flame_temp = x,
             "fiamme" => self.show_flames = x != 0.0,
             "fumo" => self.show_smoke = x != 0.0,
+            "conta" => self.count = x as u32,
+            "solo" => self.solo = x != 0.0,
+            "marca" => self.mark = x as u32,
+            "scarto" => self.offset = x != 0.0,
+            "passo_min" => self.step_min_m = x,
+            "passo_vuoto" => self.step_empty = x,
+            "passo_tenue" => self.step_thin = x,
+            "passo_tenue_max" => self.step_thin_max = x,
             _ => return false,
         }
         true
@@ -326,16 +411,21 @@ struct Params {
     /// How much wider (in cells) smoke of those ages has spread for the
     /// winds it met, four to a vector.
     shear: [Vec4; 2],
-    /// Last frame's clip from world, for the history.
+    /// Last frame's clip from a place given from this frame's eye, for
+    /// the history ([`prev_from_eye`]).
     prev: Mat4,
-    /// This frame's world from clip, and the eye (for the resolve, which
-    /// has no view bindings).
-    world_from_clip: Mat4,
+    /// The ray through a point of the screen ([`rays_from_clip`]), and the
+    /// eye.
+    rays: Mat4,
     eye: Vec4,
     /// The flames' toy scale (far off, times the true height), the
     /// carved detail's amount and size (m), the time (s, as the shaders'
     /// `globals.time`).
     more: Vec4,
+    /// The strides: the shortest coarse step (m), the share of the map's
+    /// width strode where nothing smokes, the optical depth a step of thin
+    /// smoke aims at and how many times longer it may be for it.
+    stride: Vec4,
 }
 
 /// The wind of the last few minutes of sim time: smoke aloft drifted with
@@ -526,10 +616,11 @@ pub fn rebuild(
     let lo_xz = Vec2::new(lo.x, lo.z) + dlo - grow;
     let hi_xz = Vec2::new(hi.x, hi.z) + dhi + grow;
     let levels = mip_count(cols, rows);
+    let zone = if any_flame { 45.0 * s.flame_height.max(0.3) } else { 0.0 };
     state.params = Some(Params {
         map: Vec4::new(1.0 / world.width_m, 1.0 / world.height_m, world.cellsize, (levels - 1) as f32),
         lo: Vec4::new(lo_xz.x, lo.y - 15.0, lo_xz.y, s.steps),
-        hi: Vec4::new(hi_xz.x, hi.y + s.top_m, hi_xz.y, if any_flame { 45.0 * s.flame_height.max(0.3) } else { 0.0 }),
+        hi: Vec4::new(hi_xz.x, hi.y + s.top_m, hi_xz.y, zone),
         wind: Vec4::new(wind.x, wind.y, s.rise_ms, s.top_m),
         smoke: Vec4::new(s.sigma, s.period_m, s.spread_m, s.smoke_gain),
         flame: Vec4::new(s.flame_gain, s.flame_absorb, s.flame_full_m, s.flame_end_m),
@@ -538,6 +629,7 @@ pub fn rebuild(
         drift,
         shear,
         more: Vec4::new(s.flame_toy, s.detail, s.detail_m, 0.0),
+        stride: Vec4::new(s.step_min_m.max(0.5), s.step_empty, s.step_thin, s.step_thin_max.max(1.0)),
         ..default()
     });
 }
@@ -667,7 +759,8 @@ struct Extracted {
     noise: AssetId<Image>,
     near: f32,
     div: u32,
-    /// 1 the flames, 2 the smoke, as bits.
+    /// 1 the flames, 2 the smoke, as bits; 4 and 8 the count; 16 alone; 32
+    /// and 64 the markers; 128 the history's offset.
     show: f32,
     clear: f32,
 }
@@ -697,7 +790,7 @@ fn extract(
     }
     let div = settings.as_ref().map_or(4, |s| s.div.clamp(1, 8));
     let clear = settings.as_ref().map_or(600.0, |s| s.clear_m);
-    let show = settings.as_ref().map_or(3.0, |s| f32::from(s.show_flames) + 2.0 * f32::from(s.show_smoke));
+    let show = settings.as_ref().map_or(3.0, |s| f32::from(s.show_flames) + 2.0 * f32::from(s.show_smoke) + 4.0 * s.count.min(3) as f32 + 16.0 * f32::from(s.solo) + 32.0 * s.mark.min(3) as f32 + 128.0 * f32::from(s.offset));
     match (params, state.as_ref()) {
         (Some(params), Some(s)) => commands.insert_resource(Extracted { params, noise: s.noise.id(), near, div, show, clear }),
         _ => commands.remove_resource::<Extracted>(),
@@ -773,10 +866,12 @@ fn init_pipelines(
                 (
                     uniform_buffer::<Params>(false),
                     depth(ms),
-                    texture_2d(TextureSampleType::Float { filterable: false }),
-                    texture_2d(TextureSampleType::Float { filterable: false }),
+                    // the volume (filtered for the early way out), what the
+                    // march noted of the scene and the flames
+                    texture_2d(TextureSampleType::Float { filterable: true }),
                     texture_2d(TextureSampleType::Float { filterable: false }),
                     texture_3d(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
                     sampler(SamplerBindingType::Filtering),
                 ),
             ),
@@ -816,17 +911,54 @@ fn init_pipelines(
     });
 }
 
-/// A view's targets: this frame's march (light, the scene's depth, how far
-/// the volume is), and two histories written in turn; the last frame's clip
-/// from world.
+/// The ray through a point of the screen, for the shaders: the xyz of this
+/// times `(ndc, 1, 1)` points along it, 1 long along the camera's axis
+/// (so as many times longer than 1 as the ray is longer than its depth).
+/// The camera's turn after the inverse projection, without the camera's
+/// place.
+///
+/// The shaders had the ray as a point of the near plane, in the world,
+/// less the eye (2026-11-06). The two are a decimetre apart (the game's
+/// near plane) and, on the island, kilometres from the origin, where a
+/// float steps by half a millimetre: their difference kept a few hundred
+/// steps of direction, and a ray pointed up to a march pixel off its own,
+/// in a lattice that changed whenever the camera moved. With the camera
+/// still, the history read each pixel half a march pixel from itself
+/// (measured), so it held half as much as in the lab, which stands at the
+/// origin with a near plane five times farther; with the camera moving,
+/// the whole volume shook (user: «vibra tutto ciò che è volumetrico … c'è
+/// un qualche problema in come vengono costruiti i volumi … nel lab non lo
+/// fa»).
+fn rays_from_clip(world_from_view: Mat4, clip_from_view: Mat4) -> Mat4 {
+    Mat4::from_mat3(Mat3::from_mat4(world_from_view)) * clip_from_view.inverse()
+}
+
+/// A frame's clip from world, in doubles: kept for the next frame's
+/// history ([`prev_from_eye`]).
+fn clip_from_world(world_from_view: Mat4, clip_from_view: Mat4) -> DMat4 {
+    clip_from_view.as_dmat4() * world_from_view.as_dmat4().inverse()
+}
+
+/// Last frame's clip from a place given from this frame's eye: the shader
+/// reprojects `ray * distance` without adding the eye, kilometres from the
+/// origin, to it (see [`rays_from_clip`]). The two cameras' places cancel
+/// here, in doubles: with the camera still a pixel finds itself.
+fn prev_from_eye(prev_clip_from_world: DMat4, eye: Vec3) -> Mat4 {
+    (prev_clip_from_world * DMat4::from_translation(eye.as_dvec3())).as_mat4()
+}
+
+/// A view's targets: this frame's march (light; the scene's depth and the
+/// flames, for the composite; how far the volume is, for the resolve), and
+/// two histories written in turn; the last frame's clip from world.
 struct History {
     size: UVec2,
     raw: (Texture, TextureView),
-    depth: (Texture, TextureView),
+    aux: (Texture, TextureView),
     mid: (Texture, TextureView),
     color: [(Texture, TextureView); 2],
     frame: u32,
-    prev: Option<Mat4>,
+    /// Last frame's clip from world, in doubles (see [`prev_from_eye`]).
+    prev: Option<DMat4>,
 }
 
 impl History {
@@ -834,7 +966,7 @@ impl History {
         History {
             size,
             raw: target(device, "fire_volume_raw", COLOR_FORMAT, size),
-            depth: target(device, "fire_volume_depth", DEPTH_FORMAT, size),
+            aux: target(device, "fire_volume_aux", AUX_FORMAT, size),
             mid: target(device, "fire_volume_mid", MID_FORMAT, size),
             color: [0, 1].map(|_| target(device, "fire_volume_color", COLOR_FORMAT, size)),
             frame: 0,
@@ -860,16 +992,26 @@ struct ViewData {
 }
 
 const COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
-const DEPTH_FORMAT: TextureFormat = TextureFormat::R32Float;
-/// The volume's distance, the flames' share, distance and height.
-const MID_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
+/// The scene's depth (m), the flames' share, distance and height: what the
+/// composite reads of each march texel besides its light, in one texture
+/// of half floats (two, the second of 32-bit floats, were a third more
+/// fetches; with 32-bit floats here the flames change no less from frame
+/// to frame, measured 2026-11-05).
+const AUX_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// The volume's distance (m).
+const MID_FORMAT: TextureFormat = TextureFormat::R32Float;
 
-fn pass<'a>(encoder: &'a mut CommandEncoder, label: &'static str, targets: &[Option<RenderPassColorAttachment<'_>>]) -> wgpu::RenderPass<'a> {
+fn pass<'a>(
+    encoder: &'a mut CommandEncoder,
+    label: &'static str,
+    targets: &[Option<RenderPassColorAttachment<'_>>],
+    stamp: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) -> wgpu::RenderPass<'a> {
     encoder.begin_render_pass(&RenderPassDescriptor {
         label: Some(label),
         color_attachments: targets,
         depth_stencil_attachment: None,
-        timestamp_writes: None,
+        timestamp_writes: stamp,
         occlusion_query_set: None,
         multiview_mask: None,
     })
@@ -947,7 +1089,7 @@ fn prepare(
                 fragment: Some(FragmentState {
                     shader: MARCH_SHADER,
                     shader_defs: defs,
-                    targets: vec![t(COLOR_FORMAT), t(DEPTH_FORMAT), t(MID_FORMAT)],
+                    targets: vec![t(COLOR_FORMAT), t(AUX_FORMAT), t(MID_FORMAT)],
                     ..default()
                 }),
                 ..default()
@@ -1002,7 +1144,7 @@ fn prepare(
             // they carry over (dropped, each change flashed the raw march)
             history.size = low;
             history.raw = target(&device, "fire_volume_raw", COLOR_FORMAT, low);
-            history.depth = target(&device, "fire_volume_depth", DEPTH_FORMAT, low);
+            history.aux = target(&device, "fire_volume_aux", AUX_FORMAT, low);
             history.mid = target(&device, "fire_volume_mid", MID_FORMAT, low);
         }
         let slot = &history.color[write].0;
@@ -1010,7 +1152,7 @@ fn prepare(
             history.color[write] = target(&device, "fire_volume_color", COLOR_FORMAT, low);
         }
         let world_from_view = view.world_from_view.to_matrix();
-        let clip_from_world = view.clip_from_view * world_from_view.inverse();
+        let clip_from_world = clip_from_world(world_from_view, view.clip_from_view);
         let prev = history.prev.unwrap_or_else(|| {
             keep = 0.0;
             clip_from_world
@@ -1026,9 +1168,10 @@ fn prepare(
         // a still march when nothing is kept: the jitter would only boil
         let frame = if keep > 0.0 { (history.frame % 64) as f32 } else { 0.0 };
         params.frame = Vec4::new(frame, pixel, extracted.show, extracted.clear);
-        params.prev = prev;
-        params.world_from_clip = world_from_view * view.clip_from_view.inverse();
-        params.eye = view.world_from_view.translation().extend(1.0);
+        let eye = view.world_from_view.translation();
+        params.prev = prev_from_eye(prev, eye);
+        params.rays = rays_from_clip(world_from_view, view.clip_from_view);
+        params.eye = eye.extend(1.0);
         params.more.w = time.elapsed_secs_wrapped();
         let mut uniform = UniformBuffer::from(params);
         uniform.write_buffer(&device, &queue);
@@ -1051,6 +1194,7 @@ fn draw(
     histories: Res<Histories>,
     extracted: Option<Res<Extracted>>,
     images: Res<RenderAssets<GpuImage>>,
+    stamps: Option<Res<crate::bench::PassStamps>>,
     mut ctx: RenderContext,
 ) {
     let (entity, target, depth, view_bind_group, data) = view.into_inner();
@@ -1100,23 +1244,46 @@ fn draw(
             uniform,
             depth_view,
             &history.color[w].1,
-            &history.depth.1,
-            &history.mid.1,
+            &history.aux.1,
             &noise.texture_view,
             &noise.sampler,
+            &pipelines.history_sampler,
         )),
     );
 
+    // the bench's stamps round all three passes, or up to the end of the
+    // one `KIOSK_VOL_STAMP` names (`marcia`, `storia`, `composizione`):
+    // the time read starts before the march whichever is named
+    // (`bench::PassStamps::start`), so a pass's own cost is the difference
+    // from the one before
+    static ONLY: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let only = *ONLY.get_or_init(|| match std::env::var("KIOSK_VOL_STAMP").as_deref() {
+        Ok("marcia") => Some(0),
+        Ok("storia") => Some(1),
+        Ok("composizione") => Some(2),
+        _ => None,
+    });
+    // (first, last) of the passes timed
+    let timed = stamps.as_ref().map(|s| (s, only.map_or((0, 2), |k| (k, k))));
     let encoder = ctx.command_encoder();
+    let stamp = |encoder: &mut CommandEncoder, i: usize| {
+        let (s, (first, last)) = timed?;
+        if i == first {
+            s.start(encoder);
+        }
+        (i == last).then(|| s.end())
+    };
     {
-        let mut p = pass(encoder, "fire_march", &[attach(&history.raw.1), attach(&history.depth.1), attach(&history.mid.1)]);
+        let stamp = stamp(encoder, 0);
+        let mut p = pass(encoder, "fire_march", &[attach(&history.raw.1), attach(&history.aux.1), attach(&history.mid.1)], stamp);
         p.set_pipeline(march);
         p.set_bind_group(0, &view_bind_group.main, &view_bind_group.main_offsets);
         p.set_bind_group(1, &march_group, &[]);
         p.draw(0..3, 0..1);
     }
     {
-        let mut p = pass(encoder, "fire_resolve", &[attach(&history.color[w].1)]);
+        let stamp = stamp(encoder, 1);
+        let mut p = pass(encoder, "fire_resolve", &[attach(&history.color[w].1)], stamp);
         p.set_pipeline(resolve);
         p.set_bind_group(0, &resolve_group, &[]);
         p.draw(0..3, 0..1);
@@ -1128,12 +1295,16 @@ fn draw(
             resolve_target: None,
             ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
         })];
-        let mut p = pass(encoder, "fire_composite", &load);
+        let stamp = stamp(encoder, 2);
+        let mut p = pass(encoder, "fire_composite", &load, stamp);
         let (corner, size) = data.viewport;
         p.set_viewport(corner.x as f32, corner.y as f32, size.x as f32, size.y as f32, 0.0, 1.0);
         p.set_pipeline(composite);
         p.set_bind_group(0, &composite_group, &[]);
         p.draw(0..3, 0..1);
+    }
+    if let Some(stamps) = &stamps {
+        stamps.read_back(encoder);
     }
 }
 
@@ -1150,6 +1321,64 @@ mod tests {
         let (d, stray) = m.drift(99.0, 50.0);
         assert!((d - Vec2::new(150.0, 200.0)).length() < 1e-3);
         assert!(stray < 1e-4);
+    }
+
+    /// A camera over the island's far side, with the game's near plane.
+    fn far_camera() -> (Mat4, Mat4) {
+        let eye = Vec3::new(9000.0, 1700.0, -7000.0);
+        let world_from_view = Transform::from_translation(eye).looking_at(Vec3::new(7200.0, 300.0, -5300.0), Vec3::Y).to_matrix();
+        (world_from_view, Mat4::perspective_infinite_reverse_rh(0.6, 1.6, 0.1))
+    }
+
+    /// The screen's points, as the shaders have them.
+    fn screen() -> impl Iterator<Item = Vec4> {
+        (0..=40).flat_map(|i| (0..=40).map(move |j| Vec4::new(i as f32 / 20.0 - 1.0, j as f32 / 20.0 - 1.0, 1.0, 1.0)))
+    }
+
+    #[test]
+    fn a_ray_far_from_the_origin_points_through_its_pixel() {
+        let (world_from_view, clip_from_view) = far_camera();
+        let rays = rays_from_clip(world_from_view, clip_from_view);
+        let eye = world_from_view.w_axis.truncate();
+        // the true ray, in doubles
+        let turn = bevy::math::DMat3::from_mat4(world_from_view.as_dmat4());
+        let unproject = clip_from_view.as_dmat4().inverse();
+        let forward = turn * bevy::math::DVec3::NEG_Z;
+        let (mut worst, mut worst_before) = (0.0f64, 0.0f64);
+        for ndc in screen() {
+            let truth = (turn * (unproject * ndc.as_dvec4()).truncate()).normalize();
+            // as the shaders do, in floats
+            let ray = (rays * ndc).truncate();
+            worst = worst.max(ray.normalize().as_dvec3().angle_between(truth));
+            // 1 along the camera's axis: the depth times its length is the
+            // distance along the ray
+            assert!((ray.length() as f64 * truth.dot(forward) - 1.0).abs() < 1e-5);
+            // as they did: a point of the near plane, in the world, less
+            // the eye
+            let near = world_from_view * clip_from_view.inverse() * ndc;
+            let before = (near.truncate() / near.w - eye).normalize();
+            worst_before = worst_before.max(before.as_dvec3().angle_between(truth));
+        }
+        // a march pixel spans about 2 mrad
+        assert!(worst < 1e-5, "{worst} rad");
+        assert!(worst_before > 1e-4, "this camera would not have shown the fault: {worst_before} rad");
+    }
+
+    #[test]
+    fn a_still_camera_finds_each_pixel_where_it_was() {
+        let (world_from_view, clip_from_view) = far_camera();
+        let rays = rays_from_clip(world_from_view, clip_from_view);
+        let eye = world_from_view.w_axis.truncate();
+        let prev = prev_from_eye(clip_from_world(world_from_view, clip_from_view), eye);
+        for ndc in screen() {
+            for distance in [30.0, 800.0, 6000.0, 40000.0] {
+                let dir = (rays * ndc).truncate().normalize();
+                let clip = prev * (dir * distance).extend(1.0);
+                let back = clip.truncate().truncate() / clip.w;
+                // a march pixel is 5e-3 of this
+                assert!((back - ndc.truncate().truncate()).length() < 2e-5, "{ndc} at {distance} m: {back}");
+            }
+        }
     }
 
     #[test]

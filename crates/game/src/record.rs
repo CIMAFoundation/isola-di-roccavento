@@ -2,7 +2,7 @@
 //! `rec=<seconds>` is filmed instead of photographed, picture and sound, into
 //! `<KIOSK_SNAP>/<name>.mp4` (needs `ffmpeg` on the PATH).
 //!
-//! The game runs on a fixed clock while filming: every frame is 1/[`FPS`] s
+//! The game runs on a fixed clock while filming: every frame is 1/30 s (`fps`)
 //! of game time however long it takes to draw, so the video is smooth on any
 //! machine and nothing is dropped. The window stays hidden, as for the
 //! snapshots. The picture of every frame is piped to ffmpeg in order; the
@@ -50,8 +50,13 @@ mod native {
 
     use super::RUNNING;
 
-    /// Frames per second of the video, and of the game's clock while filming.
-    pub const FPS: u32 = 30;
+    /// Frames per second of the video, and of the game's clock while
+    /// filming: 30, or `KIOSK_REC_FPS` (what a screen at 60 or 120 Hz
+    /// shows between two frames of a video at 30 is not in it).
+    pub fn fps() -> u32 {
+        static FPS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *FPS.get_or_init(|| std::env::var("KIOSK_REC_FPS").ok().and_then(|v| v.parse().ok()).filter(|f| (1..=240).contains(f)).unwrap_or(30))
+    }
     /// The sound's sample rate (`sfx::RATE`).
     pub const RATE: u32 = sfx::RATE;
 
@@ -85,7 +90,7 @@ mod native {
     impl Recorder {
         /// Starts filming `seconds` into `<path>.mp4`.
         pub fn start(&mut self, commands: &mut Commands, path: &Path, seconds: f32) {
-            let frames = (seconds * FPS as f32).round().max(1.0) as u32;
+            let frames = (seconds * fps() as f32).round().max(1.0) as u32;
             self.job = Some(Job {
                 path: path.to_owned(),
                 frames,
@@ -94,7 +99,7 @@ mod native {
                 audio: Vec::new(),
                 owed: 0.0,
             });
-            commands.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / f64::from(FPS))));
+            commands.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / f64::from(fps()))));
             RUNNING.store(true, Ordering::Relaxed);
             eprintln!("rec: {} ({frames} frames)", path.display());
         }
@@ -196,7 +201,7 @@ mod native {
 
     fn spawn_ffmpeg((w, h): (u32, u32)) -> std::io::Result<(Child, ChildStdin)> {
         let mut child = Command::new("ffmpeg")
-            .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &FPS.to_string(), "-i", "-"])
+            .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &fps().to_string(), "-i", "-"])
             .args(["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p"])
             .arg(video_path())
             .stdin(Stdio::piped())

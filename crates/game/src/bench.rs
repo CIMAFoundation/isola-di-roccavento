@@ -35,6 +35,9 @@ pub struct Costs {
     pub encode: Arc<Mutex<Vec<f32>>>,
     /// the render schedule, extracted commands to cleanup, less `ManageViews`
     pub render: Arc<Mutex<Vec<f32>>>,
+    /// GPU time of the passes bracketed with [`PassStamps`] (the ray-marched
+    /// fire and smoke, `fire_volumetric`)
+    pub volume: Arc<Mutex<Vec<f32>>>,
 }
 
 #[derive(Resource)]
@@ -70,28 +73,9 @@ impl Plugin for BenchPlugin {
         let Some(render) = app.get_sub_app_mut(RenderApp) else { return };
         let device = render.world().resource::<RenderDevice>().clone();
         if device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
-            let dev = device.wgpu_device();
-            let tex = dev.create_texture(&wgpu::TextureDescriptor {
-                label: Some("bench_stamp"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let buf = |usage| dev.create_buffer(&wgpu::BufferDescriptor { label: Some("bench_stamp"), size: 16, usage, mapped_at_creation: false });
-            let stamps = Stamps {
-                set: dev.create_query_set(&wgpu::QuerySetDescriptor { label: Some("bench_stamp"), ty: wgpu::QueryType::Timestamp, count: 2 }),
-                target: tex.create_view(&Default::default()),
-                resolve: buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
-                ring: (0..8).map(|_| (Arc::new(buf(wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ)), Arc::new(std::sync::atomic::AtomicBool::new(true)))).collect(),
-                next: Default::default(),
-                period_ns: render.world().resource::<bevy::render::renderer::RenderQueue>().get_timestamp_period(),
-                out: costs.gpu_pass.clone(),
-                pending: Default::default(),
-            };
+            let period = render.world().resource::<bevy::render::renderer::RenderQueue>().get_timestamp_period();
+            let stamps = Stamps::new(&device, period, costs.gpu_pass.clone());
+            render.insert_resource(PassStamps(Arc::new(Stamps::new(&device, period, costs.volume.clone()))));
             render.insert_resource(StampsRes(Arc::new(stamps)));
             // Each stamp is its own submission: the first before the cameras'
             // command buffers (submitted in `Submit`), the last after them.
@@ -115,9 +99,12 @@ impl Plugin for BenchPlugin {
                     p.render.lock().unwrap().push((before + t.elapsed().as_secs_f32()) * 1e3);
                 }
             }).in_set(RenderSystems::Cleanup))
-            .add_systems(Render, (|mut p: ResMut<GpuProbe>, st: Option<Res<StampsRes>>| {
+            .add_systems(Render, (|mut p: ResMut<GpuProbe>, st: Option<Res<StampsRes>>, ps: Option<Res<PassStamps>>| {
                 if let Some(st) = st {
                     st.0.map_pending();
+                }
+                if let Some(ps) = ps {
+                    ps.0.map_pending();
                 }
                 if let Some(t) = p.start.take() {
                     p.encode.lock().unwrap().push(t.elapsed().as_secs_f32() * 1e3);
@@ -140,6 +127,44 @@ struct Stamps {
 }
 
 impl Stamps {
+    fn new(device: &RenderDevice, period_ns: f32, out: Arc<Mutex<Vec<f32>>>) -> Self {
+        let dev = device.wgpu_device();
+        let tex = dev.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bench_stamp"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let buf = |usage| dev.create_buffer(&wgpu::BufferDescriptor { label: Some("bench_stamp"), size: 16, usage, mapped_at_creation: false });
+        Stamps {
+            set: dev.create_query_set(&wgpu::QuerySetDescriptor { label: Some("bench_stamp"), ty: wgpu::QueryType::Timestamp, count: 2 }),
+            target: tex.create_view(&Default::default()),
+            resolve: buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
+            ring: (0..8).map(|_| (Arc::new(buf(wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ)), Arc::new(std::sync::atomic::AtomicBool::new(true)))).collect(),
+            next: Default::default(),
+            period_ns,
+            out,
+            pending: Default::default(),
+        }
+    }
+
+    /// Copies both stamps out for reading (once the frame is submitted).
+    fn read_back(&self, enc: &mut wgpu::CommandEncoder) {
+        use std::sync::atomic::Ordering;
+        let n = self.next.fetch_add(1, Ordering::Relaxed) % self.ring.len();
+        let (buf, free) = &self.ring[n];
+        // still mapped from an earlier frame: skip this one
+        if free.swap(false, Ordering::AcqRel) {
+            enc.resolve_query_set(&self.set, 0..2, &self.resolve, 0);
+            enc.copy_buffer_to_buffer(&self.resolve, 0, buf, 0, 16);
+            self.pending.lock().unwrap().push(n);
+        }
+    }
+
     fn map_pending(&self) {
         use std::sync::atomic::Ordering;
         for n in self.pending.lock().unwrap().drain(..) {
@@ -165,6 +190,55 @@ impl Stamps {
 #[derive(Resource, Clone)]
 struct StampsRes(Arc<Stamps>);
 
+/// Stamps for a run of passes inside a frame: [`Self::start`] before the
+/// first, the last takes [`Self::end`], then [`Self::read_back`] on the
+/// same encoder; the time between lands in [`Costs::volume`]. In the render
+/// world only while the bench is on and the device has timestamps.
+#[derive(Resource, Clone)]
+pub struct PassStamps(Arc<Stamps>);
+
+impl PassStamps {
+    /// An empty pass whose end is the start of the time measured. A pass's
+    /// own beginning will not do: on a tile-based GPU that is the start of
+    /// its vertex stage, which runs while the passes before still shade
+    /// (the main pass's fragments were counted in, about 1.6 ms at
+    /// 4800x3000, 2026-11-05).
+    ///
+    /// What was observed on an M4 Pro, not more: wherever this pass sits
+    /// among the three of the volumes, the time read is from before the
+    /// first of them to the end of the one that takes [`Self::end`]. So
+    /// the ends are right and their differences are each pass's cost; the
+    /// origin was checked only by a march of one step (0.4 ms for 0.9
+    /// million rays) and a composite with nothing to draw (0.34 ms).
+    pub fn start(&self, enc: &mut wgpu::CommandEncoder) {
+        let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bench_stamp"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.0.target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: Some(wgpu::RenderPassTimestampWrites {
+                query_set: &self.0.set,
+                beginning_of_pass_write_index: None,
+                end_of_pass_write_index: Some(0),
+            }),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+
+    pub fn end(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites { query_set: &self.0.set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(1) }
+    }
+
+    pub fn read_back(&self, enc: &mut wgpu::CommandEncoder) {
+        self.0.read_back(enc);
+    }
+}
+
 /// An empty render pass whose stage-boundary timestamp brackets the frame's
 /// GPU work; the last one also copies both stamps out for reading.
 fn stamp(st: &Stamps, device: &RenderDevice, queue: &RenderQueue, end: bool) {
@@ -189,15 +263,7 @@ fn stamp(st: &Stamps, device: &RenderDevice, queue: &RenderQueue, end: bool) {
         });
     }
     if end {
-        use std::sync::atomic::Ordering;
-        let n = st.next.fetch_add(1, Ordering::Relaxed) % st.ring.len();
-        let (buf, free) = &st.ring[n];
-        // still mapped from an earlier frame: skip this one
-        if free.swap(false, Ordering::AcqRel) {
-            enc.resolve_query_set(&st.set, 0..2, &st.resolve, 0);
-            enc.copy_buffer_to_buffer(&st.resolve, 0, buf, 0, 16);
-            st.pending.lock().unwrap().push(n);
-        }
+        st.read_back(&mut enc);
     }
     queue.submit([enc.finish()]);
 }
