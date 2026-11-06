@@ -1,0 +1,24 @@
+Texture del terreno realistico (2026-11-06, con le piante scansionate, KIOSK_SCANS=1).
+
+Fotografie di Poly Haven, licenza CC0 (pubblico dominio, https://polyhaven.com/license),
+scaricate a 1K (diffuse, JPG) e trasformate da tools/terrain/ground_detail.py:
+filtro passa-alto in luce lineare (rapporto attorno a 1, salvato * 0.33), media in ground.json.
+
+- grass.png   <- Withered Grass, Charlotte Baglioni   https://polyhaven.com/a/withered_grass
+- soil.png    <- Dry Ground Rocks, Rob Tuytel         https://polyhaven.com/a/dry_ground_rocks
+- needles.png <- Forest Leaves 04, Rob Tuytel         https://polyhaven.com/a/forest_leaves_04
+- leaves.png  <- Dry Decay Leaves, Amal Kumar         https://polyhaven.com/a/dry_decay_leaves
+- rock.png    <- Marble Cliff 05, Amal Kumar          https://polyhaven.com/a/marble_cliff_05
+- sand.png    <- Coast Sand 01, Rob Tuytel            https://polyhaven.com/a/coast_sand_01
+- track.png   <- Rocky Trail 02, Amal Kumar           https://polyhaven.com/a/rocky_trail_02
+- burnt.png   <- Burned Ground 01, Rob Tuytel         https://polyhaven.com/a/burned_ground_01
+- asphalt.png <- Aerial Asphalt 01, Rob Tuytel        https://polyhaven.com/a/aerial_asphalt_01
+
+Per rigenerarle: scaricare in una cartella <dl>/<asset>/diff_1k.jpg
+(https://api.polyhaven.com/files/<asset>, voce Diffuse 1k jpg), poi
+  .venv/bin/python -I tools/terrain/ground_detail.py <dl> assets/ground
+
+Ciuffi d'erba vicina (grass_cards.png): quattro ciuffi ritagliati
+dall'atlante di Grass Medium 01 (variante secca dry_diff, con alpha),
+Poly Haven, CC0            https://polyhaven.com/a/grass_medium_01
+  .venv/bin/python -I tools/terrain/grass_cards.py <cartella grass_medium_01> assets/ground

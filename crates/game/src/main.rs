@@ -87,7 +87,6 @@ mod webgpu_shaders;
 
 use bevy::post_process::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::light::CascadeShadowConfigBuilder;
 use bevy_egui::EguiPlugin;
 
 use crate::camera::OrbitCamera;
@@ -299,13 +298,7 @@ fn setup_scene(
     // (11:00 to 14:00), so the shadows lengthen and the light warms as it runs.
     commands.spawn((
         DirectionalLight { shadow_maps_enabled: gfx.shadows, ..default() },
-        bevy::light::CascadeShadowConfig::from(CascadeShadowConfigBuilder {
-            num_cascades: gfx.cascades,
-            minimum_distance: 2.0,
-            maximum_distance: gfx.shadow_distance,
-            first_cascade_far_bound: 80.0,
-            overlap_proportion: 0.3,
-        }),
+        gfx.sun_cascades(),
         sky::Sun,
         bevy::camera::visibility::RenderLayers::from_layers(&[0, terrain_mesh::SHADOW_LAYER]),
     ));

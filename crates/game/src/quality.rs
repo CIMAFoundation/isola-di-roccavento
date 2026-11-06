@@ -309,6 +309,21 @@ impl Graphics {
         }
     }
 
+    /// The sun's shadow cascades: `cascades` of them out to
+    /// `shadow_distance`, the first to 80 m, each read from 0.7 of the far
+    /// bound of the one before (the scanned plants' levels end there:
+    /// `vegetation::render`).
+    pub fn sun_cascades(&self) -> bevy::light::CascadeShadowConfig {
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: self.cascades,
+            minimum_distance: 2.0,
+            maximum_distance: self.shadow_distance,
+            first_cascade_far_bound: 80.0,
+            overlap_proportion: 0.3,
+        }
+        .build()
+    }
+
     pub fn msaa(&self) -> Msaa {
         // WebGL2 has no multisampled HDR targets.
         if WEBGL2 || self.msaa < 4 { Msaa::Off } else { Msaa::Sample4 }
@@ -372,7 +387,7 @@ fn web_profile() -> Option<String> {
 /// A parameter of the page's address (`?gfx=veg=0`, see [`Graphics::from_env`]).
 /// Always `None` on the desktop.
 #[cfg(target_arch = "wasm32")]
-fn web_param(name: &str) -> Option<String> {
+pub(crate) fn web_param(name: &str) -> Option<String> {
     let location = js_sys::Reflect::get(&js_sys::global(), &"location".into()).ok()?;
     let search = js_sys::Reflect::get(&location, &"search".into()).ok()?.as_string()?;
     let search = js_sys::decode_uri_component(&search).ok()?.as_string()?;
@@ -380,7 +395,7 @@ fn web_param(name: &str) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn web_param(_: &str) -> Option<String> {
+pub(crate) fn web_param(_: &str) -> Option<String> {
     None
 }
 

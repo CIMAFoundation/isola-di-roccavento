@@ -214,6 +214,8 @@ fn spawn_coast(
     sim: Res<Sim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StructureMaterial>>,
+    mut masonry_materials: ResMut<Assets<crate::materials::masonry::MasonryMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut done: Local<bool>,
 ) {
     if std::mem::replace(&mut *done, true) {
@@ -234,11 +236,27 @@ fn spawn_coast(
         tiles.entry(((r.at.x / TILE_M) as i32, (r.at.y / TILE_M) as i32)).or_default().push(r);
     }
     info!("coast: {} rocks in {} tiles", rocks.len(), tiles.len());
+    // With the scanned plants, the terrain's photographed limestone, lit
+    // smooth over the boulders' facets (`materials::masonry`).
+    use crate::materials::masonry;
+    let real = masonry::textures(&mut images).map(|t| {
+        masonry_materials.add(masonry::material(
+            StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 0.95, reflectance: 0.04, ..default() },
+            &t,
+            masonry::Masonry::Rock,
+        ))
+    });
     for (_, tile) in tiles {
-        commands.spawn((
-            (Mesh3d(meshes.add(tile_mesh(&tile))), MeshMaterial3d(material.clone())),
-            crate::terrain_mesh::PauseSolid,
-        ));
+        let mut mesh = tile_mesh(&tile);
+        match &real {
+            Some(m) => {
+                masonry::smooth_normals(&mut mesh, 55.0, None);
+                commands.spawn(((Mesh3d(meshes.add(mesh)), MeshMaterial3d(m.clone())), crate::terrain_mesh::PauseSolid));
+            }
+            None => {
+                commands.spawn(((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.clone())), crate::terrain_mesh::PauseSolid));
+            }
+        }
     }
 }
 

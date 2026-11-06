@@ -40,6 +40,7 @@ struct Params {
 @group(1) @binding(3) var plume_samp: sampler;
 @group(1) @binding(4) var noise_tex: texture_3d<f32>;
 @group(1) @binding(5) var noise_samp: sampler;
+@group(1) @binding(6) var ground_tex: texture_2d<f32>;
 
 struct Out {
     @location(0) color: vec4<f32>,
@@ -57,10 +58,22 @@ struct Out {
 const FAR_M = 6.0e4;
 
 // The plume map at a point of the ground (Bevy x, z): r smoke given off,
-// g how alight, b flame height (m), a ground height (m).
+// g how alight, b flame height (m).
 fn plume(xz: vec2<f32>, lod: f32) -> vec4<f32> {
     let uv = vec2<f32>(xz.x, -xz.y) * p.map.xy;
     return textureSampleLevel(plume_tex, plume_samp, uv, min(lod, p.map.w));
+}
+
+// The height of the ground the scene draws at a point (Bevy x, z; m): its
+// heightfield (`fire_volumetric::GROUND_MAP`), samples from the world's
+// west edge to its east and from its north edge, row 0, to its south. Not
+// a height a fire cell: those are 20 m apart, and the ground between them
+// is metres off the drawn one (and the fire grid's own heights are tens of
+// metres off it: `fire_volumetric::ground_image`).
+fn ground(xz: vec2<f32>) -> f32 {
+    let n = vec2<f32>(textureDimensions(ground_tex));
+    let at = vec2<f32>(xz.x * p.map.x, 1.0 + xz.y * p.map.y) * (n - 1.0);
+    return textureSampleLevel(ground_tex, plume_samp, (at + 0.5) / n, 0.0).r;
 }
 
 // Emission of the flame by its temperature (as `fire_volume.wesl`).
@@ -260,8 +273,8 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     let clump = smoothstep(0.3, 0.75, clumps);
     let band = fire.g * (0.25 + 0.75 * clump);
     let hf = max(fire.b * grow * p.look2.y * (0.45 + 0.35 * clump), max(0.5, foot * 3.0));
-    // under the coarse ground: the real ground is drawn, the depth stops
-    // the ray there
+    // under the ground (the scene's mesh is not its heightfield to the
+    // metre): the depth stops the ray there
     let yr = max(h, 0.0) / hf;
     if yr >= 1.0 || h <= -8.0 {
         return vec3<f32>(0.0);
@@ -405,7 +418,6 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
         let sigma = p.smoke.x;
         let zone = p.hi.w;
         let t = globals.time;
-        let fperiod = p.look.w;
         let len = t1 - t0;
         let coarse0 = max(len / (p.lo.w * 0.7), 4.0);
         var s = t0;
@@ -416,8 +428,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                 break;
             }
             let pos = eye + dir * s;
-            let here = plume(pos.xz, 0.0);
-            let h = pos.y - here.a;
+            let h = pos.y - ground(pos.xz);
             // steps: coarse through the smoke, fine through the flames,
             // never jumping over the flames' zone on the way down. The
             // coarse step is the ray's length shared among the steps, but
@@ -438,6 +449,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                 // the tallest flame round here: the cell's own, or three
                 // times the mean over 80 m (the mip averages the band with
                 // the ground beside it)
+                let here = plume(pos.xz, 0.0);
                 let round = plume(pos.xz, 2.0);
                 cap = max(here.b, round.b * 3.0) * grow * p.look2.y + 2.0;
                 if h < cap && round.g > 0.0005 {
@@ -476,8 +488,21 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                 // point but averaged along each part, as if what it is
                 // cut from ran straight from one end to the other: what a
                 // part holds changes smoothly as the ray slides.
-                let parts = clamp(i32(ceil(ds / 3.5)), 1, 4);
-                let dpart = ds / f32(parts);
+                //
+                // The step that reaches the scene ends half a fine step
+                // behind it, wherever it began. Counted whole, it ran into
+                // the ground as far as the jitter had it, through the
+                // flame's foot, its brightest part: with the flames
+                // standing on the ground (`ground`) they changed half as
+                // much again from frame to frame, from 2.5 km. Stopped at
+                // the scene, the far flames lost most of their light: a
+                // flame a few march pixels tall shows little else.
+                var run = ds;
+                if s + ds >= t1 {
+                    run = t1 - s + 0.5 * fine;
+                }
+                let parts = clamp(i32(ceil(run / 3.5)), 1, 4);
+                let dpart = run / f32(parts);
                 var a = flame_at(pos, h, foot, grow, t);
                 n_band += a.z;
                 if parts == 1 {
@@ -486,7 +511,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                         if dens > 0.002 {
                             n_hit += 1.0;
                             let temp = clamp((1.0 - 0.75 * a.y) * (0.25 + 0.55 * dens) * p.look2.z, 0.0, 1.0);
-                            let absorbed = 1.0 - exp(-dens * ds * p.flame.y);
+                            let absorbed = 1.0 - exp(-dens * run * p.flame.y);
                             col += flame_ramp(temp) * p.flame.x * absorbed * trans;
                             fog_at += pos * absorbed * trans;
                             fog_w += absorbed * trans;
@@ -500,7 +525,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                     for (var k = 1; k <= parts; k++) {
                         let sk = s + dpart * f32(k);
                         let pk = eye + dir * sk;
-                        let b = flame_at(pk, pk.y - plume(pk.xz, 0.0).a, foot, grow, t);
+                        let b = flame_at(pk, pk.y - ground(pk.xz), foot, grow, t);
                         if a.z > 0.0 || b.z > 0.0 {
                             // no flame at an end: under the edge there
                             let fa = select(-sharp, a.x, a.z > 0.0);
@@ -621,7 +646,9 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                             glow = plume(pos.xz, 1.0 + hh / 40.0).g * exp(-hh / 70.0);
                         }
                         let fire_lit = glow_col * glow * 0.9;
-                        let absorbed = 1.0 - exp(-dens * near_k * ds * sigma);
+                        // no farther than the scene: a long stride of thin
+                        // smoke ends in the ground
+                        let absorbed = 1.0 - exp(-dens * near_k * min(ds, t1 - s) * sigma);
                         col += (lit + fire_lit) * p.smoke.w * absorbed * trans;
                         fog_at += pos * absorbed * trans;
                         fog_w += absorbed * trans;

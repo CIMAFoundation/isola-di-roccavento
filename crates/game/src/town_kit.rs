@@ -56,7 +56,10 @@ pub(super) fn emit(scn: &Scenario, b: &Building, out: &mut Builder) -> bool {
         }
         // A plinth of paving so the model sits on its own lot, not on scrub.
         f.drape(scn, out, [0.0, 0.0], f.lu * TOY_SCALE + 6.0, f.lv * TOY_SCALE + 6.0, [0.80, 0.77, 0.70], 0.0);
+        // with the photographed masonry: plaster walls and tiled slopes
+        out.part = crate::materials::masonry::Part::Building as u8;
         place(out, m, f.c, low - 0.4, [sx, sy, sz], f.yaw, None);
+        out.part = 0;
         return true;
     }
     let h = |salt: u64| hash01(b.id as u64, salt);
@@ -341,10 +344,17 @@ fn ground_at(scn: &Scenario, p: Pos) -> f32 {
 
 /// A kit model at world position `c` (ground height `y`), scaled per axis and
 /// turned `yaw` radians about the vertical. `paint` recolours its white parts.
+/// With the photographed masonry (`out.real`), each vertex also says what it
+/// is (`real_surface`), and a building's windows get frames and glazing bars
+/// (`window_frames`).
 fn place(out: &mut Builder, m: &Kit, c: Pos, y: f32, s: [f32; 3], yaw: f32, paint: Option<[f32; 3]>) {
     let (sn, cs) = yaw.sin_cos();
     let start = out.positions.len() as u32;
-    for ((p, n), col) in m.positions.iter().zip(&m.normals).zip(&m.colors) {
+    let alpha = out.part_alpha();
+    let building = out.real && out.part == crate::materials::masonry::Part::Building as u8;
+    let frames = if building { window_frames(m) } else { Vec::new() };
+    let extra = frames.iter().map(|(p, n, col, id)| (p, n, col, Some(*id)));
+    for (p, n, col, id) in m.positions.iter().zip(&m.normals).zip(&m.colors).map(|((p, n), c)| (p, n, c, None)).chain(extra) {
         let (x, z) = (p[0] * s[0], p[2] * s[2]);
         let (rx, rz) = (x * cs + z * sn, -x * sn + z * cs);
         out.positions.push([c.x + rx, y + p[1] * s[1], -c.y + rz]);
@@ -354,17 +364,165 @@ fn place(out: &mut Builder, m: &Kit, c: Pos, y: f32, s: [f32; 3], yaw: f32, pain
         let l = (rnx * rnx + ny * ny + rnz * rnz).sqrt().max(1e-6);
         out.normals.push([rnx / l, ny / l, rnz / l]);
         let white = col[0] > 0.99 && col[1] > 0.99 && col[2] > 0.99;
-        let c3 = match paint {
+        let mut c3 = match paint {
             Some(pc) if white => pc,
             _ => *col,
         };
-        out.colors.push([c3[0], c3[1], c3[2], 1.0]);
+        let mut a = alpha;
+        if out.real {
+            let id = id.or_else(|| real_surface(*col, building));
+            if let Some(id) = id {
+                a = crate::materials::surface_alpha(id);
+            }
+            if id == Some(crate::materials::masonry::surface::GLASS) {
+                // the bake's pale blue panes as dark glass, like the houses'
+                c3 = [0.05, 0.06, 0.08];
+            }
+        }
+        out.colors.push([c3[0], c3[1], c3[2], a]);
     }
     out.indices.extend(m.indices.iter().map(|i| start + i));
+    let first = start + m.positions.len() as u32;
+    out.indices.extend(first..first + frames.len() as u32);
+}
+
+/// The kit's palette is a handful of flat colours, shared by every model
+/// (`scripts/build_town_models.py`): what each is made of, for the
+/// photographed look. `None`: the part the vertex is in (plaster and tiles on
+/// a building, a prop's own flat colour).
+fn real_surface(c: [f32; 3], building: bool) -> Option<u8> {
+    use crate::materials::masonry::surface;
+    let near = |r: [f32; 3]| (c[0] - r[0]).abs() + (c[1] - r[1]).abs() + (c[2] - r[2]).abs() < 0.04;
+    let wood = c[0] > c[1] && c[1] > c[2] && c[0] < 0.6 && c[0] - c[2] > 0.12 && c[0] - c[2] < 0.36;
+    if near([0.16, 0.24, 0.33]) {
+        Some(surface::GLASS)
+    } else if wood {
+        Some(surface::WOOD)
+    } else if building {
+        None
+    } else if near([0.1, 0.1, 0.12]) {
+        // tyres, bench legs, lamp posts: dark and matte
+        Some(surface::RUBBER)
+    } else if c[0] > 0.99 && c[1] > 0.99 && c[2] > 0.99 {
+        // the body a car is painted on
+        Some(surface::PAINT)
+    } else {
+        None
+    }
+}
+
+/// Frames and a cross of glazing bars on a kit building's windows, in model
+/// space, as triangles (position, normal, colour, surface). A window in the
+/// bake is a thin box of the glass colour; anything else of that colour (the
+/// church's round window) keeps its glass and no frame.
+fn window_frames(m: &Kit) -> Vec<([f32; 3], [f32; 3], [f32; 3], u8)> {
+    use std::collections::HashMap;
+    let is_glass = |i: usize| real_surface(m.colors[i], true) == Some(crate::materials::masonry::surface::GLASS);
+    // the glass triangles, joined where they share a corner
+    let key = |p: [f32; 3]| [(p[0] * 1000.0).round() as i64, (p[1] * 1000.0).round() as i64, (p[2] * 1000.0).round() as i64];
+    let tris: Vec<usize> = (0..m.indices.len() / 3).filter(|&t| is_glass(m.indices[3 * t] as usize)).collect();
+    let mut parent: Vec<usize> = (0..tris.len()).collect();
+    fn find(p: &mut [usize], i: usize) -> usize {
+        let mut r = i;
+        while p[r] != r {
+            r = p[r];
+        }
+        p[i] = r;
+        r
+    }
+    let mut by_corner: HashMap<[i64; 3], usize> = HashMap::new();
+    for (k, &t) in tris.iter().enumerate() {
+        for v in 0..3 {
+            let at = key(m.positions[m.indices[3 * t + v] as usize]);
+            if let Some(&o) = by_corner.get(&at) {
+                let (a, b) = (find(&mut parent, k), find(&mut parent, o));
+                parent[a] = b;
+            } else {
+                by_corner.insert(at, k);
+            }
+        }
+    }
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for k in 0..tris.len() {
+        let r = find(&mut parent, k);
+        groups.entry(r).or_default().push(tris[k]);
+    }
+    let frame = [0.86, 0.83, 0.76];
+    let bar_col = [0.70, 0.67, 0.60];
+    let mut out = Vec::new();
+    for g in groups.values() {
+        let mut corners: Vec<[i64; 3]> = g.iter().flat_map(|&t| (0..3).map(move |v| (t, v))).map(|(t, v)| key(m.positions[m.indices[3 * t + v] as usize])).collect();
+        corners.sort();
+        corners.dedup();
+        if corners.len() != 8 {
+            continue; // not a box
+        }
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for &t in g {
+            for v in 0..3 {
+                let p = m.positions[m.indices[3 * t + v] as usize];
+                for a in 0..3 {
+                    lo[a] = lo[a].min(p[a]);
+                    hi[a] = hi[a].max(p[a]);
+                }
+            }
+        }
+        let ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        // the thin horizontal axis is the facade's normal
+        let (ax, ac) = if ext[0] < ext[2] { (0, 2) } else { (2, 0) };
+        if ext[ax] > 0.35 * ext[ac].min(ext[1]) || ext[ac] < 0.2 || ext[1] < 0.2 {
+            continue;
+        }
+        let centre = (lo[ax] + hi[ax]) * 0.5;
+        let sign = if centre >= 0.0 { 1.0 } else { -1.0 };
+        let face = if sign > 0.0 { hi[ax] } else { lo[ax] };
+        let mut nrm = [0.0; 3];
+        nrm[ax] = sign;
+        // a point on the outer face: `u` across the window, `v` up it, `d` out
+        let at = |u: f32, v: f32, d: f32| {
+            let mut p = [0.0; 3];
+            p[ax] = face + sign * d;
+            p[ac] = u;
+            p[1] = v;
+            p
+        };
+        let w = (ext[ac].min(ext[1]) * 0.12).clamp(0.06, 0.25);
+        let mut quad = |u0: f32, v0: f32, u1: f32, v1: f32, d: f32, col: [f32; 3]| {
+            let (a, b, c, e) = (at(u0, v0, d), at(u1, v0, d), at(u1, v1, d), at(u0, v1, d));
+            // wound to face out along `nrm`, whichever way the axes run
+            let cross = {
+                let (x, y) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+                [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]]
+            };
+            let tri = if cross[ax] * sign > 0.0 { [a, b, c, a, c, e] } else { [a, c, b, a, e, c] };
+            for p in tri {
+                out.push((p, nrm, col, crate::materials::masonry::Part::Frame as u8));
+            }
+        };
+        let (u0, u1, v0, v1) = (lo[ac], hi[ac], lo[1], hi[1]);
+        // the frame round it, on the wall just outside the glass
+        quad(u0 - w, v0 - w, u1 + w, v0, 0.02, frame);
+        quad(u0 - w, v1, u1 + w, v1 + w, 0.02, frame);
+        quad(u0 - w, v0, u0, v1, 0.02, frame);
+        quad(u1, v0, u1 + w, v1, 0.02, frame);
+        // glazing bars over the glass
+        let (um, vm, b) = ((u0 + u1) * 0.5, v0 + (v1 - v0) * 0.62, w * 0.5);
+        quad(um - b * 0.5, v0, um + b * 0.5, v1, 0.03, bar_col);
+        if v1 - v0 > 1.5 * (u1 - u0) {
+            quad(u0, vm - b * 0.5, u1, vm + b * 0.5, 0.03, bar_col);
+        } else {
+            quad(u0, (v0 + v1) * 0.5 - b * 0.5, u1, (v0 + v1) * 0.5 + b * 0.5, 0.03, bar_col);
+        }
+    }
+    out
 }
 
 /// A kit prop at `p` on the ground, uniformly scaled.
 fn put(scn: &Scenario, out: &mut Builder, name: &str, p: Pos, scale: f32, yaw: f32, paint: Option<[f32; 3]>) {
+    // The kit's toy trees would be cartoons among the scanned plants.
+    if out.real && matches!(name, "street_tree" | "cypress") {
+        return;
+    }
     let scale = scale * if matches!(name, "street_tree" | "cypress") {
         crate::visual_scale::TREE
     } else {

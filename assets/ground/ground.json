@@ -1,0 +1,96 @@
+{
+ "encode": 0.33,
+ "side": 1024,
+ "layers": [
+  {
+   "name": "grass",
+   "asset": "withered_grass",
+   "size_m": 2.0,
+   "mean": [
+    0.4256,
+    0.304,
+    0.2016
+   ]
+  },
+  {
+   "name": "soil",
+   "asset": "dry_ground_rocks",
+   "size_m": 4.0,
+   "mean": [
+    0.3128,
+    0.1829,
+    0.0843
+   ]
+  },
+  {
+   "name": "needles",
+   "asset": "forest_leaves_04",
+   "size_m": 1.5,
+   "mean": [
+    0.2394,
+    0.1286,
+    0.0557
+   ]
+  },
+  {
+   "name": "leaves",
+   "asset": "dry_decay_leaves",
+   "size_m": 2.0,
+   "mean": [
+    0.1733,
+    0.0766,
+    0.0355
+   ]
+  },
+  {
+   "name": "rock",
+   "asset": "marble_cliff_05",
+   "size_m": 20.0,
+   "mean": [
+    0.3,
+    0.2712,
+    0.2352
+   ]
+  },
+  {
+   "name": "sand",
+   "asset": "coast_sand_01",
+   "size_m": 15.0,
+   "mean": [
+    0.2271,
+    0.1739,
+    0.1098
+   ]
+  },
+  {
+   "name": "track",
+   "asset": "rocky_trail_02",
+   "size_m": 2.0,
+   "mean": [
+    0.2468,
+    0.15,
+    0.0856
+   ]
+  },
+  {
+   "name": "burnt",
+   "asset": "burned_ground_01",
+   "size_m": 1.0,
+   "mean": [
+    0.1567,
+    0.1166,
+    0.0834
+   ]
+  },
+  {
+   "name": "asphalt",
+   "asset": "aerial_asphalt_01",
+   "size_m": 30.0,
+   "mean": [
+    0.1382,
+    0.1265,
+    0.1408
+   ]
+  }
+ ]
+}

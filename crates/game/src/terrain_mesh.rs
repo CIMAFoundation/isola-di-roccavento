@@ -210,18 +210,20 @@ fn coast_rock(elev: f32, p: Pos) -> [f32; 3] {
 /// Beach sand: dark and wet at the waterline, pale and dry above it, with
 /// ripples, a little shell, and tufts of dune grass on the high back beach.
 fn coast_sand(elev: f32, p: Pos) -> [f32; 3] {
-    const WET: [f32; 3] = [0.58, 0.52, 0.40];
-    const DRY: [f32; 3] = [0.91, 0.84, 0.66];
-    const GRASS: [f32; 3] = [0.60, 0.63, 0.38];
+    let (wet, dry_c, grass) = match real_palette() {
+        Some(r) => ([r.sand[0] * 0.72, r.sand[1] * 0.70, r.sand[2] * 0.68], [r.sand[0] * 1.08, r.sand[1] * 1.08, r.sand[2] * 1.06], r.grass),
+        None => ([0.58, 0.52, 0.40], [0.91, 0.84, 0.66], [0.60, 0.63, 0.38]),
+    };
     let dry = smooth((elev - 0.7) / 1.6);
-    let mut c = mix3(WET, DRY, dry);
+    let mut c = mix3(wet, dry_c, dry);
     let ripple = (noise(p.x / 3.0, p.y / 8.0, 0x6C) - 0.5) * 0.10 + (noise(p.x / 20.0, p.y / 20.0, 0x6D) - 0.5) * 0.08;
     c = [c[0] + ripple, c[1] + ripple, c[2] + ripple * 0.9];
-    if noise(p.x / 1.7, p.y / 1.7, 0x6E) > 0.92 {
+    // shells: the realistic ground's photo has its own
+    if real_palette().is_none() && noise(p.x / 1.7, p.y / 1.7, 0x6E) > 0.92 {
         c = mix3(c, [0.96, 0.95, 0.90], 0.5);
     }
     let tuft = smooth((noise(p.x / 28.0, p.y / 28.0, 0x6F) - 0.52) / 0.2) * smooth((elev - 1.8) / 1.6);
-    mix3(c, GRASS, tuft * 0.55)
+    mix3(c, grass, tuft * 0.55)
 }
 
 const PAVING: [f32; 3] = [0.84, 0.81, 0.74];
@@ -278,7 +280,7 @@ fn built_tint(cover: &Cover, p: Pos) -> ([f32; 3], f32) {
             CoverClass::Natural => continue,
             // Tracks are drawn as ribbons too; beneath and beside them, bare
             // compacted earth.
-            CoverClass::Track => [0.66, 0.58, 0.44],
+            CoverClass::Track => real_palette().map_or([0.66, 0.58, 0.44], |r| r.track),
             // Farmland is a mesh of parcels over the ground (`fields.rs`).
             CoverClass::Irrigated => continue,
             CoverClass::Water => [0.20, 0.36, 0.44],
@@ -296,6 +298,77 @@ fn built_tint(cover: &Cover, p: Pos) -> ([f32; 3], f32) {
     ([sum[0] / n, sum[1] / n, sum[2] / n], n / 4.0)
 }
 
+/// The realistic ground's macro colours (2026-11-06, with the scanned
+/// plants: `textures::ground_detail`), sRGB like the rest of this file: the
+/// mean colours of the photos the terrain shader lays over them, a little
+/// graded, so the ground seen from afar is the ground seen from near.
+struct RealPalette {
+    grass: [f32; 3],
+    grass_pale: [f32; 3],
+    lawn: [f32; 3],
+    leaves: [f32; 3],
+    soil: [f32; 3],
+    needles: [f32; 3],
+    track: [f32; 3],
+    sand: [f32; 3],
+    rock: [f32; 3],
+}
+
+fn real_palette() -> Option<&'static RealPalette> {
+    static PALETTE: std::sync::OnceLock<Option<RealPalette>> = std::sync::OnceLock::new();
+    PALETTE
+        .get_or_init(|| {
+            let d = crate::textures::ground_detail()?;
+            let layer = |name: &str, grade: [f32; 3]| {
+                let k = crate::textures::GROUND_LAYERS.iter().position(|l| *l == name).unwrap_or(0);
+                let m = d.means[k];
+                [0, 1, 2].map(|c| linear_to_srgb(m[c] * grade[c]))
+            };
+            Some(RealPalette {
+                grass: layer("grass", GRADE_GRASS),
+                grass_pale: layer("grass", [GRADE_GRASS[0] * 1.12, GRADE_GRASS[1] * 1.12, GRADE_GRASS[2] * 1.08]),
+                lawn: layer("grass", GRADE_LAWN),
+                leaves: layer("leaves", GRADE_LEAVES),
+                soil: layer("soil", GRADE_SOIL),
+                needles: layer("needles", GRADE_NEEDLES),
+                track: layer("track", [1.0; 3]),
+                sand: layer("sand", GRADE_SAND),
+                rock: layer("rock", [0.8; 3]),
+            })
+        })
+        .as_ref()
+}
+
+/// The photos' means, graded (linear factors): the photos were taken under
+/// other skies; these bring them to a dry Ligurian summer and apart enough to
+/// tell grass, macchia, woods and rock at a glance.
+const GRADE_GRASS: [f32; 3] = [0.8, 0.76, 0.45];
+/// Class 1, short grass (round the houses, but also on open hillsides):
+/// the dry grass, a little greener, not a watered lawn.
+const GRADE_LAWN: [f32; 3] = [0.74, 0.78, 0.46];
+/// The photos are of warmer, redder ground than the grey-brown karst soil.
+const GRADE_LEAVES: [f32; 3] = [0.77, 1.09, 1.3];
+const GRADE_SOIL: [f32; 3] = [0.75, 0.98, 1.43];
+const GRADE_NEEDLES: [f32; 3] = [0.8, 0.93, 1.15];
+/// The photo is of a wet grey beach; ours is dry and pale.
+const GRADE_SAND: [f32; 3] = [1.9, 2.1, 2.35];
+
+fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+}
+
+/// What lies on the open ground at fire cell `c`, in the canopy's code
+/// (0 conifer needles, 0.5 broadleaf litter, 1 macchia soil), for the
+/// realistic ground's shader where no crown is painted.
+fn ground_kind(scn: &Scenario, p: Pos) -> f32 {
+    match scn.fuel_at(scn.world.cell_of(p)) {
+        4..=6 => 0.5,
+        10..=12 => 0.0,
+        _ => 1.0,
+    }
+}
+
 /// Land-cover tint at `p`, bilinear between fire-cell centres so the 20 m raster
 /// reads as soft pastel meadows rather than pixels.
 fn cover_tint(scn: &Scenario, p: Pos) -> [f32; 3] {
@@ -309,6 +382,18 @@ fn cover_tint(scn: &Scenario, p: Pos) -> [f32; 3] {
             row: (y0 + dy).clamp(0.0, (w.fire_rows - 1) as f32) as usize,
             col: (x0 + dx).clamp(0.0, (w.fire_cols - 1) as f32) as usize,
         };
+        if let Some(real) = real_palette() {
+            return match scn.fuel_at(c) {
+                1 => real.lawn,
+                2 => real.grass,
+                3 => real.grass_pale,
+                4..=6 => real.leaves,
+                7..=9 => real.soil,
+                10..=12 => real.needles,
+                _ if scn.cover.is_some() => mix3(real.grass, real.lawn, built_nearby(scn, c)),
+                _ => PAVING,
+            };
+        }
         match scn.fuel_at(c) {
             // Gardens and lawns round the houses: the green that makes a
             // town read as a town (class 1 is only ever painted there).
@@ -377,8 +462,10 @@ fn ground_color(scn: &Scenario, sea: &crate::ground_mask::SeaGrid, elev: f32, sl
     }
     let soil = cover;
     let duff = [cover[0] * 0.92, cover[1] * 0.95, cover[2] * 0.92];
-    let rock = [0.46, 0.45, 0.42];
-    let sand = [0.60, 0.56, 0.46];
+    let (rock, sand) = match real_palette() {
+        Some(r) => (r.rock, r.sand),
+        None => ([0.46, 0.45, 0.42], [0.60, 0.56, 0.46]),
+    };
 
     // Flatter ground holds more litter and is darker; ridges wash out.
     let soil = {
@@ -407,9 +494,18 @@ fn ground_color(scn: &Scenario, sea: &crate::ground_mask::SeaGrid, elev: f32, sl
     // Rocky scrub along the cliff edge, then bare banded limestone where it
     // is steep; sand where it is low and flat.
     let strip = 1.0 - smooth((shore - 40.0) / 70.0);
-    c = mix3(c, [0.62 * mottle, 0.58 * mottle, 0.46 * mottle], strip * smooth((elev - 5.0) / 4.0));
+    let scrub = match real_palette() {
+        Some(r) => mix3(r.soil, r.rock, 0.5),
+        None => [0.62, 0.58, 0.46],
+    };
+    c = mix3(c, [scrub[0] * mottle, scrub[1] * mottle, scrub[2] * mottle], strip * smooth((elev - 5.0) / 4.0));
     let cliff = smooth((0.95 - slope_cos) / 0.14) * (1.0 - smooth((shore - 90.0) / 280.0));
-    c = mix3(c, coast_rock(elev, p), cliff);
+    let mut cliff_rgb = coast_rock(elev, p);
+    if real_palette().is_some() {
+        // the realistic ground's limestone: the photo's grey, not plaster
+        cliff_rgb = cliff_rgb.map(|v| v * 0.72);
+    }
+    c = mix3(c, cliff_rgb, cliff);
     let flat = smooth((slope_cos - 0.88) / 0.08);
     let low = 1.0 - smooth((elev - 5.0) / 5.0);
     let sand_w = flat * low * (1.0 - smooth((shore - 90.0) / 80.0));
@@ -864,6 +960,17 @@ pub fn build(
         canopy.cover.fill(0.0);
     }
     info!("terrain: canopy in {:.2} s", started.elapsed().as_secs_f32());
+    // The realistic ground (`textures::ground_detail`): where no crown is
+    // painted, the canopy's kind says what lies on the ground instead
+    // (needles, leaves or the macchia's soil), for the photo layers.
+    if real_palette().is_some() {
+        for (i, k) in canopy.kind.iter_mut().enumerate() {
+            if canopy.cover[i] <= 0.0 {
+                let p = Pos { x: (i % cols) as f32 * posting, y: t.height_m - (i / cols) as f32 * posting };
+                *k = ground_kind(scn, p);
+            }
+        }
+    }
     for (i, n) in grid.normal.iter().enumerate() {
         colour_px[i * 4 + 3] = (canopy.cover[i].clamp(0.0, 1.0) * 255.0).round() as u8;
         for v in [n[0], n[2], canopy.kind[i], canopy.light[i]] {
@@ -887,6 +994,7 @@ pub fn build(
     );
 
     let _ = images.insert(&crate::ground_mask::ROAD_MASK, mask.image);
+    crate::fields::insert_soil(images);
     let mut terrain_material = TerrainMaterial::new(
         mask.rect,
         tex_rect,
@@ -894,6 +1002,7 @@ pub fn build(
         crate::ground_mask::GRASS_MAP,
         colour_tex,
         normal_tex,
+        images.add(crate::textures::ground_detail_image()),
     );
     terrain_material.set_canopy(canopy.colours, canopy_fade(gfx));
     terrain_material.set_forest_shade(if crate::vegetation::canopy::forest_shade() { 1.0 } else { 0.0 }, posting);

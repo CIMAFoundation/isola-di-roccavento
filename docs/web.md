@@ -168,6 +168,25 @@ Richiesta dell'utente: «portare web sulla stessa qualità di desktop». WebGL2 
 
 A 2× il costo sono i pixel (con `gfx=scale=0.5` 8,5 ms): è il caso della risoluzione adattiva. Immagini a confronto, stesse inquadrature (`perf_web.py shots`, `?gpu=1` contro `?gpu=0`): ombre del sole, alberi autoriali con le foglie, tronchi bruciati, bloom, profondità di campo, erba vicina. Nessun errore in console; prova `--smoke` del telefono passata in Chromium e WebKit (WebGL2, come prima). WebKit di Playwright non ha WebGPU: Safari 26, che lo ha, non è provato.
 
+## Stile realistico e volumi nella build WebGPU, in prova (2026-11-06)
+
+Richieste dell'utente: «anche su web dovremmo avere scansioni ed effetti volumetrici se possibile», poi «porta le modifiche su web». È possibile nella build WebGPU; restano **spenti finché non li chiede l'indirizzo**, come sul desktop le variabili `KIOSK_SCANS` e `KIOSK_VOLUMI`:
+
+- `?volumi=1`: fiamme e fumo volumetrici (`fire_volumetric::on`). Gli shader passano il compilatore del browser senza modifiche, compresa la ricomposizione nei campioni (`sample_mask`) con l'antialiasing a 4 campioni.
+- `?scans=1`: lo stile realistico (`models::scans`), cioè le piante scansionate e, con lo stesso interruttore, il terreno fotografico, i ciuffi d'erba vicini, gli edifici e le rocce (`textures::ground_detail`, `materials/masonry.rs`). Nel browser i file si leggono con `datafs::take` dagli stessi percorsi del desktop. `build_web.sh` ne prepara una versione per il web:
+  - piante: **senza il livello più fine** (`lod0`, tre quarti dei byte: da vicino si vede `lod1`) e con i cartoncini a metà lato (2048 px): 8,3 MB compressi;
+  - terreno (`assets/ground/`: nove strati, `ground.json`, i ciuffi) ed edifici (`assets/buildings/`: intonaco, coppi, pietra, roccia, colore e normali): ogni PNG **a metà lato** (512 px; il codice legge le dimensioni dai file): 5,7 e 4,4 MB compressi.
+  - In tutto **18,4 MB compressi in 22 file**, con `"only": "scans"` nel manifest: la pagina li scarica solo con `?scans=1` nella build WebGPU; senza, il sito scarica gli 11,8 MB di prima. Le riduzioni usano Pillow: dove manca (la CI di `pages.yml` oggi non lo installa) lo script lo dice e il sito esce senza stile realistico.
+- Su WebGL2 (telefoni) niente di tutto questo: lì i binding in più non esistono (16 unità di texture) e l'erba vicina resta quella di prima.
+
+Prova (Chromium headless, Mac M4 Pro, 1440×900, partita a 120 minuti):
+
+- `?gpu=1&volumi=1&scans=1`, cioè la qualità automatica dei computer: backend `BrowserWebGpu`, antialiasing a 4 campioni, grafica adattiva al livello 3 di 16, nessun errore in console, nessun ritorno a WebGL2, i 22 file richiesti, «realistic ground: 9 layers of 512² and grass cards of 512 x 256», 171 mesh di piante, 120 fotogrammi al secondo a 300 m dal fuoco (il passo dello schermo). Lo stesso con `?q=media`.
+- Senza i parametri, `?gpu=1` e `?gpu=0`: nessuna richiesta dei file in più, nessun errore, 120 fotogrammi al secondo.
+- Immagini guardate: vista di gioco, fronte a 900 e 300 m, rocca, torre, pineta, chiesa, borgo.
+
+**Non provato:** su un computer più lento, su Safari e Firefox, a 2×; la memoria della pagina con lo stile realistico; il sito pubblicato (serve Pillow nella CI, oppure i file ridotti nel repository); una vista bassa con le foglie contro il fumo nel browser (la correzione del contorno è stata guardata sul desktop: lo shader è lo stesso).
+
 ## Vegetazione più fitta, a lobi (2026-11-02)
 
 Richiesta dell'utente: «più densità e resa grafica, senza perdere performances possibilmente» (branch `piante-ios`).

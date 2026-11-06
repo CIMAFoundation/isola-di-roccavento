@@ -69,12 +69,78 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
             rel = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
             # from assets/ only what the game reads: the bakes and the pictures
             # the logo: the game halves the 1200 px one (kiosk/characters.rs)
-            # the scanned plants are desktop only (`models::scans`, 2026-11-05)
+            # the scanned plants (`models::scans`) are not sent as they are: 20 MB
+            # of meshes and 22 MB of cards. A lighter set is built below.
             if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or "_scans" in rel or rel == "assets/brand/cima_logo_white.png"):
                 continue
             files.append(rel)
 files.append("data/fuels_eu12.json")
 manifest = []
+
+def scans_for_the_web():
+    """The scanned plants for the browser (`?scans=1`, WebGPU): without the
+    nearest level (lod0, three quarters of the bytes) and with the cards at
+    half size. Downloaded only when asked for (`only` in the manifest, see
+    web/index.html). Needs Pillow for the cards: without it, no scans."""
+    src = os.path.join(root, "assets/models")
+    try:
+        from PIL import Image
+        index = json.load(open(os.path.join(src, "vegetation_scans.json")))
+        data = open(os.path.join(src, "vegetation_scans.bin"), "rb").read()
+        Image.MAX_IMAGE_PIXELS = None
+        cards = Image.open(os.path.join(src, "foliage_scans.png")).convert("RGBA")
+    except Exception as e:
+        print("scanned plants: not in the web data (%s)" % e)
+        return []
+    import io
+    vb, kept = index["vertex_bytes"], bytearray()
+    for levels in index["plants"].values():
+        levels.pop("lod0", None)
+        for level in levels.values():
+            n = level["vertices"] * vb + level["indices"] * 2
+            chunk = data[level["offset"]:level["offset"] + n]
+            level["offset"] = len(kept)
+            kept += chunk
+    half = cards.resize((cards.width // 2, cards.height // 2), Image.LANCZOS)
+    index["atlas"] = {"width": half.width, "height": half.height}
+    png = io.BytesIO()
+    half.save(png, "PNG", optimize=True)
+    return [("assets/models/vegetation_scans.json", json.dumps(index).encode()),
+            ("assets/models/vegetation_scans.bin", bytes(kept)),
+            ("assets/models/foliage_scans.png", png.getvalue())]
+
+def photographs_for_the_web():
+    """What else the realistic style reads (`?scans=1`, WebGPU): the ground's
+    and the buildings' photographs (`assets/ground`, `assets/buildings`) at
+    half their side, and their indexes as they are. Needs Pillow."""
+    try:
+        from PIL import Image
+    except Exception as e:
+        print("realistic ground and buildings: not in the web data (%s)" % e)
+        return []
+    import io
+    found = []
+    for sub in ("assets/ground", "assets/buildings"):
+        for n in sorted(os.listdir(os.path.join(root, sub))) if os.path.isdir(os.path.join(root, sub)) else []:
+            rel, full = sub + "/" + n, os.path.join(root, sub, n)
+            if n.endswith(".json"):
+                found.append((rel, open(full, "rb").read()))
+            elif n.endswith(".png"):
+                picture = Image.open(full)
+                half = picture.resize((max(picture.width // 2, 1), max(picture.height // 2, 1)), Image.LANCZOS)
+                png = io.BytesIO()
+                half.save(png, "PNG", optimize=True)
+                found.append((rel, png.getvalue()))
+    return found
+
+for path, raw in scans_for_the_web() + photographs_for_the_web():
+    gz = gzip.compress(raw, 6, mtime=0)
+    dest = os.path.join(out, path + ".gz")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    open(dest, "wb").write(gz)
+    h = hashlib.sha256(gz).hexdigest()[:12]
+    manifest.append({"path": path, "url": f"./{path}.gz?v={h}", "bytes": len(gz), "only": "scans"})
+    print("for `?scans=1`: %s, %.1f MB gzipped (of %.1f MB)" % (path, len(gz) / 1e6, len(raw) / 1e6))
 for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys.json", "CREDITS.txt"))):
     raw = open(os.path.join(root, path), "rb").read()
     gz = gzip.compress(raw, 9, mtime=0)
@@ -84,9 +150,10 @@ for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys
     h = hashlib.sha256(gz).hexdigest()[:12]
     manifest.append({"path": path, "url": f"./{path}.gz?v={h}", "bytes": len(gz)})
 json.dump(manifest, open(os.path.join(out, "data", "manifest.json"), "w"), indent=0)
+always = [m for m in manifest if "only" not in m]
 print("data: %d files, %.1f MB gzipped (of %.1f MB)" % (
-    len(manifest), sum(m["bytes"] for m in manifest) / 1e6,
-    sum(os.path.getsize(os.path.join(root, m["path"])) for m in manifest) / 1e6))
+    len(always), sum(m["bytes"] for m in always) / 1e6,
+    sum(os.path.getsize(os.path.join(root, m["path"])) for m in always) / 1e6))
 PY
 builds=(game)
 [ "$gpu" = 1 ] && builds+=(game_gpu)

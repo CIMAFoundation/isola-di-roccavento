@@ -32,6 +32,19 @@ const CROPS: [[f32; 3]; 6] = [
     [0.56, 0.48, 0.24],
 ];
 
+/// The realistic ground's crops (2026-11-06, with the scanned plants), in
+/// the order of [`CROPS`]: vegetables, young wheat, tilled soil, stubble,
+/// an olive-green crop, dry ploughed earth. Linear, as the photos' means.
+const CROPS_REAL: [[f32; 3]; 6] = [
+    [0.075, 0.13, 0.035],
+    [0.13, 0.19, 0.055],
+    [0.16, 0.10, 0.058],
+    [0.36, 0.27, 0.13],
+    [0.095, 0.13, 0.05],
+    [0.23, 0.165, 0.095],
+];
+const HEDGE_REAL: [f32; 3] = [0.035, 0.06, 0.025];
+
 fn top(scn: &Scenario, p: Pos) -> f32 {
     [(0.0, 0.0), (3.0, 0.0), (-3.0, 0.0), (0.0, 3.0), (0.0, -3.0)]
         .into_iter()
@@ -43,7 +56,27 @@ fn top(scn: &Scenario, p: Pos) -> f32 {
 struct Mesher {
     positions: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
+    /// world metres / 4 (the soil photo's tile), only for the realistic ground
+    uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
+    real: bool,
+}
+
+/// The soil photo over the realistic ground's parcels (`textures::
+/// ground_layer_image`), put in place by `terrain_mesh::build`, which has
+/// the images at hand.
+pub const SOIL: Handle<Image> = bevy::asset::uuid_handle!("6d0c2f7e-3b8a-4c51-9e27-5a1f04b8d3c6");
+
+/// Whether the parcels have the realistic ground's soil photo: set by
+/// [`insert_soil`].
+static REAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn insert_soil(images: &mut Assets<Image>) {
+    let soil = crate::textures::ground_layer_image("track");
+    REAL.store(soil.is_some(), std::sync::atomic::Ordering::Relaxed);
+    if let Some(soil) = soil {
+        let _ = images.insert(&SOIL, soil);
+    }
 }
 
 pub fn build(scn: &Scenario, commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
@@ -72,7 +105,10 @@ pub fn build(scn: &Scenario, commands: &mut Commands, meshes: &mut Assets<Mesh>,
         x: p.x + 14.0 * (noise(p.x / 70.0 + 3.1, p.y / 70.0 + 3.1, 0x91) - 0.5),
         y: p.y + 14.0 * (noise(p.x / 70.0 + 9.7, p.y / 70.0 + 9.7, 0x92) - 0.5),
     };
-    let mut m = Mesher::default();
+    // the realistic ground (with the scanned plants): earthier crops and a
+    // photo of the soil over them
+    let real = REAL.load(std::sync::atomic::Ordering::Relaxed);
+    let mut m = Mesher { real, ..default() };
     let mut parcels = 0;
     for block in (lo[1] / 160.0).floor() as i32..=(hi[1] / 160.0).floor() as i32 {
         let b = block as f32;
@@ -94,8 +130,9 @@ pub fn build(scn: &Scenario, commands: &mut Commands, meshes: &mut Assets<Mesh>,
                 if noise(fi, fj, 0x98) < 0.12 || noise(centre.x / 110.0 + 5.0, centre.y / 110.0 + 5.0, 0x99) < 0.38 {
                     continue;
                 }
-                let crop = CROPS[((noise(fi, fj, 0x96) * 6.0) as usize).min(5)];
-                let tilled = crop[0] > 0.45;
+                let pick = ((noise(fi, fj, 0x96) * 6.0) as usize).min(5);
+                let tilled = CROPS[pick][0] > 0.45;
+                let crop = if real { CROPS_REAL[pick] } else { CROPS[pick] };
                 let vigour = 0.94 + 0.12 * noise(fi, fj, 0x97);
                 let (u0, v0) = ((iu as f32 - off) * len, iv as f32 * wid);
                 parcel(scn, &mut m, &to_world, &bend, [u0, v0], [len, wid], crop, vigour, tilled);
@@ -108,9 +145,18 @@ pub fn build(scn: &Scenario, commands: &mut Commands, meshes: &mut Assets<Mesh>,
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; m.positions.len()]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, m.colors);
+    if real {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m.uvs);
+    }
     mesh.insert_indices(Indices::U32(m.indices));
     mesh.compress_indices();
-    let material = materials.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 1.0, metallic: 0.0, reflectance: 0.02, ..default() });
+    let material = if real {
+        // the photo's ratio is stored * GROUND_ENCODE
+        let k = 1.0 / crate::textures::GROUND_ENCODE;
+        materials.add(StandardMaterial { base_color: Color::linear_rgb(k, k, k), base_color_texture: Some(SOIL), perceptual_roughness: 1.0, metallic: 0.0, reflectance: 0.02, ..default() })
+    } else {
+        materials.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 1.0, metallic: 0.0, reflectance: 0.02, ..default() })
+    };
     commands.spawn(((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material)), crate::terrain_mesh::PauseSolid));
 }
 
@@ -136,6 +182,9 @@ fn parcel(
                 let (u, v) = (a[0] + (b[0] - a[0]) * i as f32 / nu as f32, a[1] + (b[1] - a[1]) * j as f32 / nv as f32);
                 let p = bend(to_world(u, v));
                 m.positions.push([p.x, top(scn, p) + lift, -p.y]);
+                if m.real {
+                    m.uvs.push([p.x / 4.0, p.y / 4.0]);
+                }
                 let c = color(i.min(nu - 1), j.min(nv - 1));
                 m.colors.push([c[0], c[1], c[2], 1.0]);
             }
@@ -155,10 +204,11 @@ fn parcel(
     let h = HEDGE_M;
     let (u1, v1) = (at[0] + size[0], at[1] + size[1]);
     let n = |len: f32, step: f32| ((len / step).ceil() as usize).max(1);
-    quad(m, at, [u1, at[1] + h], n(size[0], 6.0), 1, LIFT, &|_, _| HEDGE);
-    quad(m, [at[0], v1 - h], [u1, v1], n(size[0], 6.0), 1, LIFT, &|_, _| HEDGE);
-    quad(m, [at[0], at[1] + h], [at[0] + h, v1 - h], 1, n(size[1], 5.0), LIFT, &|_, _| HEDGE);
-    quad(m, [u1 - h, at[1] + h], [u1, v1 - h], 1, n(size[1], 5.0), LIFT, &|_, _| HEDGE);
+    let hedge = if m.real { HEDGE_REAL } else { HEDGE };
+    quad(m, at, [u1, at[1] + h], n(size[0], 6.0), 1, LIFT, &|_, _| hedge);
+    quad(m, [at[0], v1 - h], [u1, v1], n(size[0], 6.0), 1, LIFT, &|_, _| hedge);
+    quad(m, [at[0], at[1] + h], [at[0] + h, v1 - h], 1, n(size[1], 5.0), LIFT, &|_, _| hedge);
+    quad(m, [u1 - h, at[1] + h], [u1, v1 - h], 1, n(size[1], 5.0), LIFT, &|_, _| hedge);
     let inner_a = [at[0] + HEDGE_M, at[1] + HEDGE_M];
     let inner_b = [at[0] + size[0] - HEDGE_M, at[1] + size[1] - HEDGE_M];
     let (nu, nv) = (((size[0] - 2.0 * HEDGE_M) / 6.0).ceil() as usize, (((size[1] - 2.0 * HEDGE_M) / 3.0).ceil() as usize).max(2));

@@ -31,14 +31,7 @@ pub fn apply_live(
     }
     for (mut light, mut cascades) in &mut suns {
         light.shadow_maps_enabled = gfx.shadows;
-        *cascades = bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: gfx.cascades,
-            minimum_distance: 2.0,
-            maximum_distance: gfx.shadow_distance,
-            first_cascade_far_bound: 80.0,
-            overlap_proportion: 0.3,
-        }
-        .build();
+        *cascades = gfx.sun_cascades();
     }
     for (e, has_bloom, has_dof, has_smaa, orbit) in &cameras {
         let mut cam = commands.entity(e);

@@ -86,6 +86,15 @@ const NODE_LEVELS: u32 = 6;
 /// A node is not split below this side (m) or this many plants.
 const NODE_LEAF_M: f32 = 40.0;
 const NODE_LEAF_PLANTS: usize = 24;
+/// The same for the scanned plants (`models::scans`), whose levels change
+/// near the camera. A leaf is drawn whole at the level of its nearest
+/// point: with the leaves above (until 2026-11-06) a scanned tree kept its
+/// nearest level, tens of thousands of triangles, twice as far as the
+/// distance it is meant for, and a sparse stand hundreds of metres away
+/// (300 m from the fire's front: 8.9 million triangles at the nearest level
+/// in the main pass, 1.3 with these).
+const SCAN_LEAF_M: f32 = 20.0;
+const SCAN_LEAF_PLANTS: usize = 4;
 /// No node.
 pub(crate) const NO_NODE: u32 = u32::MAX;
 
@@ -136,8 +145,10 @@ fn morton_sorted<'a>(list: &[&'a scatter::Inst]) -> (Vec<&'a scatter::Inst>, Vec
 }
 
 /// The quadtree over plants sorted by [`morton_sorted`]: the root first.
-fn build_nodes(list: &[&scatter::Inst], keys: &[u32], side: f32) -> Vec<Node> {
-    fn node(nodes: &mut Vec<Node>, list: &[&scatter::Inst], keys: &[u32], start: usize, end: usize, level: u32, prefix: u32, side: f32) -> u32 {
+/// `leaf`: no node is split below this side (m) or this many plants.
+fn build_nodes(list: &[&scatter::Inst], keys: &[u32], side: f32, leaf: (f32, usize)) -> Vec<Node> {
+    #[allow(clippy::too_many_arguments)]
+    fn node(nodes: &mut Vec<Node>, list: &[&scatter::Inst], keys: &[u32], start: usize, end: usize, level: u32, prefix: u32, side: f32, leaf: (f32, usize)) -> u32 {
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for i in &list[start..end] {
             let (a, b) = plant_box(i.base, i.scale);
@@ -147,7 +158,7 @@ fn build_nodes(list: &[&scatter::Inst], keys: &[u32], side: f32) -> Vec<Node> {
         let id = nodes.len() as u32;
         nodes.push(Node { lo, hi, start: start as u32, end: end as u32, kids: [NO_NODE; 4] });
         let node_side = side / (1u32 << level) as f32;
-        if level < NODE_LEVELS && end - start > NODE_LEAF_PLANTS && node_side > NODE_LEAF_M {
+        if level < NODE_LEVELS && end - start > leaf.1 && node_side > leaf.0 {
             let shift = 2 * (NODE_LEVELS - level - 1);
             let mut from = start;
             for q in 0..4u32 {
@@ -155,7 +166,7 @@ fn build_nodes(list: &[&scatter::Inst], keys: &[u32], side: f32) -> Vec<Node> {
                 let limit = (child + 1) << shift;
                 let to = start + keys[start..end].partition_point(|&k| k < limit);
                 if to > from {
-                    let k = node(nodes, list, keys, from, to, level + 1, child, side);
+                    let k = node(nodes, list, keys, from, to, level + 1, child, side, leaf);
                     nodes[id as usize].kids[q as usize] = k;
                 }
                 from = to;
@@ -165,7 +176,7 @@ fn build_nodes(list: &[&scatter::Inst], keys: &[u32], side: f32) -> Vec<Node> {
     }
     let mut nodes = Vec::new();
     if !list.is_empty() {
-        node(&mut nodes, list, keys, 0, list.len(), 0, 0, side);
+        node(&mut nodes, list, keys, 0, list.len(), 0, 0, side, leaf);
     }
     nodes
 }
@@ -405,7 +416,8 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
                     list.sort_by(|a, b| plant_rank(a.base.x, -a.base.z).total_cmp(&plant_rank(b.base.x, -b.base.z)));
                 } else {
                     let (sorted, keys, side) = morton_sorted(&list);
-                    tree = Some(build_nodes(&sorted, &keys, side));
+                    let leaf = if crate::models::scan_of(name).is_some() { (SCAN_LEAF_M, SCAN_LEAF_PLANTS) } else { (NODE_LEAF_M, NODE_LEAF_PLANTS) };
+                    tree = Some(build_nodes(&sorted, &keys, side, leaf));
                     list = sorted;
                 }
                 let mut tiers = [None; TIERS];
@@ -715,7 +727,7 @@ mod tests {
         let refs: Vec<&scatter::Inst> = insts.iter().collect();
         let (sorted, keys, side) = morton_sorted(&refs);
         assert!(keys.windows(2).all(|k| k[0] <= k[1]));
-        let nodes = build_nodes(&sorted, &keys, side);
+        let nodes = build_nodes(&sorted, &keys, side, (NODE_LEAF_M, NODE_LEAF_PLANTS));
         assert_eq!((nodes[0].start, nodes[0].end), (0, 5000));
         let mut leaves = 0;
         for n in &nodes {

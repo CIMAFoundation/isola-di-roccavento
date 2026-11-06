@@ -1,0 +1,15 @@
+Texture fotografiche degli edifici e delle rocce (2026-11-06), usate con KIOSK_SCANS=1
+(crates/game/src/materials/masonry.rs). Tutte CC0 (pubblico dominio), da Poly Haven:
+
+- plaster_*.png: "Painted Plaster Wall", Amal Kumar
+  https://polyhaven.com/a/painted_plaster_wall  (CC0)
+- roof_*.png: "Clay Roof Tiles 02", Amal Kumar
+  https://polyhaven.com/a/clay_roof_tiles_02  (CC0)
+- stone_*.png: "Sandstone Blocks 05", Rob Tuytel
+  https://polyhaven.com/a/sandstone_blocks_05  (CC0)
+- rock_*.png: "Marble Cliff 05", Amal Kumar (la stessa roccia delle pareti del terreno)
+  https://polyhaven.com/a/marble_cliff_05  (CC0)
+
+Dalle mappe 1K (diffuse, nor_gl, arm) con scripts/pack_building_textures.py:
+<nome>_color.png = colore x occlusione ambientale (sRGB), alfa = rugosita';
+<nome>_normal.png = normali OpenGL.

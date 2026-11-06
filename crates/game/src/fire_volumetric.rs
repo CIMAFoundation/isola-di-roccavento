@@ -13,7 +13,9 @@
 //!
 //! - the **plume map** ([`PLUME_MAP`]), one texel per fire cell with box
 //!   mips: r how much smoke the ground gives off, g how alight it is, b the
-//!   flames' height, a the ground's height;
+//!   flames' height;
+//! - the **ground** ([`GROUND_MAP`]): the heights the scene draws, which
+//!   heights over the ground are counted from;
 //! - the **smoke** at a point left the ground `h / rise` seconds ago and
 //!   drifted with the wind of those seconds since ([`WindMemory`]: a wind
 //!   shift bends the column, it does not swing it whole): the map is read
@@ -30,8 +32,9 @@
 //! and upsample in one), and blends the result over the scene before the
 //! post effects. Nothing is drawn where the plume's box is off the screen.
 //!
-//! Off in the game unless `KIOSK_VOLUMI=1`, never on WebGL2; the lab
-//! (`fire_lab`, `KIOSK_FUOCO=1`) always has it and sets every knob.
+//! Off in the game unless `KIOSK_VOLUMI=1` (in the browser `?volumi=1`, the
+//! WebGPU build), never on WebGL2; the lab (`fire_lab`, `KIOSK_FUOCO=1`)
+//! always has it and sets every knob.
 //!
 //! What it costs (2026-11-05, the lab at 4800x3000 on an M4 Pro, GPU time
 //! of the three passes, `bench::PassStamps`): 3.8 to 10.5 ms as first
@@ -99,13 +102,21 @@ const RESOLVE_SHADER: Handle<Shader> = uuid_handle!("91c2d7e4-5a38-4f0b-b6e1-3d8
 /// laid out as the fire map (`ground_mask::GRASS_MAP`, row 0 the south edge).
 pub const PLUME_MAP: Handle<Image> = uuid_handle!("0d7a9c36-41e8-4b5f-8a13-c62e9f5b07d4");
 
+/// The ground the volumes stand on (see [`ground_image`]): a half float
+/// (m) per sample of the heights the scene draws.
+pub const GROUND_MAP: Handle<Image> = uuid_handle!("3f9b6a12-7c54-4e0d-a1b8-92d5c0e47f36");
+
 /// Seconds between rewrites of the plume map.
 const PLUME_INTERVAL_S: f32 = 0.1;
 
-/// Whether the game draws the volumes: `KIOSK_VOLUMI=1`, not on WebGL2.
+/// Whether the game draws the volumes: `KIOSK_VOLUMI=1`, in the browser
+/// `?volumi=1`; not on WebGL2.
 pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !crate::quality::WEBGL2 && std::env::var("KIOSK_VOLUMI").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        let asked = if cfg!(target_arch = "wasm32") { crate::quality::web_param("volumi") } else { std::env::var("KIOSK_VOLUMI").ok() };
+        !crate::quality::WEBGL2 && asked.as_deref() == Some("1")
+    })
 }
 
 /// Every knob of the volumes; the lab's panel moves them. The defaults are
@@ -492,12 +503,44 @@ pub struct PlumeState {
     sources: Vec<f32>,
     /// Whether the sources have caught up with the fire.
     settled: bool,
+    /// The ground under each fire cell (m), asked once ([`rebuild`]).
+    ground: Vec<f32>,
 }
 
 impl PlumeState {
-    pub fn new(images: &mut Assets<Image>) -> Self {
+    /// `ground`: what the volumes stand on ([`ground_image`]).
+    pub fn new(images: &mut Assets<Image>, ground: Image) -> Self {
+        let _ = images.insert(&GROUND_MAP, ground);
         PlumeState { noise: images.add(crate::textures::noise_volume()), since: f32::INFINITY, generation: u64::MAX, ..default() }
     }
+}
+
+/// The ground the volumes stand on ([`GROUND_MAP`]), from the heights the
+/// scene draws (m): `cols` samples a row, the first and last of a row on
+/// the world's west and east edges, row 0 on its north edge and the last on
+/// its south (as `scenario::Terrain::elev`, where plants, houses and
+/// engines stand).
+///
+/// The volumes had the ground from the fire grid's own heights
+/// (`Scenario::dem`), a channel of the plume map. They are another surface:
+/// on the island they run tens of metres over the drawn ground along the
+/// ridge (up to 150 m), and the flames and the smoke hung in the air there
+/// (user, 2026-11-06: «le fiamme appaiono anche staccate dal suolo»). Nor
+/// is a height a fire cell enough: 20 m apart, the drawn ground between
+/// them is 2.5 m off (rms; a node in a hundred over 8 m), as much as a
+/// grass fire's flames are tall.
+pub fn ground_image(cols: usize, elev: &[f32]) -> Image {
+    let mut data = Vec::with_capacity(elev.len() * 2);
+    for h in elev {
+        data.extend_from_slice(&f16_bits(*h).to_le_bytes());
+    }
+    Image::new(
+        Extent3d { width: cols as u32, height: (elev.len() / cols) as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::R16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    )
 }
 
 /// A fire cell for the plume map: when the front reached it (sim s) and
@@ -505,7 +548,9 @@ impl PlumeState {
 pub type CellBurn = Option<(f32, f32)>;
 
 /// Rewrites the plume map from cells and sizes the plume's box; `wind` is
-/// the wind now (Bevy x, z, m/s) and `margin` metres of sway round it.
+/// the wind now (Bevy x, z, m/s) and `margin` metres of sway round it;
+/// `ground` is the height of the ground at a cell's centre, for the box
+/// (asked once for each cell).
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild(
     state: &mut PlumeState,
@@ -523,6 +568,7 @@ pub fn rebuild(
     if state.dims != (cols, rows) || images.get(&PLUME_MAP).is_none() {
         state.dims = (cols, rows);
         let _ = images.insert(&PLUME_MAP, plume_image(cols, rows));
+        state.ground = (0..cols * rows).map(&ground).collect();
     }
     let age = s.top_m / s.rise_ms;
     let clock = state.clock;
@@ -543,9 +589,8 @@ pub fn rebuild(
     for r in 0..rows {
         for c in 0..cols {
             let i = r * cols + c;
-            let g = ground(i);
+            let g = state.ground[i];
             let at = (rows - 1 - r) * cols + c;
-            level0[at][3] = g;
             let mut target = 0.0;
             let burn = cell(i).map(|(arrival, fli)| ((now - arrival).max(0.0), fli)).filter(|(since, _)| *since < s.smoke_s);
             if let Some((since, fli)) = burn {
@@ -644,7 +689,8 @@ fn update_from_sim(
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut state) = state else {
-        commands.insert_resource(PlumeState::new(&mut images));
+        let t = &sim.scn.terrain;
+        commands.insert_resource(PlumeState::new(&mut images, ground_image(t.cols, &t.elev)));
         return;
     };
     let dt_real = time.delta_secs();
@@ -672,8 +718,16 @@ fn update_from_sim(
         wind.w,
         &settings,
         |i| (fire_state[i] != CellFire::Unburnt && arrival[i] != i32::MIN).then(|| (arrival[i] as f32, intensity[i])),
-        |i| sim.scn.dem.get(i).copied().unwrap_or(0.0) as f32,
+        |i| drawn_ground(&sim.scn, i),
     );
+}
+
+/// The ground the scene draws at the centre of fire cell `i`
+/// ([`scenario::Terrain::height_at`]; not the fire grid's own heights, see
+/// [`ground_image`]).
+fn drawn_ground(scn: &scenario::Scenario, i: usize) -> f32 {
+    let w = &scn.world;
+    scn.terrain.height_at(w.centre_of(scenario::Cell { row: i / w.fire_cols, col: i % w.fire_cols }))
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -814,7 +868,9 @@ struct Pipelines {
     fullscreen: FullscreenShader,
     march: HashMap<(MeshPipelineViewLayoutKey, bool), CachedRenderPipelineId>,
     resolve: CachedRenderPipelineId,
-    composite: HashMap<(TextureFormat, bool), CachedRenderPipelineId>,
+    /// By the target's format, its samples, and whether it is the second
+    /// draw (the nearer surfaces, `fire_composite.wesl`).
+    composite: HashMap<(TextureFormat, u32, bool), CachedRenderPipelineId>,
     sampler: Sampler,
     history_sampler: Sampler,
 }
@@ -839,6 +895,8 @@ fn init_pipelines(
                     sampler(SamplerBindingType::Filtering),
                     texture_3d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
+                    // the ground
+                    texture_2d(TextureSampleType::Float { filterable: true }),
                 ),
             ),
         )
@@ -855,6 +913,8 @@ fn init_pipelines(
                 // the frames before
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // what this frame's march noted of the scene
+                texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
     );
@@ -985,6 +1045,8 @@ struct ViewData {
     uniform: UniformBuffer<Params>,
     march: CachedRenderPipelineId,
     composite: CachedRenderPipelineId,
+    /// Under multisampling, the draw of the nearer surfaces.
+    composite_near: Option<CachedRenderPipelineId>,
     multisampled: bool,
     /// The main pass's corner and size in the view (px).
     viewport: (UVec2, UVec2),
@@ -1068,7 +1130,8 @@ fn prepare(
         let size = over.map_or(full, |o| o.0.min(full)).max(UVec2::ONE);
         let d = extracted.div;
         let low = UVec2::new(size.x.div_ceil(d), size.y.div_ceil(d));
-        let ms = !matches!(msaa, Msaa::Off);
+        let samples = msaa.samples();
+        let ms = samples > 1;
         let view_key: MeshPipelineViewLayoutKey = (*key).into();
         seen.push(entity);
 
@@ -1095,41 +1158,51 @@ fn prepare(
                 ..default()
             })
         });
-        let composite = *composite_ids.entry((view.target_format, ms)).or_insert_with(|| {
-            let mut defs: Vec<bevy::shader::ShaderDefVal> = Vec::new();
-            if ms {
-                defs.push("MULTISAMPLED".into());
-            }
-            pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-                label: Some("fire_composite".into()),
-                layout: vec![composite_layout[ms as usize].clone()],
-                vertex: fullscreen.to_vertex_state(),
-                fragment: Some(FragmentState {
-                    shader: COMPOSITE_SHADER,
-                    shader_defs: defs,
-                    targets: vec![Some(ColorTargetState {
-                        format: view.target_format,
-                        // premultiplied: the volume's light, then the scene
-                        // through what it lets pass
-                        blend: Some(BlendState {
-                            color: BlendComponent {
-                                src_factor: BlendFactor::One,
-                                dst_factor: BlendFactor::OneMinusSrcAlpha,
-                                operation: BlendOperation::Add,
-                            },
-                            alpha: BlendComponent {
-                                src_factor: BlendFactor::Zero,
-                                dst_factor: BlendFactor::One,
-                                operation: BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: ColorWrites::ALL,
-                    })],
+        // under multisampling the composite draws into the samples, and a
+        // second time for the nearer surface of the pixels that hold two
+        let mut composite_for = |near: bool| {
+            *composite_ids.entry((view.target_format, samples, near)).or_insert_with(|| {
+                let mut defs: Vec<bevy::shader::ShaderDefVal> = Vec::new();
+                if ms {
+                    defs.push("MULTISAMPLED".into());
+                }
+                if near {
+                    defs.push("NEAR".into());
+                }
+                pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                    label: Some(if near { "fire_composite_near".into() } else { "fire_composite".into() }),
+                    layout: vec![composite_layout[ms as usize].clone()],
+                    vertex: fullscreen.to_vertex_state(),
+                    multisample: MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+                    fragment: Some(FragmentState {
+                        shader: COMPOSITE_SHADER,
+                        shader_defs: defs,
+                        targets: vec![Some(ColorTargetState {
+                            format: view.target_format,
+                            // premultiplied: the volume's light, then the
+                            // scene through what it lets pass
+                            blend: Some(BlendState {
+                                color: BlendComponent {
+                                    src_factor: BlendFactor::One,
+                                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                                    operation: BlendOperation::Add,
+                                },
+                                alpha: BlendComponent {
+                                    src_factor: BlendFactor::Zero,
+                                    dst_factor: BlendFactor::One,
+                                    operation: BlendOperation::Add,
+                                },
+                            }),
+                            write_mask: ColorWrites::ALL,
+                        })],
+                        ..default()
+                    }),
                     ..default()
-                }),
-                ..default()
+                })
             })
-        });
+        };
+        let composite = composite_for(false);
+        let composite_near = ms.then(|| composite_for(true));
 
         // the history: new targets when the size changed, and no history
         // in them yet
@@ -1179,6 +1252,7 @@ fn prepare(
             uniform,
             march,
             composite,
+            composite_near,
             multisampled: ms,
             viewport: (corner, size),
             write,
@@ -1207,7 +1281,23 @@ fn draw(
     ) else {
         return;
     };
-    let (Some(plume), Some(noise)) = (images.get(PLUME_MAP.id()), images.get(extracted.noise)) else { return };
+    let composite_near = match data.composite_near.map(|id| pipeline_cache.get_render_pipeline(id)) {
+        Some(None) => return,
+        Some(ready) => ready,
+        None => None,
+    };
+    let (Some(plume), Some(noise), Some(ground)) = (images.get(PLUME_MAP.id()), images.get(extracted.noise), images.get(GROUND_MAP.id()))
+    else {
+        return;
+    };
+    // under multisampling the composite draws into the samples the main
+    // pass left, and they are resolved anew
+    let samples = if data.multisampled {
+        let Some(samples) = target.sampled_main_texture_view() else { return };
+        Some(samples)
+    } else {
+        None
+    };
     let Some(depth_view) = depth.attachment.depth_stencil_views().depth_only_view() else { return };
     let Some(uniform) = data.uniform.binding() else { return };
     let ms = data.multisampled as usize;
@@ -1224,6 +1314,7 @@ fn draw(
             &pipelines.sampler,
             &noise.texture_view,
             &noise.sampler,
+            &ground.texture_view,
         )),
     );
     let resolve_group = device.create_bind_group(
@@ -1235,6 +1326,7 @@ fn draw(
             &history.mid.1,
             &history.color[r].1,
             &pipelines.history_sampler,
+            &history.aux.1,
         )),
     );
     let composite_group = device.create_bind_group(
@@ -1290,9 +1382,9 @@ fn draw(
     }
     {
         let load = [Some(RenderPassColorAttachment {
-            view: target.main_texture_view(),
+            view: samples.unwrap_or(target.main_texture_view()),
             depth_slice: None,
-            resolve_target: None,
+            resolve_target: samples.map(|_| &**target.main_texture_view()),
             ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
         })];
         let stamp = stamp(encoder, 2);
@@ -1302,6 +1394,10 @@ fn draw(
         p.set_pipeline(composite);
         p.set_bind_group(0, &composite_group, &[]);
         p.draw(0..3, 0..1);
+        if let Some(near) = composite_near {
+            p.set_pipeline(near);
+            p.draw(0..3, 0..1);
+        }
     }
     if let Some(stamps) = &stamps {
         stamps.read_back(encoder);
@@ -1377,6 +1473,30 @@ mod tests {
                 let back = clip.truncate().truncate() / clip.w;
                 // a march pixel is 5e-3 of this
                 assert!((back - ndc.truncate().truncate()).length() < 2e-5, "{ndc} at {distance} m: {back}");
+            }
+        }
+    }
+
+    /// The ground the march reads for a place (`ground` in
+    /// `fire_march.wesl`: the sample at `at` there, for a place on one) is
+    /// the ground the scene draws there.
+    #[test]
+    fn the_volumes_stand_on_the_drawn_ground() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(scn) = scenario::Scenario::load(&dir) else { return };
+        let (t, w) = (&scn.terrain, &scn.world);
+        let image = ground_image(t.cols, &t.elev);
+        let data = image.data.as_ref().unwrap();
+        let n = Vec2::new(image.width() as f32, image.height() as f32);
+        let map = Vec2::new(1.0 / w.width_m, 1.0 / w.height_m);
+        for row in (0..t.rows).step_by(13) {
+            for col in (0..t.cols).step_by(13) {
+                let p = scenario::Pos { x: col as f32 * t.posting, y: t.height_m - row as f32 * t.posting };
+                let xz = Vec2::new(p.x, -p.y);
+                let at = Vec2::new(xz.x * map.x, 1.0 + xz.y * map.y) * (n - 1.0);
+                assert!((at - Vec2::new(col as f32, row as f32)).length() < 1e-2, "sample {row} {col}: read at {at}");
+                let i = (at.y.round() as usize * t.cols + at.x.round() as usize) * 2;
+                assert_eq!(u16::from_le_bytes([data[i], data[i + 1]]), f16_bits(t.height_at(p)), "sample {row} {col}");
             }
         }
     }

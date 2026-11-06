@@ -80,6 +80,11 @@ pub struct NearCoverExtension {
     #[texture(104)]
     #[sampler(105)]
     road_mask: Handle<Image>,
+    /// The realistic ground's tuft photos (`textures::grass_cards_image`),
+    /// read only with `REAL_GROUND`.
+    #[texture(106)]
+    #[sampler(107)]
+    cards: Handle<Image>,
 }
 
 impl NearCoverExtension {
@@ -106,6 +111,22 @@ impl MaterialExtension for NearCoverExtension {
     }
     fn fragment_shader() -> ShaderRef {
         SHADER_HANDLE.into()
+    }
+    /// The realistic ground (with the scanned plants: `textures::
+    /// ground_detail`) stands photographs of tufts for the blades.
+    fn specialize(
+        _: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        if crate::textures::ground_detail().is_some() {
+            descriptor.vertex.shader_defs.push("REAL_GROUND".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("REAL_GROUND".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -221,6 +242,7 @@ pub fn spawn(
     // cells per ring side: `cover_m` is the inner ring's radius at scale 1 for a
     // single lattice; rings are cheaper, so fewer cells each
     let n_tuft = (1.3 * gfx.cover_m / TUFT_CELL_M).ceil() as usize;
+    let cards = images.add(crate::textures::grass_cards_image());
     let make = || NearCoverMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
@@ -241,6 +263,7 @@ pub fn spawn(
             height: height.clone(),
             cover: COVER_MAP,
             road_mask: crate::ground_mask::ROAD_MASK,
+            cards: cards.clone(),
         },
     };
     let ring_materials: Vec<_> = (0..RINGS).map(|_| materials.add(make())).collect();

@@ -5,6 +5,13 @@
 // so it can neither ghost nor pulse: a reprojection that missed lands on
 // something like what is here. The jitter of the march's first step, new
 // each frame, averages out.
+//
+// The neighbourhood is of this pixel's surface only: the neighbours whose
+// scene is about as far as its own. A march pixel at the rim of a leaf that
+// sways is now the leaf, now the sky behind, with little smoke in front of
+// the one and all of it in front of the other; with every neighbour in the
+// spread, both fitted, the history kept a mix of the two, and a pale glow
+// stood round each leaf against the smoke (user, 2026-11-06).
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
@@ -34,6 +41,12 @@ struct Params {
 @group(0) @binding(2) var mid_tex: texture_2d<f32>;
 @group(0) @binding(3) var hist_tex: texture_2d<f32>;
 @group(0) @binding(4) var hist_samp: sampler;
+// what the march noted of the scene: how far it is (m), in red
+@group(0) @binding(5) var aux_tex: texture_2d<f32>;
+
+// Scenes nearer to each other than this share of their distance are one
+// surface (as in `fire_composite.wesl`).
+const ONE_SURFACE = 0.1;
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
@@ -45,22 +58,31 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if keep <= 0.0 || ((u32(p.frame.z) >> 5u) & 3u) >= 2u {
         return now;
     }
-    // the neighbourhood's spread
+    // the spread of the neighbours of this pixel's surface (itself among
+    // them)
+    let z = textureLoad(aux_tex, pix, 0).r;
     var m1 = vec4<f32>(0.0);
     var m2 = vec4<f32>(0.0);
     var lo = now;
     var hi = now;
+    var n = 0.0;
     for (var j = -1; j <= 1; j++) {
         for (var i = -1; i <= 1; i++) {
-            let v = textureLoad(raw_tex, clamp(pix + vec2<i32>(i, j), vec2<i32>(0), last), 0);
+            let at = clamp(pix + vec2<i32>(i, j), vec2<i32>(0), last);
+            let zl = textureLoad(aux_tex, at, 0).r;
+            if abs(zl - z) > ONE_SURFACE * max(min(zl, z), 1.0) {
+                continue;
+            }
+            let v = textureLoad(raw_tex, at, 0);
             m1 += v;
             m2 += v * v;
             lo = min(lo, v);
             hi = max(hi, v);
+            n += 1.0;
         }
     }
-    let mean = m1 / 9.0;
-    let dev = sqrt(max(m2 / 9.0 - mean * mean, vec4<f32>(0.0)));
+    let mean = m1 / n;
+    let dev = sqrt(max(m2 / n - mean * mean, vec4<f32>(0.0)));
     let box_lo = max(lo, mean - dev * 1.25);
     let box_hi = min(hi, mean + dev * 1.25);
 

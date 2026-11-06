@@ -182,7 +182,8 @@ pub fn canopy(scn: &Scenario, cols: usize, rows: usize, posting: f32) -> Canopy 
         let p = Pos { x: i.base.x, y: -i.base.z };
         let species = Species::of_fuel(scn.fuel_at(w.cell_of(p))).unwrap_or(Species::Broadleaf);
         let (k, code) = kind_code(species);
-        let c = *colour_of.entry(i.name).or_insert_with(|| crown_colour(i.name));
+        // as the plant is drawn far away: a scanned one in its leaves' colour
+        let c = *colour_of.entry(i.name).or_insert_with(|| super::meshes::scan_leaf_colour(i.name).unwrap_or_else(|| crown_colour(i.name)));
         let c = [c[0] * i.leaf[0], c[1] * i.leaf[1], c[2] * i.leaf[2]];
         let r = super::meshes::crown_radius(i.name) * i.scale.x;
         for j in 0..3 {

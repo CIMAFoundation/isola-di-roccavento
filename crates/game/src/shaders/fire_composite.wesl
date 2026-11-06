@@ -3,7 +3,20 @@
 // 3x3 march texels round it, weighted by distance (a blur that hides the
 // march's jitter) and by how close their depth is to its own (so the smoke
 // behind a tree does not bleed over it). Where no texel has a depth like
-// its own, the closest in depth stands for it. Blended premultiplied.
+// its own, the sixteen round those are asked (a gap in a crown: every
+// march texel near it fell on a leaf, and the sky seen through it stayed
+// without its smoke), and failing those the closest in depth stands for
+// it. Blended premultiplied.
+//
+// Under multisampling a pixel at the rim of a leaf holds two surfaces, the
+// leaf and what is behind it, and each has its own volume in front of it:
+// the smoke over the sky must neither veil the leaf nor be missing from
+// the sky. Composed over the resolved picture with one depth for the
+// pixel, such a rim kept the sky without its smoke: every leaf against the
+// smoke wore a pale outline (user, 2026-11-06). So there the pass draws
+// into the samples, before they are resolved, and twice: the farther
+// surface of each pixel, then (`NEAR`) the nearer one of the pixels that
+// have two, each over its own samples (`surface`).
 //
 // Most of the screen has no volume over it, and this pass runs at the
 // screen's resolution (2026-11-05: at 9x the pixels it was two thirds of
@@ -107,8 +120,93 @@ fn noise_tex_at(q: vec3<f32>, lod: f32) -> vec4<f32> {
     return textureSampleLevel(noise_tex, noise_samp, q, lod);
 }
 
+// What the pass writes: under multisampling, also into which of the
+// pixel's samples.
+@if(MULTISAMPLED)
+struct Out {
+    @location(0) colour: vec4<f32>,
+    @builtin(sample_mask) mask: u32,
+}
+@else
+struct Out {
+    @location(0) colour: vec4<f32>,
+}
+
+@if(MULTISAMPLED)
+fn out(colour: vec4<f32>, mask: u32) -> Out {
+    return Out(colour, mask);
+}
+@else
+fn out(colour: vec4<f32>, mask: u32) -> Out {
+    return Out(colour);
+}
+
+// The second draw: the nearer surface of the pixels that hold two.
+@if(NEAR)
+const NEAR_DRAW = true;
+@else
+const NEAR_DRAW = false;
+
+// Samples nearer to each other than this share of their distance are one
+// surface: the volume in front of them is the same (the blur below takes
+// depths a twentieth apart for alike).
+const ONE_SURFACE = 0.1;
+
+// A surface of the pixel: how far it is (m) and which of the pixel's
+// samples are of it (none: nothing for this draw).
+struct Surface {
+    z: f32,
+    mask: u32,
+}
+
+fn metres(d: f32) -> f32 {
+    if d > 0.0 {
+        return min(p.origin.w / d, FAR_M);
+    }
+    return FAR_M;
+}
+
+// The pixel's samples, split where they are farthest apart (in ratio): the
+// farther ones for the first draw, the nearer ones for the second. A pixel
+// of one surface is all the first draw's.
+@if(MULTISAMPLED)
+fn surface(pix: vec2<i32>) -> Surface {
+    let n = i32(textureNumSamples(depth_tex));
+    var zs: array<f32, 8>;
+    var lo = FAR_M;
+    var hi = 0.0;
+    for (var s = 0; s < n; s++) {
+        let z = metres(textureLoad(depth_tex, pix, s));
+        zs[s] = z;
+        lo = min(lo, z);
+        hi = max(hi, z);
+    }
+    let all = (1u << u32(n)) - 1u;
+    if hi - lo <= ONE_SURFACE * lo {
+        if NEAR_DRAW {
+            return Surface(lo, 0u);
+        }
+        return Surface(hi, all);
+    }
+    let mid = sqrt(lo * hi);
+    var near = 0u;
+    for (var s = 0; s < n; s++) {
+        if zs[s] < mid {
+            near |= 1u << u32(s);
+        }
+    }
+    if NEAR_DRAW {
+        return Surface(lo, near);
+    }
+    return Surface(hi, all & ~near);
+}
+@else
+fn surface(pix: vec2<i32>) -> Surface {
+    return Surface(metres(textureLoad(depth_tex, pix, 0)), 1u);
+}
+
 @fragment
-fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+fn fragment(in: FullscreenVertexOutput) -> Out {
     let pix = in.position.xy;
     // this pixel's place on the march's grid
     let q = (pix - p.origin.xy) / p.origin.z - 0.5;
@@ -126,16 +224,16 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // `solo`: the volumes over black, not over the scene
     let solo = (u32(p.frame.z) & 16u) != 0u;
     if near_a < 0.0005 {
-        if solo {
-            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        if solo && !NEAR_DRAW {
+            return out(vec4<f32>(0.0, 0.0, 0.0, 1.0), 0xffffffffu);
         }
         discard;
     }
-    let d = textureLoad(depth_tex, vec2<i32>(pix), 0);
-    var z = FAR_M;
-    if d > 0.0 {
-        z = min(p.origin.w / d, FAR_M);
+    let on = surface(vec2<i32>(pix));
+    if on.mask == 0u {
+        discard;
     }
+    let z = on.z;
     var sum = vec4<f32>(0.0);
     var fsum = vec3<f32>(0.0);
     var wsum = 0.0;
@@ -169,16 +267,43 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if wsum > 0.05 {
         col = sum / wsum;
         fl = fsum / wsum;
+    } else {
+        // none of the nine is of this surface: the ring round them
+        var sum2 = vec4<f32>(0.0);
+        var fsum2 = vec3<f32>(0.0);
+        var wsum2 = 0.0;
+        for (var j = -2; j <= 2; j++) {
+            for (var i = -2; i <= 2; i++) {
+                if max(abs(i), abs(j)) < 2 {
+                    continue;
+                }
+                let at = clamp(c + vec2<i32>(i, j), vec2<i32>(0), last);
+                let aux = textureLoad(vol_aux, at, 0);
+                let dz = abs(aux.r - z) / max(min(z, aux.r), 1.0);
+                let wd = exp(-dz * dz * 400.0);
+                if wd < 0.05 {
+                    continue;
+                }
+                let fm = aux.gba;
+                sum2 += textureLoad(vol_tex, at, 0) * wd;
+                fsum2 += vec3<f32>(fm.x, fm.x * fm.y, fm.x * fm.z) * wd;
+                wsum2 += wd;
+            }
+        }
+        if wsum2 > 0.0 {
+            col = sum2 / wsum2;
+            fl = fsum2 / wsum2;
+        }
     }
     // no carving of the markers, nor of the history's offset (`scarto`)
     if fl.x > 1e-4 && ((u32(p.frame.z) >> 5u) & 7u) == 0u {
         col = carve(col, vec3<f32>(fl.x, fl.y / fl.x, fl.z / fl.x), pix);
     }
     if solo {
-        return vec4<f32>(col.rgb, 1.0);
+        return out(vec4<f32>(col.rgb, 1.0), on.mask);
     }
     if col.a < 0.002 {
         discard;
     }
-    return col;
+    return out(col, on.mask);
 }

@@ -419,7 +419,12 @@
         const files = {};
         const native = !lowMemory && typeof DecompressionStream === 'function';
         window.roccaDataGzip = !native;
-        const pending = manifest.values();
+        // what only a trial reads is downloaded when the address asks for
+        // it: the scanned plants (`?scans=1`, the WebGPU build only)
+        const asked = new URLSearchParams(location.search);
+        const gpuBuild = await webgpu;
+        const wanted = manifest.filter(f => !f.only || (gpuBuild && asked.get(f.only) === '1'));
+        const pending = wanted.values();
         async function worker() {
           for (const file of pending) {
             files[file.path] = await retried(file.path, async () => {

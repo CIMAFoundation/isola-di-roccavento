@@ -1,4 +1,5 @@
-//! Procedural textures for the fire.
+//! Procedural textures for the fire, and the realistic ground's photo layers
+//! ([`ground_detail`]).
 //!
 //! Flat quads are what make particle fire look like cardboard: the silhouette
 //! is a rectangle and the edges are hard lines. Everything here exists to give
@@ -225,6 +226,216 @@ pub fn heights(t: &scenario::Terrain) -> (Image, f32, f32) {
     );
     (image, lo, scale)
 }
+
+/// The realistic ground's layers (2026-11-06, with the scanned plants,
+/// `KIOSK_SCANS=1`), in the order of the array and of `terrain.wesl`'s
+/// `L_*` constants. Photos from Poly Haven, CC0 (`assets/ground/CREDITS.txt`),
+/// high-passed into a ratio around one by `tools/terrain/ground_detail.py`.
+pub const GROUND_LAYERS: [&str; 9] = ["grass", "soil", "needles", "leaves", "rock", "sand", "track", "burnt", "asphalt"];
+
+/// The ground's detail layers and their mean colours (linear), read once.
+pub struct GroundDetail {
+    /// Every layer's pixels, `side`², RGBA8 (linear), with their mips, layer
+    /// after layer.
+    data: Vec<u8>,
+    side: u32,
+    levels: u32,
+    /// Mean colour of each layer's photo, linear, in `GROUND_LAYERS`' order.
+    pub means: [[f32; 3]; GROUND_LAYERS.len()],
+    /// The near grass's tuft cards (`grass_cards.png`), RGBA8 with mips.
+    cards: Vec<u8>,
+    cards_size: (u32, u32),
+    cards_levels: u32,
+}
+
+/// The realistic ground, when the scanned plants are on (the same switch:
+/// `models::scans`, `?scans=1` in the WebGPU build) and its files are there.
+pub fn ground_detail() -> Option<&'static GroundDetail> {
+    static DETAIL: std::sync::OnceLock<Option<GroundDetail>> = std::sync::OnceLock::new();
+    DETAIL
+        .get_or_init(|| {
+            crate::models::scans()?;
+            load_ground_detail().map_err(|e| warn!("realistic ground: {e}")).ok()
+        })
+        .as_ref()
+}
+
+/// A file of `assets/ground`: of the source tree on the desktop, of the
+/// page's data in the browser (where the layers come at half their side:
+/// every size is read from the files).
+fn ground_file(name: &str) -> Result<Vec<u8>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/ground").join(name));
+    #[cfg(target_arch = "wasm32")]
+    let bytes = datafs::take(format!("assets/ground/{name}"));
+    bytes.map_err(|e| format!("{name}: {e}"))
+}
+
+/// A PNG of `assets/ground` as RGBA8 pixels (linear or sRGB as stored) and
+/// its side.
+fn ground_png(name: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+    let png = ground_file(name)?;
+    let image = Image::from_buffer(&png, ImageType::Extension("png"), CompressedImageFormats::NONE, false, ImageSampler::Default, RenderAssetUsages::RENDER_WORLD).map_err(|e| format!("{name}: {e}"))?;
+    let image = match image.texture_descriptor.format {
+        TextureFormat::Rgba8Unorm => image,
+        f => image.convert(TextureFormat::Rgba8Unorm).ok_or(format!("{name}: {f:?}, not convertible to RGBA8"))?,
+    };
+    let (w, h) = (image.width(), image.height());
+    Ok((image.data.ok_or(format!("{name}: no pixels"))?, w, h))
+}
+
+/// Box-filtered mips of a `w` x `h` RGBA8 image (wrapping: the photos
+/// tile), appended after it; returns the levels.
+fn push_mips(data: &mut Vec<u8>, base: Vec<u8>, w: usize, h: usize) -> u32 {
+    let (mut level, mut lw, mut lh, mut count) = (base, w, h, 1u32);
+    loop {
+        data.extend_from_slice(&level);
+        if lw == 1 && lh == 1 {
+            return count;
+        }
+        let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
+        let mut next = Vec::with_capacity(nw * nh * 4);
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let at = |xx: usize, yy: usize| level[((yy % lh) * lw + (xx % lw)) * 4 + c] as u32;
+                    let (x0, y0) = (2 * x, 2 * y);
+                    let s = at(x0, y0) + at(x0 + 1, y0) + at(x0, y0 + 1) + at(x0 + 1, y0 + 1);
+                    next.push(((s + 2) / 4) as u8);
+                }
+            }
+        }
+        (level, lw, lh) = (next, nw, nh);
+        count += 1;
+    }
+}
+
+fn load_ground_detail() -> Result<GroundDetail, String> {
+    let index: serde_json::Value = serde_json::from_slice(&ground_file("ground.json")?).map_err(|e| e.to_string())?;
+    let layers = index["layers"].as_array().ok_or("ground.json: no layers")?;
+    let mut means = [[0.5f32; 3]; GROUND_LAYERS.len()];
+    let (mut data, mut side, mut levels) = (Vec::new(), 0u32, 0u32);
+    for (k, name) in GROUND_LAYERS.iter().enumerate() {
+        let entry = layers.iter().find(|l| l["name"] == *name).ok_or(format!("ground.json: no layer {name}"))?;
+        for (c, v) in entry["mean"].as_array().ok_or("mean")?.iter().enumerate().take(3) {
+            means[k][c] = v.as_f64().unwrap_or(0.5) as f32;
+        }
+        let (base, w, h) = ground_png(&format!("{name}.png"))?;
+        if w != h || !w.is_power_of_two() || (side != 0 && w != side) {
+            return Err(format!("{name}.png: {w} x {h}, the layers must be square, of one power-of-two side"));
+        }
+        side = w;
+        // the mips of a ratio around one fade to one, the macro colour
+        levels = push_mips(&mut data, base, w as usize, h as usize);
+    }
+    // the near grass's cards (`near_cover`), with mips whose alpha keeps
+    // the share of texels a cut-out at one half draws, so far tufts do not
+    // thin out into nothing
+    let (cards_px, cw, ch) = ground_png("grass_cards.png")?;
+    let mut cards = Vec::new();
+    let cards_levels = push_mips(&mut cards, cards_px, cw as usize, ch as usize);
+    keep_alpha_coverage(&mut cards, cw as usize, ch as usize, cards_levels);
+    info!("realistic ground: {} layers of {side}² and grass cards of {cw} x {ch} from assets/ground", GROUND_LAYERS.len());
+    Ok(GroundDetail { data, side, levels, means, cards, cards_size: (cw, ch), cards_levels })
+}
+
+/// Scales each mip's alpha so that as many texels pass 0.5 as in the full
+/// level (the mips of a cut-out otherwise lose their thin blades).
+fn keep_alpha_coverage(data: &mut [u8], w: usize, h: usize, levels: u32) {
+    let share = |px: &[u8], k: f32| px.chunks(4).filter(|p| p[3] as f32 * k >= 127.5).count() as f32 / (px.len() / 4) as f32;
+    let target = share(&data[..w * h * 4], 1.0);
+    let (mut off, mut lw, mut lh) = (w * h * 4, (w / 2).max(1), (h / 2).max(1));
+    for _ in 1..levels {
+        let len = lw * lh * 4;
+        let px = &mut data[off..off + len];
+        // bisection on the factor
+        let (mut lo, mut hi) = (0.5f32, 8.0f32);
+        for _ in 0..16 {
+            let mid = 0.5 * (lo + hi);
+            if share(px, mid) < target { lo = mid } else { hi = mid }
+        }
+        for p in px.chunks_mut(4) {
+            p[3] = (p[3] as f32 * hi).min(255.0) as u8;
+        }
+        off += len;
+        (lw, lh) = ((lw / 2).max(1), (lh / 2).max(1));
+    }
+}
+
+/// The near grass's tuft cards (`near_cover`), sRGB with alpha and mips; a
+/// 1 x 1 stand-in that no shader reads when the realistic ground is off.
+pub fn grass_cards_image() -> Image {
+    use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    let (data, (w, h), levels) = match ground_detail() {
+        Some(d) => (d.cards.clone(), d.cards_size, d.cards_levels),
+        None => (vec![0u8; 4], (1, 1), 1),
+    };
+    let mut image = Image::new(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, Vec::new(), TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = levels;
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+/// The ground's detail as a 2D array texture for the terrain
+/// (`materials::TerrainMaterial`): the layers when the realistic ground is
+/// on, else a 1 x 1 stand-in of two layers that no shader reads.
+pub fn ground_detail_image() -> Image {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension};
+    let (data, side, layers, levels) = match ground_detail() {
+        Some(d) => (d.data.clone(), d.side, GROUND_LAYERS.len() as u32, d.levels),
+        None => (vec![102u8; 8], 1, 2, 1),
+    };
+    let mut image = Image::new(Extent3d { width: side, height: side, depth_or_array_layers: layers }, TextureDimension::D2, Vec::new(), TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = levels;
+    image.texture_view_descriptor = Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::D2Array), ..default() });
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        // the ground is seen at a grazing angle: without it the far photos
+        // blur into the macro colour too soon
+        anisotropy_clamp: 8,
+        ..default()
+    });
+    image
+}
+
+/// One layer of the realistic ground as a texture of its own, with its mips,
+/// repeating: for the meshes laid over the ground (`fields.rs`). The ratio is
+/// stored * [`GROUND_ENCODE`]: a material multiplies it back.
+pub fn ground_layer_image(name: &str) -> Option<Image> {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    let d = ground_detail()?;
+    let k = GROUND_LAYERS.iter().position(|l| *l == name)?;
+    let per_layer = d.data.len() / GROUND_LAYERS.len();
+    let mut image = Image::new(Extent3d { width: d.side, height: d.side, depth_or_array_layers: 1 }, TextureDimension::D2, Vec::new(), TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
+    image.data = Some(d.data[k * per_layer..(k + 1) * per_layer].to_vec());
+    image.texture_descriptor.mip_level_count = d.levels;
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..default()
+    });
+    Some(image)
+}
+
+/// How the layers store the ratio (`tools/terrain/ground_detail.py`).
+pub const GROUND_ENCODE: f32 = 0.33;
 
 /// The flame flipbook (2026-11-05, `tools/fire/flipbook.py`): two filmed
 /// -looking flame sequences of 64 frames, CC0 from Unity Labs, one sheet of

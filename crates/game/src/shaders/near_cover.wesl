@@ -37,6 +37,11 @@ struct Params {
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var cover_samp: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(104) var road_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(105) var road_samp: sampler;
+// the realistic ground's tuft photos (`REAL_GROUND`)
+@if(REAL_GROUND)
+@group(constants::MATERIAL_BIND_GROUP) @binding(106) var cards_tex: texture_2d<f32>;
+@if(REAL_GROUND)
+@group(constants::MATERIAL_BIND_GROUP) @binding(107) var cards_samp: sampler;
 
 const RANGE_M: f32 = 12.0;
 const HASH_K: u32 = 747796405u;
@@ -179,8 +184,45 @@ fn vertex(v: Vertex) -> VertexOutput {
         tone = rb.x;
     }
 
+    // The realistic ground's (2026-11-06, `REAL_GROUND`): not blades but
+    // photographs of dry tufts (`textures::grass_cards_image`), two cards
+    // crossed at right angles per tuft; the other blades of the cell are not
+    // drawn. A blade's five vertices make a card: its root and middle pairs
+    // are the bottom and top corners, its tip folds onto the top right.
+    var uv_out = v.uv;
+    var keep_card = 1.0;
+    var card_seen = 1.0;
+    @if(REAL_GROUND) {
+        keep_card = f32(k < 2u);
+        let u01 = select(side * 0.5 + 0.5, 1.0, t > 0.75);
+        let up = select(0.0, 1.0, t > 0.25);
+        let ang = r.x * 6.2831 + f32(k) * 1.5708;
+        let dir = vec2<f32>(cos(ang), sin(ang));
+        // as wide as the tuft's spread, half as high (the cards' cells are
+        // 2 : 1), a little taller on the green patches
+        let width = mix(0.55, 1.0, patch_n) * (0.7 + 0.6 * r.z) * 1.15 * min(pow(scale, 0.6), 2.4);
+        var height = width * 0.5 * (0.85 + 0.35 * rb.y);
+        height = height * mix(1.0, 0.75, scorch);
+        let foot = tuft + dir * (u01 - 0.5) * width;
+        let lean_dir = vec2<f32>(r.y - 0.5, rb.z - 0.5) * 0.25 * height;
+        let wind = vec2<f32>(0.7, 0.4) * sin(globals.time * 1.7 + sway_ph) * (0.04 + 0.10 * gust) * height / sqrt(scale);
+        let xz = foot + (lean_dir + wind) * up;
+        let y = ground_h(foot.x, -foot.y) - 0.04 + up * height;
+        wpos = vec3<f32>(xz.x, y, -xz.y);
+        let card_n = vec3<f32>(-dir.y, 0.0, -dir.x);
+        // a card seen edge-on is a stick: it dissolves as the eye looks
+        // along it or down on it, and the ground's photo of grass stays
+        let to_eye = normalize(view.world_position.xyz - vec3<f32>(tuft.x, h0, -tuft.y));
+        card_seen = smoothstep(0.12, 0.35, abs(dot(to_eye, card_n))) * (1.0 - smoothstep(0.35, 0.75, to_eye.y));
+        nrm = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.35 * card_n);
+        let cell_k = u32(rnd3(wc, 29u + k * 3u).x * 4.0) % 4u;
+        let flip = rb.x > 0.5;
+        let uu = select(u01, 1.0 - u01, flip);
+        uv_out = vec2<f32>((f32(cell_k % 2u) + uu) * 0.5, (f32(cell_k / 2u) + 1.0 - up) * 0.5);
+    }
+
     // dead / absent: collapse the blade to a point below the ground
-    let present = alive * flat_ok;
+    let present = alive * flat_ok * keep_card;
     if present < 0.5 {
         wpos = vec3<f32>(wpos.x, -1000.0, wpos.z);
     }
@@ -188,7 +230,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.world_position = vec4<f32>(wpos, 1.0);
     out.position = position_world_to_clip(wpos);
     out.world_normal = nrm;
-    out.uv = v.uv;
+    out.uv = uv_out;
     @if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = v.instance_index;
 
@@ -208,25 +250,83 @@ fn vertex(v: Vertex) -> VertexOutput {
         dry = vec3<f32>(0.24, 0.17, 0.08);
     }
     var col = mix(green, dry, clamp(0.35 + 0.75 * patch_n - 0.35 * tone + 0.2 * (fine_n - 0.5), 0.0, 1.0));
+    @if(REAL_GROUND) {
+        // the photo has the colour: a tint per tuft, greener and darker in
+        // the woods' and the macchia's undergrowth, dark at the root
+        let blade_n = rnd3(wc, 23u + k * 5u);
+        var tint = vec3<f32>(1.0);
+        if pal > 0.17 {
+            tint = vec3<f32>(0.72, 0.80, 0.62);
+        }
+        tint = tint * mix(vec3<f32>(1.0), vec3<f32>(0.86, 0.95, 0.80), smoothstep(0.55, 0.9, patch_n));
+        col = tint * (0.78 + 0.4 * blade_n.y);
+        shade = select(0.55, 1.0, t > 0.25);
+    }
     col = col * shade;
     // scorch browns, burnt blackens
     col = mix(col, col * vec3<f32>(0.55, 0.34, 0.16), scorch);
     col = mix(col, vec3<f32>(0.035, 0.03, 0.028), burnt);
-    out.color = vec4<f32>(col, dissolve);
+    out.color = vec4<f32>(col, dissolve * card_seen);
     return out;
 }
 
+// What the fragment writes: with the tufts' photographs and multisampling,
+// also into how many of the pixel's samples.
+@if(REAL_GROUND && MULTISAMPLED)
+struct Lit {
+    @location(0) colour: vec4<f32>,
+    @builtin(sample_mask) mask: u32,
+}
+@else
+struct Lit {
+    @location(0) colour: vec4<f32>,
+}
+
+@if(REAL_GROUND && MULTISAMPLED)
+fn lit(colour: vec4<f32>, mask: u32) -> Lit {
+    return Lit(colour, mask);
+}
+@else
+fn lit(colour: vec4<f32>, mask: u32) -> Lit {
+    return Lit(colour);
+}
+
+// A dissolving blade keeps a share of each pixel. Kept or dropped whole,
+// pixel by pixel, a tuft seen from above (most of them, from a low camera
+// looking at its feet) was a patch of dots. Where the pixel has four
+// samples the blade keeps as many of them as its share, and the noise
+// decides only the odd one: the patch is a veil. Elsewhere, the dots.
+@if(REAL_GROUND && MULTISAMPLED)
+fn kept(share: f32, ign: f32) -> u32 {
+    let n = u32(clamp(floor(share * 4.0 + ign), 0.0, 4.0));
+    return (1u << n) - 1u;
+}
+@else
+fn kept(share: f32, ign: f32) -> u32 {
+    return select(1u, 0u, ign >= share);
+}
+
 @fragment
-fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
+fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Lit {
     // a blade dissolving between two rings (see the vertex stage):
     // interleaved gradient noise, a threshold per pixel even at every scale
     let ign = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))));
-    if ign >= in.color.a {
+    var base = in.color.rgb;
+    @if(REAL_GROUND) {
+        // the tuft's photo, read before any discard (derivatives)
+        let card = textureSample(cards_tex, cards_samp, in.uv);
+        if card.a < 0.5 {
+            discard;
+        }
+        base = base * card.rgb;
+    }
+    let mask = kept(in.color.a, ign);
+    if mask == 0u {
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     // base colour from the vertex stage; the material's base colour is white
-    pbr_input.material.base_color = vec4<f32>(in.color.rgb, 1.0);
+    pbr_input.material.base_color = vec4<f32>(base, 1.0);
     pbr_input.N = normalize(in.world_normal);
     var out = apply_pbr_lighting(pbr_input);
     out = main_pass_post_lighting_processing(pbr_input, out);
@@ -234,5 +334,5 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     let amount = params.lattice.w;
     let luma = dot(out.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
     out = vec4<f32>(max(mix(out.rgb, vec3<f32>(luma) * 0.9, amount), vec3<f32>(0.0)), out.a);
-    return out;
+    return lit(out, mask);
 }

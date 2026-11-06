@@ -4,6 +4,8 @@
 //! - [`StructureMaterial`]: buildings, landmarks, boats, rocks and the units:
 //!   StandardMaterial plus a procedural [`Finish`] and a PBR response per part
 //!   (`surface_alpha`, baked per vertex) (`structure.wgsl`).
+//! - [`masonry::MasonryMaterial`]: the buildings and landmarks in photographed
+//!   plaster, tiles and stone, only when the plants are scans (`models::scans`).
 //! - The vegetation is not a material: it has a pipeline of its own
 //!   (`vegetation/render.rs`).
 //! - Everything else (pins, rings, jets, fields) is a plain `StandardMaterial`.
@@ -15,6 +17,7 @@
 //! not. StandardMaterial's six would leave the terrain no room for its four.
 //! The shared surface functions are in `scenery.wgsl` (`rocca::scenery`).
 
+pub mod masonry;
 mod structure;
 mod terrain;
 
@@ -31,6 +34,6 @@ pub struct MaterialsPlugin;
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         crate::load_wesl!(app, SCENERY_SHADER_HANDLE, "../shaders/scenery.wesl");
-        app.add_plugins((terrain::TerrainPlugin, structure::StructurePlugin));
+        app.add_plugins((terrain::TerrainPlugin, structure::StructurePlugin, masonry::MasonryPlugin));
     }
 }

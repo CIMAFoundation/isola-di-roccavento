@@ -32,7 +32,7 @@ use bevy::core_pipeline::prepass::{Opaque3dPrepass, OpaqueNoLightmap3dBatchSetKe
 use bevy::ecs::system::{lifetimeless::SRes, SystemParamItem};
 use bevy::mesh::{MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, PrimitiveTopology, VertexBufferLayout};
 use bevy::pbr::{
-    LightEntity, MeshPipeline, MeshPipelineKey, PrepassPipeline, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
+    ExtractedDirectionalLight, LightEntity, MeshPipeline, MeshPipelineKey, PrepassPipeline, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
     SetPrepassViewBindGroup, SetPrepassViewEmptyBindGroup, Shadow, ShadowBatchSetKey, ShadowBinKey, ViewKeyCache,
     ViewLightEntities,
 };
@@ -81,18 +81,24 @@ const FULL_SHADOW_M: f32 = 250.0;
 /// Where a scanned plant changes level (2026-11-04,
 /// `tools/vegetation/lod.py`): its `lod0` ([`Tier::Near`], built for
 /// 15 m) up to `NEAR_M`, its `lod1` ([`Tier::Mid`], built for 40 m) up to
-/// `MID_M`, then its `lod2` ([`Tier::Full`], built for 150 m) up to the
-/// LOD distance, its `lod3` (built for 600 m) beyond. Each a little
-/// farther than it was built for: «vorrei dei modelli dettagliati da
-/// vicino».
-/// Beyond `SCAN_FAR_M` (or the LOD distance, if nearer) a scanned plant
-/// draws its `lod3`, beyond `SCAN_LUMP_M` its opaque lumps
-/// ([`Tier::Far`], `meshes::Builder::scan_lumps`).
+/// `MID_M`, then its `lod2` ([`Tier::Full`], built for 150 m) up to
+/// `SCAN_FAR_M` (or the LOD distance, if nearer). Each a little farther
+/// than it was built for: «vorrei dei modelli dettagliati da vicino».
+/// Beyond, the plant is drawn in boxes made of its `lod2`
+/// (`meshes::Builder::scan_voxels`): small ones ([`Tier::Proxy`]) up to
+/// `SCAN_LUMP_M`, fewer and larger ([`Tier::Far`]) past it.
 /// `KIOSK_SCAN_LOD=<near>,<mid>,<far>,<lumps>` (m) for trials.
-const NEAR_M: f32 = 60.0;
-const MID_M: f32 = 250.0;
-const SCAN_FAR_M: f32 = 800.0;
-const SCAN_LUMP_M: f32 = 800.0;
+///
+/// The first three end a little short of where one of the sun's cascades
+/// begins to be read (56, 206 and 760 m with four cascades,
+/// [`cascade_begins`]; they were 60, 250 and 800 m until 2026-11-06): a
+/// plant of a level that reaches past it reads that cascade and must cast
+/// its own mesh in it ([`pick_caster`]), and the ring between was a third
+/// to a half of the triangles a cascade drew.
+const NEAR_M: f32 = 55.0;
+const MID_M: f32 = 205.0;
+const SCAN_FAR_M: f32 = 755.0;
+const SCAN_LUMP_M: f32 = 1500.0;
 
 fn scan_lod() -> [f32; 4] {
     static LOD: std::sync::OnceLock<[f32; 4]> = std::sync::OnceLock::new();
@@ -100,6 +106,50 @@ fn scan_lod() -> [f32; 4] {
         let v: Vec<f32> = std::env::var("KIOSK_SCAN_LOD").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if v.len() == 4 { [v[0], v[1], v[2], v[3]] } else { [NEAR_M, MID_M, SCAN_FAR_M, SCAN_LUMP_M] }
     })
+}
+
+/// The depth from the camera (m) at which cascade `index` of a sun begins
+/// to be read: the far bound of the cascade before, less the overlap
+/// (`bevy_light::build_directional_light_cascades`); 0 for the first.
+fn cascade_begins(config: &bevy::light::CascadeShadowConfig, index: usize) -> f32 {
+    match index.checked_sub(1).and_then(|before| config.bounds.get(before)) {
+        Some(far) => far * (1.0 - config.overlap_proportion),
+        None => 0.0,
+    }
+}
+
+/// How far from itself a plant's shadow may fall (m), for a sun `up` high
+/// (the sine of its elevation): a 30 m plant's on ground that falls away
+/// from the sun two thirds as steeply as the sun's rays, and a crown's
+/// width; never under 250 m (a tree on a cliff's edge shades the valley
+/// floor farther than any slope does). Past the horizon, no end.
+fn shadow_reach_m(up: f32) -> f32 {
+    if up <= 0.01 {
+        return f32::INFINITY;
+    }
+    let cot = (1.0 - up * up).max(0.0).sqrt() / up;
+    (30.0 * cot * 3.0 + 40.0).max(250.0)
+}
+
+/// The pick of a cascade that begins to be read `begins` metres from the
+/// camera ([`cascade_begins`]), for plants drawn by `band`. A node with a
+/// plant that may read the cascade (its farthest point at `begins` or
+/// past it) casts as the main pass draws it, by its nearest point; one
+/// wholly nearer casts the mesh drawn `coarse` metres away, if that is
+/// coarser, and one wholly nearer than `beyond` nothing. A node across
+/// `begins` is split, down to its leaves.
+fn pick_caster(band: impl Fn(f32) -> u8, begins: f32, beyond: f32, coarse: f32) -> impl Fn(f32, f32, bool) -> Pick {
+    move |near, far, leaf| {
+        if far < beyond {
+            return Pick::Skip;
+        }
+        if far < begins {
+            let b = band(near.max(coarse));
+            return if leaf || b == band(far.max(coarse)) { Pick::Whole(b) } else { Pick::Split };
+        }
+        let b = band(near);
+        if leaf || (near >= begins && b == band(far)) { Pick::Whole(b) } else { Pick::Split }
+    }
 }
 
 /// The band of a plant at `d`: 3 near, 4 mid, 0 full (an authored plant
@@ -625,57 +675,87 @@ fn lod_per_tile() -> bool {
     *ON.get_or_init(|| std::env::var("KIOSK_LOD_TILE").is_ok_and(|v| v == "1"))
 }
 
-/// The runs of `group`'s plants and the band of distance each falls in
-/// (`band`, from the distance of a node's nearest and farthest points),
-/// in the order of the instance buffer, neighbours of one band merged
+/// `KIOSK_VEG_STATS=1`: once a second, the triangles the plants send to
+/// each camera's main pass, by band of distance, and to each of the sun's
+/// cascades (millions, a line in the log).
+fn stats_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KIOSK_VEG_STATS").is_ok_and(|v| v == "1"))
+}
+
+/// What [`select`] does with a node of a group's quadtree.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pick {
+    /// All its plants in this band.
+    Whole(u8),
+    /// Its children, each on its own (never asked of a leaf).
+    Split,
+    /// None of its plants.
+    Skip,
+}
+
+/// The pick of a pass that draws each plant by its distance alone (`band`):
+/// a node whole when all of it is in one band, a leaf in the band of its
+/// nearest point.
+fn pick_by_band(band: impl Fn(f32) -> u8) -> impl Fn(f32, f32, bool) -> Pick {
+    move |near, far, leaf| {
+        let b = band(near);
+        if leaf || b == band(far) { Pick::Whole(b) } else { Pick::Split }
+    }
+}
+
+/// The runs of `group`'s plants and the band each is drawn in, in the
+/// order of the instance buffer, neighbours of one band merged
 /// (2026-11-04: the level of detail per node of the group's quadtree, no
-/// longer per 1280 m tile). A node goes whole when all of it is in one
-/// band, else its children do, down to the leaves (40 m), which take the
-/// band of their nearest point. Nodes out of `frustum` are left out.
-/// `limit`: no plant at or past it (the thinning by count).
+/// longer per 1280 m tile). `pick` says what becomes of a node, from the
+/// distances of its nearest and farthest points and whether it is a leaf:
+/// whole in one band, its children in its stead, or nothing. Nodes out of
+/// `sight` are left out. `limit`: no plant at or past it (the thinning by
+/// count).
 fn select(
     group: &super::Group,
     eye: Vec3,
-    frustum: &Mat4,
-    near_plane: bool,
+    sight: &Sight,
     limit: u32,
-    band: &dyn Fn(f32) -> u8,
+    pick: &dyn Fn(f32, f32, bool) -> Pick,
     out: &mut Vec<(u8, u32, u32)>,
 ) {
     fn walk(
         nodes: &[super::Node],
         id: u32,
         eye: Vec3,
-        frustum: &Mat4,
-        near_plane: bool,
+        sight: &Sight,
         limit: u32,
-        band: &dyn Fn(f32) -> u8,
+        pick: &dyn Fn(f32, f32, bool) -> Pick,
         out: &mut Vec<(u8, u32, u32)>,
     ) {
         let n = &nodes[id as usize];
-        if n.start >= limit || !in_view(frustum, n.lo, n.hi, near_plane) {
+        if n.start >= limit || !sight.sees(n.lo, n.hi) {
             return;
         }
         let near = eye.distance(eye.clamp(n.lo, n.hi));
         let far = (eye - n.lo).abs().max((eye - n.hi).abs()).length();
-        let (b0, b1) = (band(near), band(far));
         let leaf = n.kids.iter().all(|&k| k == super::NO_NODE);
-        if b0 == b1 || leaf {
-            let end = n.end.min(limit);
-            match out.last_mut() {
-                Some(last) if last.0 == b0 && last.2 == n.start => last.2 = end,
-                _ => out.push((b0, n.start, end)),
+        match pick(near, far, leaf) {
+            Pick::Skip => {}
+            Pick::Whole(band) => {
+                let end = n.end.min(limit);
+                match out.last_mut() {
+                    Some(last) if last.0 == band && last.2 == n.start => last.2 = end,
+                    _ => out.push((band, n.start, end)),
+                }
             }
-        } else {
-            for &k in &n.kids {
-                if k != super::NO_NODE {
-                    walk(nodes, k, eye, frustum, near_plane, limit, band, out);
+            Pick::Split => {
+                for &k in &n.kids {
+                    if k != super::NO_NODE {
+                        walk(nodes, k, eye, sight, limit, pick, out);
+                    }
                 }
             }
         }
     }
     if !group.nodes.is_empty() {
-        walk(&group.nodes, 0, eye, frustum, near_plane, limit, band, out);
+        walk(&group.nodes, 0, eye, sight, limit, pick, out);
     }
 }
 
@@ -693,24 +773,89 @@ fn clip_from_world(view: &ExtractedView) -> Mat4 {
         .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse())
 }
 
-/// Whether the box `lo..hi` may show in the clip space of `m`. `near`: test
-/// the near plane too (not for the sun's cascades: their depth is unclipped).
-fn in_view(m: &Mat4, lo: Vec3, hi: Vec3, near: bool) -> bool {
-    let mut outside = [true; 5];
-    for i in 0..8 {
-        let c = Vec3::new(
-            if i & 1 == 0 { lo.x } else { hi.x },
-            if i & 2 == 0 { lo.y } else { hi.y },
-            if i & 4 == 0 { lo.z } else { hi.z },
-        );
-        let p = *m * c.extend(1.0);
-        outside[0] &= p.x < -p.w;
-        outside[1] &= p.x > p.w;
-        outside[2] &= p.y < -p.w;
-        outside[3] &= p.y > p.w;
-        outside[4] &= near && p.z > p.w;
+/// What a pass may draw of the world: the boxes that reach into its clip
+/// space, and for a cascade, of those, the ones over what reads it.
+struct Sight {
+    clip: Mat4,
+    /// Test the near plane too (not for the sun's cascades: their depth is
+    /// unclipped).
+    near: bool,
+    /// A cascade's: the outline of what reads it ([`slice_outline`]), as
+    /// half planes of its clip space, `n . (x, y) <= c` inside. A box
+    /// wholly out of one of them shades nothing on the screen.
+    outline: Vec<(Vec2, f32)>,
+}
+
+impl Sight {
+    fn sees(&self, lo: Vec3, hi: Vec3) -> bool {
+        let mut outside = [true; 5];
+        let mut at = [Vec2::ZERO; 8];
+        for (i, at) in at.iter_mut().enumerate() {
+            let c = Vec3::new(
+                if i & 1 == 0 { lo.x } else { hi.x },
+                if i & 2 == 0 { lo.y } else { hi.y },
+                if i & 4 == 0 { lo.z } else { hi.z },
+            );
+            let p = self.clip * c.extend(1.0);
+            outside[0] &= p.x < -p.w;
+            outside[1] &= p.x > p.w;
+            outside[2] &= p.y < -p.w;
+            outside[3] &= p.y > p.w;
+            outside[4] &= self.near && p.z > p.w;
+            *at = Vec2::new(p.x, p.y);
+        }
+        !outside.iter().any(|&o| o) && self.outline.iter().all(|&(n, c)| at.iter().any(|p| n.dot(*p) <= c))
     }
-    !outside.iter().any(|&o| o)
+}
+
+/// The outline, in a cascade's clip space (`cascade`, from the world), of
+/// the part of a camera's view between the depths `from` and `to` (m): what
+/// reads the cascade is on the screen and between where the cascade begins
+/// and its far bound, and a plant shades it only from over it, as the sun
+/// sees them. The cascade's own box is a square round that slice, more
+/// than twice its area. `margin`: so much wider, in clip units (the
+/// shadow's filter).
+fn slice_outline(world_from_view: Mat4, clip_from_view: Mat4, cascade: &Mat4, from: f32, to: f32, margin: f32) -> Vec<(Vec2, f32)> {
+    let p = clip_from_view;
+    // a perspective camera's: half its width and height a metre of depth
+    if p.w_axis.w != 0.0 || p.x_axis.x == 0.0 || p.y_axis.y == 0.0 {
+        return Vec::new();
+    }
+    let (wide, tall) = (1.0 / p.x_axis.x, 1.0 / p.y_axis.y);
+    let mut points = Vec::with_capacity(8);
+    for d in [from, to] {
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let at = *cascade * (world_from_view * Vec4::new(x * d * wide, y * d * tall, -d, 1.0));
+            points.push(Vec2::new(at.x, at.y));
+        }
+    }
+    // the convex hull, counterclockwise (Andrew's chain)
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    let cross = |o: Vec2, a: Vec2, b: Vec2| (a - o).perp_dot(b - o);
+    let mut hull: Vec<Vec2> = Vec::with_capacity(16);
+    for pass in 0..2 {
+        let start = hull.len();
+        let order: Box<dyn Iterator<Item = &Vec2>> = if pass == 0 { Box::new(points.iter()) } else { Box::new(points.iter().rev()) };
+        for &q in order {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(q);
+        }
+        hull.pop();
+    }
+    if hull.len() < 3 {
+        return Vec::new();
+    }
+    (0..hull.len())
+        .filter_map(|i| {
+            let (a, b) = (hull[i], hull[(i + 1) % hull.len()]);
+            let edge = b - a;
+            // counterclockwise: the outside is to the right of an edge
+            let n = Vec2::new(edge.y, -edge.x).try_normalize()?;
+            Some((n, n.dot(a) + margin))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -720,18 +865,20 @@ fn queue_plants(
     mut specialized: ResMut<SpecializedRenderPipelines<PlantPipeline>>,
     cache: Res<PipelineCache>,
     view_keys: Res<ViewKeyCache>,
-    opaque_draws: Res<DrawFunctions<Opaque3d>>,
-    prepass_draws: Res<DrawFunctions<Opaque3dPrepass>>,
-    shadow_draws: Res<DrawFunctions<Shadow>>,
+    (opaque_draws, prepass_draws, shadow_draws): (Res<DrawFunctions<Opaque3d>>, Res<DrawFunctions<Opaque3dPrepass>>, Res<DrawFunctions<Shadow>>),
     mut opaque_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     mut prepass_phases: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
     mut shadow_phases: ResMut<ViewBinnedRenderPhases<Shadow>>,
     views: Query<(Entity, &ExtractedView, Option<&ViewLightEntities>)>,
     light_views: Query<(&ExtractedView, &LightEntity)>,
+    suns: Query<&ExtractedDirectionalLight>,
     mut draws: ResMut<PlantDraws>,
     mut lod: ResMut<PlantLod>,
+    mut frame: Local<u32>,
 ) {
     draws.0.clear();
+    *frame += 1;
+    let stats = stats_on() && *frame % 60 == 0;
     let (Some(scene), Some(pipeline), Some(item)) = (&plants.scene, &slot.0, plants.item) else {
         return;
     };
@@ -762,7 +909,7 @@ fn queue_plants(
         let Some(&view_key) = view_keys.get(&view.retained_view_entity) else { continue };
         opaque.remove(item.1);
         let eye = view.world_from_view.translation();
-        let frustum = clip_from_world(view);
+        let frustum = Sight { clip: clip_from_world(view), near: true, outline: Vec::new() };
         // per tile: the level of detail for this camera (full, far)
         let mut tiers = Vec::with_capacity(scene.tiles.len());
         for (t, tile) in scene.tiles.iter().enumerate() {
@@ -778,8 +925,10 @@ fn queue_plants(
         // beyond the far one, the proxies between
         let mut list = Vec::new();
         let mut runs = Vec::new();
+        // triangles by band (near, mid, full, proxy, far) and draws
+        let mut sent = ([0u64; 5], 0u32);
         for (t, tile) in scene.tiles.iter().enumerate() {
-            if !in_view(&frustum, tile.lo, tile.hi, true) {
+            if !frustum.sees(tile.lo, tile.hi) {
                 continue;
             }
             let (near, far, _) = tiers[t];
@@ -793,12 +942,14 @@ fn queue_plants(
                 if lod_per_tile() {
                     runs.push((whole(0.0), 0, drawn(g)));
                 } else {
-                    select(group, eye, &frustum, true, drawn(g), &band, &mut runs);
+                    select(group, eye, &frustum, drawn(g), &pick_by_band(band), &mut runs);
                 }
                 for &(b, first, end) in &runs {
                     let plant = match b { 3 => tier(Tier::Near).or(tier(Tier::Full)), 4 => tier(Tier::Mid).or(tier(Tier::Full)), 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
                     if let Some(mesh) = plant.filter(|_| end > first) {
                         list.push(Draw { pipeline: pipeline_for(view_key, Pass::Main, mesh), mesh, group: g as u32, remains: false, first, count: end - first });
+                        sent.0[[2, 3, 4, 0, 1][b as usize]] += scene.meshes[mesh as usize].triangles() as u64 * (end - first) as u64;
+                        sent.1 += 1;
                     }
                 }
                 if plants.fire.get(g).is_some_and(|f| !f.2.is_empty()) {
@@ -807,6 +958,10 @@ fn queue_plants(
                     }
                 }
             }
+        }
+        if stats {
+            let m = sent.0.map(|t| t as f32 / 1e6);
+            info!("plants, main pass: {:.2} M triangles in {} draws (near {:.2}, mid {:.2}, full {:.2}, proxy {:.2}, far {:.2})", m.iter().sum::<f32>(), sent.1, m[0], m[1], m[2], m[3], m[4]);
         }
         list.sort_by_key(|d| (d.pipeline.id(), d.mesh));
         if let Some(first) = list.first() {
@@ -858,18 +1013,42 @@ fn queue_plants(
 
         // the sun's cascades of this camera: the plants cast their shadows
         for &light_entity in lights.map(|l| l.lights.as_slice()).unwrap_or_default() {
-            let Ok((light_view, LightEntity::Directional { .. })) = light_views.get(light_entity) else { continue };
+            let Ok((light_view, &LightEntity::Directional { light_entity: sun, cascade_index })) = light_views.get(light_entity) else { continue };
             let Some(shadow) = shadow_phases.get_mut(&light_view.retained_view_entity) else { continue };
             shadow.remove(item.1);
-            let cascade = clip_from_world(light_view);
+            let mut cascade = Sight { clip: clip_from_world(light_view), near: false, outline: Vec::new() };
             // a plant casts the shadow of the mesh it is drawn with: a
             // proxy's closed crown over a full model darkened the model
             // itself (2026-11-04, per node; per tile the camera's own tile
-            // cast with its full models up to its edge, `FULL_SHADOW_M`)
+            // cast with its full models up to its edge, `FULL_SHADOW_M`).
+            //
+            // It must only in the cascades it reads. A fragment reads the
+            // cascade its depth from the camera falls in and, in the
+            // overlap, the next (`shadows::fetch_directional_shadow`): what
+            // is nearer the camera than where a cascade begins never reads
+            // it, and in it only casts on what is farther. There a nearer
+            // plant casts the mesh drawn where a pixel of the screen is as
+            // wide as a texel of the cascade (finer would not show), and one
+            // whose shadow cannot reach that far casts nothing
+            // (2026-11-06: the nearest plants went whole into all four
+            // cascades; with the scanned ones, 300 m from the front, 88
+            // million triangles of shadows a frame for 13 drawn).
+            let config = suns.get(sun).ok().map(|s| &s.cascade_shadow_config);
+            let begins = config.map_or(0.0, |c| cascade_begins(c, cascade_index));
+            // and what reads it is on the screen, this side of its far bound
+            if let Some(ends) = config.and_then(|c| c.bounds.get(cascade_index)) {
+                let filter = 6.0 * 2.0 / light_view.viewport.z.max(1) as f32;
+                cascade.outline = slice_outline(view.world_from_view.to_matrix(), view.clip_from_view, &cascade.clip, begins, *ends, filter);
+            }
+            let beyond = begins - shadow_reach_m(light_view.world_from_view.back().y);
+            let texel = 2.0 / light_view.clip_from_view.x_axis.x.abs().max(1e-9) / light_view.viewport.z.max(1) as f32;
+            let pixel = 2.0 / (view.clip_from_view.y_axis.y.abs().max(1e-3) * view.viewport.w.max(1) as f32);
+            let coarse = texel / pixel;
             let mut list = Vec::new();
             let mut runs = Vec::new();
+            let mut sent = ([0u64; 5], 0u32);
             for (t, tile) in scene.tiles.iter().enumerate() {
-                if !in_view(&cascade, tile.lo, tile.hi, false) {
+                if !cascade.sees(tile.lo, tile.hi) {
                     continue;
                 }
                 let (near, far, d) = tiers[t];
@@ -884,12 +1063,14 @@ fn queue_plants(
                         runs.push((if full { 0 } else if far { 2 } else { 1 }, 0, drawn(g)));
                     } else {
                         // the distance from the camera, the box from the cascade
-                        select(group, eye, &cascade, false, drawn(g), &band, &mut runs);
+                        select(group, eye, &cascade, drawn(g), &pick_caster(band, begins, beyond, coarse), &mut runs);
                     }
                     for &(b, first, end) in &runs {
                         let plant = match b { 3 => tier(Tier::Near).or(tier(Tier::Full)), 4 => tier(Tier::Mid).or(tier(Tier::Full)), 0 => tier(Tier::Full), 2 => tier(Tier::Far), _ => None }.or(tier(Tier::Proxy));
                         if let Some(mesh) = plant.filter(|_| end > first) {
                             list.push(Draw { pipeline: pipeline_for(MeshPipelineKey::empty(), Pass::Shadow, mesh), mesh, group: g as u32, remains: false, first, count: end - first });
+                            sent.0[[2, 3, 4, 0, 1][b as usize]] += scene.meshes[mesh as usize].triangles() as u64 * (end - first) as u64;
+                            sent.1 += 1;
                         }
                     }
                     if full && plants.fire.get(g).is_some_and(|f| !f.2.is_empty()) {
@@ -898,6 +1079,10 @@ fn queue_plants(
                         }
                     }
                 }
+            }
+            if stats {
+                let m = sent.0.map(|t| t as f32 / 1e6);
+                info!("plants, a cascade: {:.2} M triangles in {} draws (near {:.2}, mid {:.2}, full {:.2}, proxy {:.2}, far {:.2})", m.iter().sum::<f32>(), sent.1, m[0], m[1], m[2], m[3], m[4]);
             }
             list.sort_by_key(|d| (d.pipeline.id(), d.mesh));
             if let Some(first) = list.first() {
@@ -980,6 +1165,94 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
 
+    /// The scanned plants' levels end a little short of where the sun's
+    /// cascades begin to be read, at the highest quality.
+    #[test]
+    fn the_scanned_levels_end_where_the_cascades_begin() {
+        let config = crate::quality::Graphics::ALTA.sun_cascades();
+        let begins: Vec<f32> = (0..config.bounds.len()).map(|i| cascade_begins(&config, i)).collect();
+        assert_eq!(begins.len(), 4);
+        assert_eq!(begins[0], 0.0);
+        for (level, begin) in [NEAR_M, MID_M, SCAN_FAR_M].into_iter().zip(&begins[1..]) {
+            assert!(level < *begin && begin - level < 0.05 * begin, "a level ends at {level} m, a cascade begins at {begin} m");
+        }
+        assert!(SCAN_LUMP_M >= SCAN_FAR_M);
+    }
+
+    /// A box between a point of the screen and the sun is never left out of
+    /// the cascade that point reads, and the outline does leave out boxes
+    /// of the cascade's square.
+    #[test]
+    fn a_cascade_keeps_what_shades_the_screen() {
+        // numbers in 0..1, the same every run
+        let mut seed = 0x2545_f491u32;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let clip_from_view = Mat4::perspective_infinite_reverse_rh(0.75, 1.6, 0.1);
+        let (wide, tall) = (1.0 / clip_from_view.x_axis.x, 1.0 / clip_from_view.y_axis.y);
+        let (mut shading, mut left_out, mut tried) = (0, 0, 0);
+        for case in 0..40 {
+            let eye = Vec3::new(4000.0 + 2000.0 * rnd(), 150.0 + 800.0 * rnd(), -4000.0 - 2000.0 * rnd());
+            let target = eye + Vec3::new(rnd() - 0.5, -0.1 - 0.8 * rnd(), rnd() - 0.5) * 1000.0;
+            let world_from_view = Transform::from_translation(eye).looking_at(target, Vec3::Y).to_matrix();
+            let toward_sun = Vec3::new(rnd() - 0.5, 0.3 + rnd(), rnd() - 0.5).normalize();
+            // a cascade: a square of the sun's view round the slice, as Bevy's
+            let (from, to) = [(0.0, 80.0), (56.0, 295.0), (206.0, 1086.0), (760.0, 4000.0)][case % 4];
+            let light_from_world = Mat4::look_to_rh(Vec3::ZERO, -toward_sun, Vec3::Y);
+            let middle = light_from_world.transform_point3(world_from_view.transform_point3(Vec3::new(0.0, 0.0, -0.5 * (from + to))));
+            let half = to * 1.6;
+            let cascade = Mat4::orthographic_rh(middle.x - half, middle.x + half, middle.y - half, middle.y + half, -1.0e5, 1.0e5) * light_from_world;
+            let sight = Sight { clip: cascade, near: false, outline: slice_outline(world_from_view, clip_from_view, &cascade, from, to, 0.0) };
+            assert!(sight.outline.len() >= 3, "case {case}");
+            for _ in 0..500 {
+                // a point of the screen that reads the cascade
+                let d = from + (to - from) * rnd();
+                let point = world_from_view.transform_point3(Vec3::new((2.0 * rnd() - 1.0) * d * wide, (2.0 * rnd() - 1.0) * d * tall, -d));
+                // a box between it and the sun
+                let size = Vec3::new(0.5 + 20.0 * rnd(), 0.5 + 20.0 * rnd(), 0.5 + 20.0 * rnd());
+                let caster = point + toward_sun * (1.0 + 400.0 * rnd());
+                assert!(sight.sees(caster - size, caster + size), "case {case}: a box over a point at depth {d} was left out");
+                shading += 1;
+                // and a box anywhere in the cascade's square
+                let anywhere = light_from_world.inverse().transform_point3(Vec3::new(middle.x + half * (2.0 * rnd() - 1.0), middle.y + half * (2.0 * rnd() - 1.0), middle.z));
+                tried += 1;
+                left_out += usize::from(!sight.sees(anywhere - Vec3::splat(5.0), anywhere + Vec3::splat(5.0)));
+            }
+        }
+        assert_eq!(shading, 20_000);
+        // the slice is well under half of its square
+        assert!(left_out * 2 > tried, "{left_out} of {tried} left out");
+    }
+
+    /// What a cascade's pick does with the nodes round where it begins.
+    #[test]
+    fn a_cascade_casts_what_reads_it_as_drawn() {
+        let band = |d: f32| plant_band(d, 1400.0, 2800.0, true);
+        // a cascade read from 206 m, shadows no longer than 250 m, a texel as a pixel at 900 m
+        let pick = pick_caster(band, 206.0, -44.0, 900.0);
+        // read by its far part: as drawn by its nearest point, whole only past the beginning
+        assert_eq!(pick(210.0, 230.0, false), Pick::Whole(band(210.0)));
+        assert_eq!(pick(150.0, 230.0, false), Pick::Split);
+        assert_eq!(pick(150.0, 230.0, true), Pick::Whole(band(150.0)));
+        // wholly nearer: the coarse mesh
+        assert_eq!(pick(20.0, 60.0, false), Pick::Whole(band(900.0)));
+        assert_ne!(band(900.0), band(20.0));
+        // the last cascade, read from 760 m: what is nearer than 510 m casts nothing
+        let last = pick_caster(band, 760.0, 510.0, 3000.0);
+        assert_eq!(last(100.0, 400.0, false), Pick::Skip);
+        assert_eq!(last(400.0, 600.0, false), Pick::Whole(band(3000.0)));
+        assert_eq!(last(700.0, 900.0, false), Pick::Split);
+        // and the main pass's pick
+        let main = pick_by_band(band);
+        assert_eq!(main(10.0, 40.0, false), Pick::Whole(band(10.0)));
+        assert_eq!(main(10.0, 100.0, false), Pick::Split);
+        assert_eq!(main(10.0, 100.0, true), Pick::Whole(band(10.0)));
+    }
+
     /// Draws and triangles of the plants for a few cameras, the level of
     /// detail chosen per 1280 m tile (until 2026-11-04) and per node of the
     /// groups' quadtrees: printed, run with `--ignored --nocapture`.
@@ -1016,7 +1289,8 @@ mod tests {
                 let (mut dt, mut dn, mut tt, mut tn) = (0usize, 0usize, 0usize, 0usize);
                 let mut runs = Vec::new();
                 for tile in &scene.tiles {
-                    if !in_view(&clip, tile.lo, tile.hi, true) {
+                    let sight = Sight { clip, near: true, outline: Vec::new() };
+                    if !sight.sees(tile.lo, tile.hi) {
                         continue;
                     }
                     let d = eye.distance(eye.clamp(tile.lo, tile.hi));
@@ -1029,7 +1303,7 @@ mod tests {
                         dt += 1;
                         tt += group.count as usize * tris(mesh(if near { 0 } else if far { 2 } else { 1 }));
                         runs.clear();
-                        select(group, eye, &clip, true, group.count, &band, &mut runs);
+                        select(group, eye, &sight, group.count, &pick_by_band(band), &mut runs);
                         dn += runs.len();
                         tn += runs.iter().map(|&(b, s, e)| (e - s) as usize * tris(mesh(b))).sum::<usize>();
                     }

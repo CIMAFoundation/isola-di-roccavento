@@ -46,6 +46,15 @@ pub struct TerrainMaterial {
     #[texture(7)]
     #[sampler(8)]
     pub ground_normal: Handle<Image>,
+    /// The realistic ground's photo layers (2026-11-06,
+    /// `textures::ground_detail_image`), read only with the scanned plants
+    /// (`REAL_GROUND`); a stand-in otherwise. In the browser only in the
+    /// WebGPU build: on WebGL2 every texture of the layout takes one of its
+    /// 16 units, and there are no scanned plants.
+    #[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+    #[texture(9, dimension = "2d_array")]
+    #[sampler(10)]
+    pub ground_detail: Handle<Image>,
 }
 
 impl TerrainMaterial {
@@ -60,6 +69,7 @@ impl TerrainMaterial {
         grass_map: Handle<Image>,
         ground_colour: Handle<Image>,
         ground_normal: Handle<Image>,
+        #[cfg_attr(all(target_arch = "wasm32", not(feature = "webgpu")), allow(unused_variables))] ground_detail: Handle<Image>,
     ) -> Self {
         TerrainMaterial {
             uniform: TerrainUniform { mask_rect, ground_rect, ..Default::default() },
@@ -67,6 +77,8 @@ impl TerrainMaterial {
             grass_map,
             ground_colour,
             ground_normal,
+            #[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+            ground_detail,
         }
     }
 
@@ -101,6 +113,22 @@ impl TerrainMaterial {
 impl Material for TerrainMaterial {
     fn fragment_shader() -> ShaderRef {
         SHADER_HANDLE.into()
+    }
+
+    /// The realistic ground (photo layers under the scanned plants) is a
+    /// shader def, so the painted ground compiles to the shader it always was.
+    fn specialize(
+        _: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        if !crate::quality::WEBGL2 && crate::textures::ground_detail().is_some() {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("REAL_GROUND".into());
+            }
+        }
+        Ok(())
     }
 }
 

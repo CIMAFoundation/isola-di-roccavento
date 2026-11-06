@@ -20,7 +20,7 @@ pub struct Atlas {
 }
 
 /// RGBA8 sRGB pixels and size of a PNG.
-fn decode(png: &[u8]) -> (Vec<u8>, u32, u32) {
+pub(super) fn decode(png: &[u8]) -> (Vec<u8>, u32, u32) {
     use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
     use bevy::asset::RenderAssetUsages;
     let mut image = Image::from_buffer(png, ImageType::Extension("png"), CompressedImageFormats::NONE, true, ImageSampler::Default, RenderAssetUsages::RENDER_WORLD)

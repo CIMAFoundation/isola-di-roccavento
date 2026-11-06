@@ -42,7 +42,8 @@ pub enum Tier {
     RemainsFar = 4,
     /// A scanned plant's nearest level (`models::scans`, `lod0`), where it
     /// has one; then [`Tier::Mid`] (`lod1`), [`Tier::Full`] (`lod2`), and
-    /// its `lod3` in place of the proxies ([`Tier::Proxy`], [`Tier::Far`]).
+    /// boxes made of its `lod2` in place of the proxies ([`Tier::Proxy`]
+    /// small ones, [`Tier::Far`] fewer and larger: `Builder::scan_voxels`).
     Near = 5,
     Mid = 6,
 }
@@ -129,9 +130,24 @@ pub fn variety_mesh(name: &'static str, tier: Tier) -> PlantMesh {
         let scans = crate::models::scans()?;
         levels.iter().find_map(|level| scans.level(plant, level))
     });
+    let level = |l: &str| crate::models::scan_of(name).and_then(|p| crate::models::scans()?.level(p, l));
+    // a scanned plant past its `lod2`: in boxes, fine then coarse, made of
+    // that level; `KIOSK_SCAN_FAR=grumi`: the cards and the lumps it was
+    // before, to compare
+    if let (Tier::Proxy | Tier::Far, false) = (tier, far_lumps()) {
+        if let (Some((vertices, indices, leaf_rgb)), Some(cards)) = (level("lod2"), cards()) {
+            let grain = if tier == Tier::Proxy { VOXELS_FINE } else { VOXELS_COARSE };
+            b.scan_voxels(&vertices, &indices, leaf_tint(leaf_rgb, super::canopy::crown_colour(name)), scan_stretch(name), nominal_height_m(name), grain, cards);
+            if !b.indices.is_empty() {
+                return b.finish(false, false);
+            }
+            b = Builder::default();
+        }
+    }
     if tier == Tier::Far {
-        if let Some((vertices, indices, _)) = crate::models::scan_of(name).and_then(|p| crate::models::scans()?.level(p, "lod3")) {
-            b.scan_lumps(&vertices, &indices, super::canopy::crown_colour(name), scan_stretch(name));
+        if let Some((vertices, indices, _)) = level("lod3") {
+            let colour = scan_leaf_colour(name).unwrap_or_else(|| super::canopy::crown_colour(name));
+            b.scan_lumps(&vertices, &indices, colour, scan_stretch(name));
             return b.finish(false, false);
         }
     }
@@ -168,6 +184,100 @@ pub fn crown_radius(name: &str) -> f32 {
 pub fn crown_tone(name: &str) -> f32 {
     let p = proxy_of(name);
     (0.5 * (p.shade_low + p.shade_high)).powf(2.2)
+}
+
+/// What a scanned plant's leaves carry over their cards, halved (the
+/// colour travels halved and is doubled): it brings their mean colour
+/// (`leaf_rgb`) to the variety's crown (`target`), as far as doubling them
+/// goes. The scans are darker than the palette: a pine's needles reach a
+/// third of its green and stay a dark olive.
+fn leaf_tint(leaf_rgb: [f32; 3], target: [f32; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|k| (0.5 * target[k] / leaf_rgb[k].max(1e-3)).clamp(0.05, 1.0))
+}
+
+/// The colour a scanned plant's leaves are drawn in, their mean (of its
+/// `lod2`, the level it has up to where its far model begins); `None` for
+/// an authored plant. What stands for the plant far away is in this
+/// colour, not in the crown's own: the canopy painted on the ground
+/// (`canopy`) and its lumps ([`Builder::scan_lumps`]). In the palette's
+/// green (until 2026-11-06) the far woods were another forest, bright
+/// behind the dark near one (user: «vorrei che i modelli a grande distanza
+/// fossero sempre quelli derivati da scansioni, non i vecchi modelli»).
+pub fn scan_leaf_colour(name: &'static str) -> Option<[f32; 3]> {
+    let plant = crate::models::scan_of(name)?;
+    let scans = crate::models::scans()?;
+    let leaves = scans.leaf_rgb(plant, "lod2").or_else(|| scans.leaf_rgb(plant, "lod3"))?;
+    let tint = leaf_tint(leaves, super::canopy::crown_colour(name));
+    Some([0, 1, 2].map(|k| 2.0 * tint[k] * leaves[k]))
+}
+
+/// `KIOSK_SCAN_FAR=grumi`: a scanned plant far away as the lumps it was
+/// until 2026-11-06 ([`Builder::scan_lumps`]), not in boxes
+/// ([`Builder::scan_voxels`]): to compare the two.
+fn far_lumps() -> bool {
+    static LUMPS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LUMPS.get_or_init(|| std::env::var("KIOSK_SCAN_FAR").is_ok_and(|v| v == "grumi"))
+}
+
+/// About how tall the scatter plants a variety (m, `scatter`): a shrub, a
+/// broadleaf, a conifer. The models are a unit tall.
+fn nominal_height_m(name: &str) -> f32 {
+    match name.rsplit_once('_').map_or(name, |(species, _)| species) {
+        "pine" | "aleppo" | "cypress" => 17.0,
+        "holm" | "cork" | "carob" | "olive" => 10.0,
+        _ => 3.5,
+    }
+}
+
+/// The scans' cards (`models::Scans::atlas_png`) at a quarter of their
+/// side or less, to read what a card shows where a mesh is made of it
+/// ([`Builder::scan_voxels`]): linear colour and how much of the texel is
+/// leaf.
+pub struct Cards {
+    width: usize,
+    height: usize,
+    /// Linear red, green, blue of the leaf in the texel, and its share.
+    texels: Vec<[f32; 4]>,
+}
+
+impl Cards {
+    fn at(&self, uv: [f32; 2]) -> [f32; 4] {
+        let x = ((uv[0].clamp(0.0, 1.0) * self.width as f32) as usize).min(self.width - 1);
+        let y = ((uv[1].clamp(0.0, 1.0) * self.height as f32) as usize).min(self.height - 1);
+        self.texels[y * self.width + x]
+    }
+}
+
+fn cards() -> Option<&'static Cards> {
+    static CARDS: std::sync::OnceLock<Option<Cards>> = std::sync::OnceLock::new();
+    CARDS
+        .get_or_init(|| {
+            let scans = crate::models::scans()?;
+            let (data, w, h) = super::atlas::decode(&scans.atlas_png);
+            let (w, h) = (w as usize, h as usize);
+            let k = w.max(h).div_ceil(1024).max(1);
+            let (width, height) = (w / k, h / k);
+            let lin: Vec<f32> = (0..256).map(|i| Color::srgb_u8(i as u8, 0, 0).to_linear().red).collect();
+            let mut texels = vec![[0.0f32; 4]; width * height];
+            for (i, t) in texels.iter_mut().enumerate() {
+                let (x0, y0) = (i % width * k, i / width * k);
+                let mut sum = [0.0f32; 4];
+                for y in y0..y0 + k {
+                    for x in x0..x0 + k {
+                        let p = &data[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                        let a = p[3] as f32 / 255.0;
+                        for c in 0..3 {
+                            sum[c] += lin[p[c] as usize] * a;
+                        }
+                        sum[3] += a;
+                    }
+                }
+                let a = sum[3].max(1e-6);
+                *t = [sum[0] / a, sum[1] / a, sum[2] / a, sum[3] / (k * k) as f32];
+            }
+            Some(Cards { width, height, texels })
+        })
+        .as_ref()
 }
 
 /// How much wider a scanned plant is drawn than it was scanned
@@ -219,6 +329,30 @@ pub fn canopy_tile() -> [f32; 2] {
 
 /// The most lumps a scanned plant has far away ([`Builder::scan_lumps`]).
 const MAX_LUMPS: usize = 6;
+
+/// How fine a scanned plant in boxes is ([`Builder::scan_voxels`]): the
+/// cells up its height, the smallest cell at the size it is planted (m),
+/// and the most faces it may have.
+#[derive(Clone, Copy)]
+struct Grain {
+    layers: f32,
+    least_m: f32,
+    faces: usize,
+}
+
+/// From where the boxes begin (755 m off a pixel is 0.6 m: a pine's cell
+/// about three) to 1.5 km, and beyond.
+const VOXELS_FINE: Grain = Grain { layers: 10.0, least_m: 0.7, faces: 180 };
+const VOXELS_COARSE: Grain = Grain { layers: 4.0, least_m: 2.0, faces: 44 };
+
+/// The share of a cell's face in wood for a cell of wood to count, and how
+/// much of what is behind it a face's worth of leaves hides (as one minus
+/// the exponential of so many times the leaves in the cell). Tuned on a
+/// pine wood from 800 m against the plants' `lod2` drawn that far: at 0.9
+/// the crowns were solid and the wood darker by a third; at 0.12 loose
+/// cubes.
+const VOXEL_FILL: f32 = 0.2;
+const VOXEL_COVER: f32 = 0.2;
 
 /// How much of its cards' reach a lump of [`lobed_mesh`] fills: the cards'
 /// leaves do not reach their corners, and a lump as wide as their box read
@@ -314,7 +448,7 @@ impl Builder {
     /// the cards' axes by it, normals by its inverse.
     fn scan(&mut self, vertices: &[crate::models::ScanVertex], indices: &[u32], leaf_rgb: [f32; 3], target: [f32; 3], stretch: f32) {
         let s = Vec3::new(stretch, 1.0, stretch);
-        let leaf = [0, 1, 2].map(|k| (0.5 * target[k] / leaf_rgb[k].max(1e-3)).clamp(0.05, 1.0));
+        let leaf = leaf_tint(leaf_rgb, target);
         let (lo, hi) = vertices.iter().filter(|v| v.leaf).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
             (lo.min(Vec3::from(v.position) * s), hi.max(Vec3::from(v.position) * s))
         });
@@ -566,6 +700,162 @@ impl Builder {
         self.indices.extend(piece.indices.iter().map(|i| start + i));
     }
 
+    /// A scanned plant from far away, in boxes (2026-11-06, the user: «non
+    /// mi piacciono i blob da lontano. non si potrebbero usare delle
+    /// approssimazioni tipo modelli voxelizzati?»). The plant's `lod2` is
+    /// laid in a grid of cells (`grain`), and a cell with enough leaf in
+    /// it is a cube of the crown, drawn by the faces it shows: those with
+    /// no cube beyond them, and not the one toward the ground, never seen
+    /// from so far. A cell of wood alone (the trunk) is a post as thick as
+    /// the wood in it. Each in the colour its cards show there (`cards`,
+    /// under the leaves' tint `tint`, halved as it travels) or its bark's.
+    /// Opaque and single-sided, as the lumps were: no cut-out, the far
+    /// forest's cost. The plant keeps its outline, its trunk and the
+    /// colours of its scan; the lumps were one colour and a cushion for
+    /// each crown part.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_voxels(&mut self, vertices: &[crate::models::ScanVertex], indices: &[u32], tint: [f32; 3], stretch: f32, height_m: f32, grain: Grain, cards: &Cards) {
+        let s = Vec3::new(stretch, 1.0, stretch);
+        let at = |i: u32| Vec3::from(vertices[i as usize].position) * s;
+        let (lo, hi) = vertices.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
+            let p = Vec3::from(v.position) * s;
+            (lo.min(p), hi.max(p))
+        });
+        if vertices.is_empty() || hi.y - lo.y < 1e-3 {
+            return;
+        }
+        #[derive(Clone, Copy)]
+        struct Cell {
+            leaf: f32,
+            wood: f32,
+            colour: Vec3,
+            /// The wood's reach in the cell.
+            lo: Vec3,
+            hi: Vec3,
+        }
+        let empty = Cell { leaf: 0.0, wood: 0.0, colour: Vec3::ZERO, lo: Vec3::splat(f32::MAX), hi: Vec3::splat(f32::MIN) };
+        const SIDES: [(Vec3, Vec3, Vec3); 6] = [
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+            (Vec3::Y, Vec3::Z, Vec3::X),
+            (Vec3::Z, Vec3::X, Vec3::Y),
+            (Vec3::NEG_Z, Vec3::Y, Vec3::X),
+            (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        ];
+        // coarser until the faces are few enough
+        let mut edge = ((hi.y - lo.y) / grain.layers).max(grain.least_m / height_m);
+        loop {
+            let n = ((hi - lo) / edge).ceil().max(Vec3::ONE);
+            let (nx, ny, nz) = (n.x as usize, n.y as usize, n.z as usize);
+            let index = |x: usize, y: usize, z: usize| (y * nz + z) * nx + x;
+            let mut cells = vec![empty; nx * ny * nz];
+            for t in indices.chunks_exact(3) {
+                let (a, b, c) = (at(t[0]), at(t[1]), at(t[2]));
+                let area = 0.5 * (b - a).cross(c - a).length();
+                let v: [&crate::models::ScanVertex; 3] = [0, 1, 2].map(|k| &vertices[t[k] as usize]);
+                let leaf = v.iter().all(|v| v.leaf);
+                // points spread over the triangle, a dozen to a cell's face
+                let count = ((area / (edge * edge) * 12.0).ceil() as usize).clamp(1, 400);
+                for k in 0..count {
+                    let (mut u, mut w) = ((k as f32 + 0.5) * 0.754_877_7 % 1.0, (k as f32 + 0.5) * 0.569_840_3 % 1.0);
+                    if u + w > 1.0 {
+                        (u, w) = (1.0 - u, 1.0 - w);
+                    }
+                    let p = a + (b - a) * u + (c - a) * w;
+                    let g = ((p - lo) / edge).floor().max(Vec3::ZERO);
+                    let cell = &mut cells[index((g.x as usize).min(nx - 1), (g.y as usize).min(ny - 1), (g.z as usize).min(nz - 1))];
+                    let share = area / count as f32;
+                    let mix = |f: fn(&crate::models::ScanVertex) -> Vec3| f(v[0]) * (1.0 - u - w) + f(v[1]) * u + f(v[2]) * w;
+                    if leaf {
+                        let uv = mix(|v| Vec3::new(v.uv[0], v.uv[1], 0.0));
+                        let texel = cards.at([uv.x, uv.y]);
+                        let shown = share * texel[3];
+                        cell.leaf += shown;
+                        cell.colour += Vec3::new(texel[0] * 2.0 * tint[0], texel[1] * 2.0 * tint[1], texel[2] * 2.0 * tint[2]) * shown;
+                    } else {
+                        cell.wood += share;
+                        cell.colour += mix(|v| Vec3::from(v.color)) * share;
+                        (cell.lo, cell.hi) = (cell.lo.min(p), cell.hi.max(p));
+                    }
+                }
+            }
+            // A cell of wood counts when it holds enough of it. A cell of
+            // leaves is a cube as often as its leaves hide what is behind
+            // them (so much leaf to a face of the cell, seen from any side),
+            // by a number of its own: all of them cubes, the crown was
+            // solid, where the scan lets the ground through.
+            let chance = |i: usize| ((i as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0;
+            let hides = |c: &Cell| 1.0 - (-VOXEL_COVER * c.leaf / (edge * edge)).exp();
+            let leaves: Vec<bool> = cells.iter().map(|c| c.leaf >= c.wood).collect();
+            let mut kept: Vec<bool> = cells.iter().enumerate().map(|(i, c)| if leaves[i] { chance(i) < hides(c) } else { c.wood / (edge * edge) >= VOXEL_FILL }).collect();
+            // a plant is never nothing: its fullest cell, if none came out
+            if !kept.contains(&true) {
+                let fullest = (0..cells.len()).max_by(|&a, &b| (cells[a].leaf + cells[a].wood).total_cmp(&(cells[b].leaf + cells[b].wood)));
+                match fullest.filter(|&i| cells[i].leaf + cells[i].wood > 0.0) {
+                    Some(i) => kept[i] = true,
+                    None => return,
+                }
+            }
+            let leafy = |i: usize| kept[i] && leaves[i];
+            // the faces: (cell, side)
+            let mut faces = Vec::new();
+            for y in 0..ny {
+                for z in 0..nz {
+                    for x in 0..nx {
+                        let i = index(x, y, z);
+                        if !kept[i] {
+                            continue;
+                        }
+                        for (side, (n, _, _)) in SIDES.iter().enumerate().take(5) {
+                            let (bx, by, bz) = (x as isize + n.x as isize, y as isize + n.y as isize, z as isize + n.z as isize);
+                            let inside = bx >= 0 && by >= 0 && bz >= 0 && (bx as usize) < nx && (by as usize) < ny && (bz as usize) < nz;
+                            // a cube of the crown hides the face it touches; a post hides none and shows all of its own
+                            if leafy(i) && inside && leafy(index(bx as usize, by as usize, bz as usize)) {
+                                continue;
+                            }
+                            faces.push((i, side));
+                        }
+                    }
+                }
+            }
+            if faces.len() > grain.faces {
+                edge *= 1.15;
+                continue;
+            }
+            // a cell's box, no farther than the plant reaches
+            let corners = |i: usize| {
+                let a = lo + Vec3::new((i % nx) as f32, (i / (nx * nz)) as f32, (i / nx % nz) as f32) * edge;
+                (a, (a + edge).min(hi))
+            };
+            let (crown_lo, crown_hi) = (0..cells.len()).filter(|&i| leafy(i)).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), i| (a.min(corners(i).0), b.max(corners(i).1)));
+            let grey = crate::models::atlas().grey;
+            for (i, side) in faces {
+                let c = &cells[i];
+                let colour = (c.colour / (c.leaf + c.wood)).clamp(Vec3::ZERO, Vec3::ONE);
+                // the cell; or the wood in it, as tall as the cell and no
+                // thinner than a sixth of it
+                let (a, b) = corners(i);
+                let (centre, half) = if leafy(i) {
+                    ((a + b) * 0.5, (b - a) * 0.5)
+                } else {
+                    let (mid, reach) = ((c.lo + c.hi) * 0.5, ((c.hi - c.lo) * 0.5).max(Vec3::splat(edge / 12.0)));
+                    (Vec3::new(mid.x, (a.y + b.y) * 0.5, mid.z), Vec3::new(reach.x, (b.y - a.y) * 0.5, reach.z))
+                };
+                let (n, u, w) = SIDES[side];
+                let start = self.positions.len() as u32;
+                // its sides lit a little from above too, as a crown's leaves are
+                let normal = (n + Vec3::Y * 0.25).normalize();
+                for (su, sw) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    let p = centre + (n + u * su + w * sw) * half;
+                    let occlusion = if leafy(i) { crown_occlusion(p, crown_lo, crown_hi) } else { 0.8 };
+                    self.vertex(p, Some(normal), if leafy(i) { Kind::Leaf } else { Kind::Wood }, grey, [colour.x, colour.y, colour.z, occlusion]);
+                }
+                self.indices.extend([start, start + 1, start + 2, start, start + 2, start + 3]);
+            }
+            return;
+        }
+    }
+
     /// A scanned plant from far away (2026-11-04): each cluster of its
     /// `lod3` (three crossed cards about one centre) a closed lump, opaque
     /// and single-sided, as wide as its cards reach (`LOBE_FILL`), in the
@@ -807,10 +1097,21 @@ mod tests {
     #[test]
     fn proxies_are_cheap_and_face_out() {
         for name in every_variety() {
-            // a scanned plant's: its `lod3` cards, then opaque lumps
+            // a scanned plant's: boxes, fine and coarse (with `KIOSK_SCANS=1`)
             if crate::models::scan_of(name).is_some() {
-                let lumps = variety_mesh(name, Tier::Far);
-                assert!(!lumps.double_sided && !lumps.cutout && lumps.triangles() >= 20, "{name}: lumps");
+                let model = variety_mesh(name, Tier::Full).triangles();
+                for (tier, grain) in [(Tier::Proxy, VOXELS_FINE), (Tier::Far, VOXELS_COARSE)] {
+                    let m = variety_mesh(name, tier);
+                    assert!(!m.double_sided && !m.cutout, "{name} {tier:?}: opaque and single-sided");
+                    assert!(m.triangles() >= 2 && m.triangles() <= grain.faces * 2, "{name} {tier:?}: {} triangles", m.triangles());
+                    assert!(tier == Tier::Proxy || m.triangles() <= model.max(60), "{name}: {} far triangles for a model of {model}", m.triangles());
+                    // every face winds the way its normal points, outward
+                    for t in m.indices.chunks_exact(3) {
+                        let [a, b, c] = [0, 1, 2].map(|k| m.position(t[k] as usize));
+                        let face = (b - a).cross(c - a);
+                        assert!(face.length() > 0.0 && face.dot(m.normal(t[0] as usize)) > 0.0, "{name} {tier:?}: a face winds against its normal");
+                    }
+                }
                 continue;
             }
             let full = variety_mesh(name, Tier::Full).triangles();

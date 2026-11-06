@@ -39,6 +39,7 @@ use scenario::{Building, Pos, Scenario};
 
 use crate::sim::Sim;
 use crate::materials::{self, Finish, StructureMaterial};
+use crate::materials::masonry::{self, Masonry, MasonryMaterial, Part};
 
 #[path = "town_kit.rs"]
 mod town_kit;
@@ -120,8 +121,13 @@ pub fn spawn(
     sim: Res<Sim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StructureMaterial>>,
+    mut masonry_materials: ResMut<Assets<MasonryMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let scn = &sim.scn;
+    // With the scanned plants, photographed plaster, tiles and stone
+    // (`materials::masonry`, 2026-11-06); without, exactly as before.
+    let real = masonry::textures(&mut images);
 
     // Storeys, where the population bake knows them.
     let mut levels: HashMap<i64, u8> = HashMap::new();
@@ -134,6 +140,14 @@ pub fn spawn(
         residents.entry(h.building).or_default().push(h.id as u32);
     }
 
+    let base_material = StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.75,
+        metallic: 0.0,
+        reflectance: 0.35,
+        ..default()
+    };
+    let masonry_material = real.as_ref().map(|t| masonry_materials.add(masonry::material(base_material, t, Masonry::Town)));
     let material = materials.add(materials::structure(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.75,
@@ -167,7 +181,7 @@ pub fn spawn(
         if bucket.is_empty() {
             continue;
         }
-        let mut builder = Builder::default();
+        let mut builder = Builder { real: real.is_some(), ..default() };
         let mut structures = Vec::new();
 
         for b in bucket {
@@ -201,9 +215,10 @@ pub fn spawn(
         tris += builder.indices.len() / 3;
         let base = builder.colors.clone();
         let mesh = meshes.add(builder.finish());
-        commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())),
-            crate::terrain_mesh::PauseSolid,
-        ));
+        match &masonry_material {
+            Some(m) => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(m.clone())), crate::terrain_mesh::PauseSolid)),
+            None => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())), crate::terrain_mesh::PauseSolid)),
+        };
         chunks.push(Chunk {
             mesh,
             structures,
@@ -287,6 +302,31 @@ mod palette {
     pub const INDUSTRIAL_WALL: [f32; 3] = [0.74, 0.74, 0.72];
     pub const INDUSTRIAL_ROOF: [f32; 3] = [0.52, 0.55, 0.57];
     pub const CIVIC_WALL: [f32; 3] = [0.90, 0.89, 0.85];
+
+    /// With the photographed masonry (`materials::masonry`): the lime washes
+    /// of Liguria as photographs show them, sun-faded (ochre, Genoa red,
+    /// salmon, cream, straw, a grey-green), and the clay of the tiles. The
+    /// photographs add their own shade, so these are a little lighter.
+    pub mod real {
+        pub const WALLS: [[f32; 3]; 8] = [
+            [0.88, 0.72, 0.50], // ochre
+            [0.86, 0.60, 0.48], // salmon
+            [0.92, 0.88, 0.80], // cream
+            [0.80, 0.52, 0.44], // faded Genoa red
+            [0.92, 0.82, 0.60], // straw
+            [0.78, 0.78, 0.70], // grey-green
+            [0.90, 0.78, 0.66], // apricot
+            [0.84, 0.66, 0.56], // rose
+        ];
+        pub const ROOFS: [[f32; 3]; 5] = [
+            [0.70, 0.36, 0.24],
+            [0.76, 0.42, 0.28],
+            [0.62, 0.32, 0.24],
+            [0.74, 0.48, 0.34],
+            [0.58, 0.38, 0.30],
+        ];
+        pub const CIVIC_WALL: [f32; 3] = [0.88, 0.85, 0.78];
+    }
 }
 
 /// Footprint magnification (see `emit_building`).
@@ -317,7 +357,11 @@ fn emit_building(
     if area < 6.0 {
         return None;
     }
-    town_kit::garden(scn, b, out);
+    // The kit's toy trees beside the houses would be cartoons among the
+    // scanned plants: not drawn with them.
+    if !out.real {
+        town_kit::garden(scn, b, out);
+    }
 
     // OSM rings repeat the first point as the last; drop it, and drop any
     // vertex that duplicates its predecessor, or the wall quads degenerate.
@@ -423,6 +467,23 @@ fn emit_building(
                 _ => palette::ROOFS[(hash01(b.id as u64, 0x3D) * 6.0) as usize % 6],
             },
         );
+    // With the photographed masonry, the palette of real Ligurian plaster
+    // (a cartoon's mint and sky blue go) and of clay tiles only.
+    let (wall, roof) = if out.real {
+        (
+            match kind {
+                Kind::Industrial => palette::INDUSTRIAL_WALL,
+                Kind::Civic => palette::real::CIVIC_WALL,
+                _ => palette::real::WALLS[(hash01(b.id as u64, 0x7C) * 8.0) as usize % 8],
+            },
+            match kind {
+                Kind::Industrial | Kind::Shed => palette::INDUSTRIAL_ROOF,
+                _ => palette::real::ROOFS[(hash01(b.id as u64, 0x3D) * 5.0) as usize % 5],
+            },
+        )
+    } else {
+        (wall, roof)
+    };
     let (wall, roof) = (linear(wall), linear(roof));
     // A plinth: the darker, damper base course every masonry building on this
     // coast has. It is also what stops a wall reading as an untextured plane.
@@ -433,13 +494,15 @@ fn emit_building(
     for i in 0..m {
         let a = ring[i];
         let c = ring[(i + 1) % m];
+        out.part = Part::Stone as u8;
         out.quad(
             [a.x, base, -a.y],
             [c.x, base, -c.y],
             [c.x, plinth_top, -c.y],
             [a.x, plinth_top, -a.y],
-            plinth,
+            if out.real { [plinth[0] * 1.1, plinth[1] * 1.1, plinth[2] * 1.1] } else { plinth },
         );
+        out.part = Part::Plaster as u8;
         out.quad(
             [a.x, plinth_top, -a.y],
             [c.x, plinth_top, -c.y],
@@ -461,7 +524,9 @@ fn emit_building(
         for i in 0..m {
             let a = ring[i];
             let c = ring[(i + 1) % m];
+            out.part = GLASS;
             emit_windows(a, c, plinth_top, eave, rows, out);
+            out.part = Part::Plaster as u8;
         }
     }
     let window_end = out.positions.len() as u32;
@@ -483,6 +548,7 @@ fn emit_building(
     // Both hang on the footprint edge that faces most nearly south (weighted by
     // its length), not on the bounding box: on a rotated or L-shaped footprint
     // the box edge floats in the air beside the wall.
+    out.part = 0;
     if b.kind.as_deref() == Some("shop") {
         let mut best: Option<(f32, Pos, Pos, (f32, f32))> = None;
         for i in 0..m {
@@ -544,6 +610,7 @@ fn emit_building(
     let eaves: Vec<Pos> = offset_ring(&ring, centroid, EAVE_M);
     // Underside of the overhang, in shadow.
     let soffit = [roof[0] * 0.35, roof[1] * 0.35, roof[2] * 0.35];
+    out.part = Part::Tiles as u8;
     for i in 0..m {
         let a = ring[i];
         let c = ring[(i + 1) % m];
@@ -560,6 +627,7 @@ fn emit_building(
 
     if kind.flat_roof() {
         // Flat roof with a low parapet: an industrial shed silhouette.
+        out.part = Part::Plaster as u8;
         let top = eave + 0.5;
         for i in 0..m {
             let a = eaves[i];
@@ -612,9 +680,11 @@ fn emit_building(
                 Pos { x: c.x + k * 0.5, y: c.y + k * 0.5 },
                 Pos { x: c.x - k * 0.5, y: c.y + k * 0.5 },
             ];
+            out.part = Part::Plaster as u8;
             out.prism(&sq, ridge - 0.8, ridge + k * 2.2, [0.78, 0.70, 0.62], [0.35, 0.30, 0.28]);
         }
     }
+    out.part = 0;
     Some((window_start, window_end))
 }
 
@@ -695,6 +765,27 @@ fn emit_window_dressing(a: Pos, c: Pos, plinth_top: f32, eave: f32, rows: usize,
                     out.quad_on(off(at(k0, y_lo), 0.07), off(at(k1, y_lo), 0.07), off(at(k1, y_hi), 0.07), off(at(k0, y_hi), 0.07), col, SHUTTER);
                 }
             }
+            if out.real {
+                // A painted frame around the glass and a cross of glazing
+                // bars: what makes a dark rectangle a window from near.
+                let part = std::mem::replace(&mut out.part, Part::Frame as u8);
+                let frame = linear(palette::SILL);
+                let bar = 0.09;
+                let (fy0, fy1) = (y_lo - 0.02, y_hi + 0.06);
+                let (k0, k1) = (-1.0 - 0.12 / half_w, 1.0 + 0.12 / half_w);
+                // jambs and head, a little proud of the wall
+                for (ka, kb) in [(k0, -1.0), (1.0, k1)] {
+                    out.quad(off(at(ka, fy0), 0.06), off(at(kb, fy0), 0.06), off(at(kb, fy1), 0.06), off(at(ka, fy1), 0.06), frame);
+                }
+                out.quad(off(at(-1.0, y_hi), 0.06), off(at(1.0, y_hi), 0.06), off(at(1.0, fy1), 0.06), off(at(-1.0, fy1), 0.06), frame);
+                // glazing bars over the glass (which is 4 cm proud)
+                let dark = [frame[0] * 0.8, frame[1] * 0.8, frame[2] * 0.8];
+                let bw = bar / half_w;
+                out.quad(off(at(-bw * 0.5, y_lo), 0.07), off(at(bw * 0.5, y_lo), 0.07), off(at(bw * 0.5, y_hi), 0.07), off(at(-bw * 0.5, y_hi), 0.07), dark);
+                let ym = y_lo + (y_hi - y_lo) * 0.62;
+                out.quad(off(at(-1.0, ym - bar * 0.5), 0.07), off(at(1.0, ym - bar * 0.5), 0.07), off(at(1.0, ym + bar * 0.5), 0.07), off(at(-1.0, ym + bar * 0.5), 0.07), dark);
+                out.part = part;
+            }
             // sill: a top and a front face, proud of the wall
             let (s0, s1) = (at(-1.15, y_lo - 0.02), at(1.15, y_lo - 0.02));
             out.quad(off(s0, 0.0), off(s0, 0.22), off(s1, 0.22), off(s1, 0.0), sill);
@@ -730,6 +821,9 @@ fn linear(c: [f32; 3]) -> [f32; 3] {
 
 /// Vertex surface of the shutters (`materials::surface_alpha`): louvres.
 const SHUTTER: u8 = 11;
+
+/// Vertex surface of window glass, with the photographed masonry.
+const GLASS: u8 = 4;
 
 fn signed_area(ring: &[Pos]) -> f32 {
     let n = ring.len();
@@ -775,6 +869,12 @@ struct Builder {
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
+    /// The photographed masonry is on (`materials::masonry`): the vertices
+    /// carry what they are made of, `part`.
+    real: bool,
+    /// What the quads emitted now are (`masonry::Part`, or a structure
+    /// surface id), when `real`; 0: a prop, as it is.
+    part: u8,
 }
 
 impl Builder {
@@ -785,11 +885,17 @@ impl Builder {
         self.quad_on(a, b, c, d, color, 0);
     }
 
+    /// The vertex alpha of what is emitted now, for a vertex of no surface
+    /// of its own: always 1.0 (none) without the photographed masonry.
+    fn part_alpha(&self) -> f32 {
+        materials::surface_alpha(if self.real { self.part } else { 0 })
+    }
+
     /// A quad of a given vertex surface (`materials::surface_alpha`).
     fn quad_on(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], color: [f32; 3], surface: u8) {
         let n = normal(a, b, c);
         let start = self.positions.len() as u32;
-        let alpha = materials::surface_alpha(surface);
+        let alpha = if surface == 0 { self.part_alpha() } else { materials::surface_alpha(surface) };
         for v in [a, b, c, d] {
             self.positions.push(v);
             self.normals.push(n);
@@ -812,13 +918,14 @@ impl Builder {
     /// Cap a ring at height `y` with a fan around its centroid.
     fn fan(&mut self, ring: &[Pos], y: f32, c: Pos, color: [f32; 3]) {
         let start = self.positions.len() as u32;
+        let alpha = self.part_alpha();
         self.positions.push([c.x, y, -c.y]);
         self.normals.push([0.0, 1.0, 0.0]);
-        self.colors.push([color[0], color[1], color[2], 1.0]);
+        self.colors.push([color[0], color[1], color[2], alpha]);
         for p in ring {
             self.positions.push([p.x, y, -p.y]);
             self.normals.push([0.0, 1.0, 0.0]);
-            self.colors.push([color[0], color[1], color[2], 1.0]);
+            self.colors.push([color[0], color[1], color[2], alpha]);
         }
         let n = ring.len() as u32;
         for i in 0..n {

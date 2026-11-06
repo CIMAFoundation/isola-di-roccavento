@@ -194,8 +194,10 @@ pub fn atlas_png() -> std::borrow::Cow<'static, [u8]> {
 /// The scanned plants' levels of detail (2026-11-04, on trial,
 /// `KIOSK_SCANS=1`; `tools/vegetation/to_game.py`): read from
 /// `assets/models/vegetation_scans.{json,bin}` and the card atlas
-/// `foliage_scans.png` of the source tree, desktop only. `None` when off or
-/// missing.
+/// `foliage_scans.png` of the source tree. In the browser `?scans=1`, the
+/// WebGPU build only, from the page's data: there `build_web.sh` leaves out
+/// the nearest level and halves the cards (20 + 22 MB otherwise), and they
+/// are downloaded only when asked for. `None` when off or missing.
 #[derive(serde::Deserialize)]
 pub struct ScanIndex {
     pub atlas: ScanAtlas,
@@ -241,6 +243,11 @@ pub struct ScanVertex {
 }
 
 impl Scans {
+    /// The mean colour of the leaves of `plant`'s `level` (linear).
+    pub fn leaf_rgb(&self, plant: &str, level: &str) -> Option<[f32; 3]> {
+        Some(self.index.plants.get(plant)?.get(level)?.leaf_rgb)
+    }
+
     /// The vertices and indices of `plant`'s `level` (`lod0` .. `lod3`),
     /// and the leaves' mean colour.
     pub fn level(&self, plant: &str, level: &str) -> Option<(Vec<ScanVertex>, Vec<u32>, [f32; 3])> {
@@ -272,15 +279,25 @@ pub fn scans() -> Option<&'static Scans> {
     static SCANS: OnceLock<Option<Scans>> = OnceLock::new();
     SCANS
         .get_or_init(|| {
-            if cfg!(target_arch = "wasm32") || std::env::var("KIOSK_SCANS").map_or(true, |v| v != "1") {
+            let asked = if cfg!(target_arch = "wasm32") { crate::quality::web_param("scans") } else { std::env::var("KIOSK_SCANS").ok() };
+            if crate::quality::WEBGL2 || asked.as_deref() != Some("1") {
                 return None;
             }
-            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models");
-            let read = |name: &str| std::fs::read(dir.join(name)).map_err(|e| warn!("scanned plants: {name}: {e}")).ok();
+            let read = |name: &str| scan_file(name).map_err(|e| warn!("scanned plants: {name}: {e}")).ok();
             let index = serde_json::from_slice(&read("vegetation_scans.json")?).map_err(|e| warn!("scanned plants: {e}")).ok()?;
             Some(Scans { index, data: read("vegetation_scans.bin")?, atlas_png: read("foliage_scans.png")? })
         })
         .as_ref()
+}
+
+/// A file of the scanned plants: of the source tree on the desktop, of the
+/// page's data in the browser.
+fn scan_file(name: &str) -> std::io::Result<Vec<u8>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models").join(name));
+    #[cfg(target_arch = "wasm32")]
+    let bytes = datafs::take(format!("assets/models/{name}"));
+    bytes
 }
 
 /// The scanned plant a variety is drawn with, when the scans are on

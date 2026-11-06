@@ -469,6 +469,7 @@ pub fn drive(
                 c.gpu_pass.lock().unwrap().clear();
                 c.encode.lock().unwrap().clear();
                 c.render.lock().unwrap().clear();
+                c.volume.lock().unwrap().clear();
             }
         }
         if p.waited < SETTLE_S + b {
@@ -485,6 +486,17 @@ pub fn drive(
             let (em, _, _) = stat(&mut c.encode.lock().unwrap());
             let (rm, rp, rx) = stat(&mut c.render.lock().unwrap());
             eprintln!("bench: {:<14} gpu {gm:5.2} ms (p95 {gp:5.2}, max {gx:5.1})  render thread {rm:5.2} ms (p95 {rp:5.2}, max {rx:5.1}, graph {em:5.2})  main {cm:5.2} ms (p95 {cp:5.2}, max {cx:5.1})", st.name);
+            // The end of the fire's volume passes after their stamp
+            // (`bench::PassStamps`, `KIOSK_VOL_STAMP` for which pass). Not
+            // what they cost: here the stamp falls inside the main pass,
+            // whose shading is still under way (in the fire lab, with next
+            // to no scene, it is their cost). Two runs of one view differ by
+            // what changed in the volumes: a pass more, a march of one step
+            // (`KIOSK_VOL_SET=passi=1`).
+            let (vm, vp, vx) = stat(&mut c.volume.lock().unwrap());
+            if vx > 0.0 {
+                eprintln!("bench: {:<14} volumi {vm:5.2} ms (p95 {vp:5.2}, max {vx:5.1}; differences only)", st.name);
+            }
         }
         let mut f = std::mem::take(&mut p.frames);
         f.sort_by(f32::total_cmp);

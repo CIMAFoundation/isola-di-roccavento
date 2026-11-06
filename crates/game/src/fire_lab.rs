@@ -318,7 +318,8 @@ fn setup(
             scale_factor: 1.0,
         }));
     }
-    commands.insert_resource(PlumeState::new(&mut images));
+    // flat ground at height 0
+    commands.insert_resource(PlumeState::new(&mut images, crate::fire_volumetric::ground_image(1, &[0.0])));
     let mut lab = Lab {
         clock: env_f32("KIOSK_FUOCO_T").unwrap_or(600.0),
         playing: snap.is_none(),
