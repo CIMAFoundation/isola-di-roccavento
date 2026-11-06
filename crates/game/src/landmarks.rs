@@ -77,7 +77,14 @@ fn spawn_landmarks(
         let at = crate::frame::to_bevy(Pos { x: x as f32, y: y as f32 }, ground);
         info!("landmark {key}: {model} at ({x:.0}, {y:.0}), ground {ground:.1} m, scale {scale}, yaw {:.0} deg", yaw.to_degrees());
         let transform = Transform { translation: at, rotation: Quat::from_rotation_y(yaw), scale: Vec3::splat(scale) };
-        let mut mesh = models::island_mesh(model);
+        let mut mesh = match (real.is_some(), model) {
+            // the rocca made again for the photographed stone
+            // (`scripts/build_rocca_real.py`): stepped broken tops, wall-walks
+            // and parapets, openings cut through the walls with dressed jambs
+            // and arches. The crag under it is the island bake's own.
+            (true, "rocca") => rocca_scans().unwrap_or_else(|| models::island_mesh(model)),
+            _ => models::island_mesh(model),
+        };
         if real.is_some() {
             without_greenery(&mut mesh);
         }
@@ -101,6 +108,7 @@ fn spawn_landmarks(
                     // a heightfield of 3 m cells and stacked prisms: refined,
                     // rounded and broken into a rock face (`rock::refine`)
                     rock::refine(&mut crag, &rock::CRAG);
+                    ground_under(&mut crag, &transform, &sim.scn.terrain);
                     commands.spawn(((Mesh3d(meshes.add(crag)), MeshMaterial3d(m.clone()), transform), crate::terrain_mesh::PauseSolid));
                 }
                 None => {
@@ -109,6 +117,48 @@ fn spawn_landmarks(
             }
         }
     }
+}
+
+/// The terrain's height under each vertex of a landmark, in world metres, in
+/// its first uv (`masonry.wesl`: the crag gathers scree and soil at its foot,
+/// so it does not stop on the ground in a clean line).
+fn ground_under(mesh: &mut Mesh, transform: &Transform, terrain: &scenario::Terrain) {
+    use bevy::mesh::VertexAttributeValues;
+    let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { return };
+    let uv: Vec<[f32; 2]> = pos
+        .iter()
+        .map(|&v| {
+            let w = transform.transform_point(Vec3::from(v));
+            [terrain.height_at(crate::frame::to_world(w)), 0.0]
+        })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+}
+
+/// The rocca of `assets/models/rocca_scans.json` (`scripts/build_rocca_real.py`),
+/// in the layout of `island.json`. Compiled into the desktop binary; in the
+/// browser it is not in the page's data (`scripts/build_web.sh` leaves out
+/// what is named `_scans`), and the island bake's rocca is drawn instead.
+/// Like every landmark it keeps `MAIN_WORLD`: Mario walks on what is drawn.
+fn rocca_scans() -> Option<Mesh> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    #[cfg(not(target_arch = "wasm32"))]
+    let text: std::borrow::Cow<'static, str> = include_str!("../../../assets/models/rocca_scans.json").into();
+    #[cfg(target_arch = "wasm32")]
+    let text: std::borrow::Cow<'static, str> = String::from_utf8(datafs::take("assets/models/rocca_scans.json").ok()?).ok()?.into();
+    let mut kits: std::collections::HashMap<String, models::Kit> =
+        serde_json::from_str(&text).map_err(|e| warn!("rocca_scans.json: {e}")).ok()?;
+    let m = kits.remove("rocca")?;
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD);
+    let n = m.positions.len();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, m.colors.iter().map(|c| [c[0], c[1], c[2], 1.0]).collect::<Vec<_>>());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
+    mesh.insert_indices(Indices::U32(m.indices));
+    mesh.compress_indices();
+    Some(mesh)
 }
 
 /// With the photographed masonry: the ivy and scrub of the rocca's bake

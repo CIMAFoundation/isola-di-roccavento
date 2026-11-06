@@ -71,7 +71,7 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
             # the logo: the game halves the 1200 px one (kiosk/characters.rs)
             # the scanned plants (`models::scans`) are not sent as they are: 20 MB
             # of meshes and 22 MB of cards. A lighter set is built below.
-            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or "_scans" in rel or rel == "assets/brand/cima_logo_white.png"):
+            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or "_scans" in rel or "_real" in rel or rel == "assets/brand/cima_logo_white.png"):
                 continue
             files.append(rel)
 files.append("data/fuels_eu12.json")
@@ -105,9 +105,15 @@ def scans_for_the_web():
     index["atlas"] = {"width": half.width, "height": half.height}
     png = io.BytesIO()
     half.save(png, "PNG", optimize=True)
-    return [("assets/models/vegetation_scans.json", json.dumps(index).encode()),
-            ("assets/models/vegetation_scans.bin", bytes(kept)),
-            ("assets/models/foliage_scans.png", png.getvalue())]
+    found = [("assets/models/vegetation_scans.json", json.dumps(index).encode()),
+             ("assets/models/vegetation_scans.bin", bytes(kept)),
+             ("assets/models/foliage_scans.png", png.getvalue())]
+    # the realistic rocca (scripts/build_rocca_real.py, landmarks::rocca_scans)
+    # and vehicles (tools/units/build_real_vehicles.py, units.rs): as they are
+    for n in ("rocca_scans.json", "vehicles_real.json"):
+        if os.path.exists(os.path.join(src, n)):
+            found.append(("assets/models/" + n, open(os.path.join(src, n), "rb").read()))
+    return found
 
 def photographs_for_the_web():
     """What else the realistic style reads (`?scans=1`, WebGPU): the ground's

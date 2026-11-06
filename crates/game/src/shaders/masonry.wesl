@@ -164,6 +164,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let surface = surface_id(in.color.a);
     @else
     let surface = 0u;
+    // the terrain's height under a crag's vertex (`landmarks::ground_under`)
+    var ground = -1.0e4;
+    @if(VERTEX_UVS_A) {
+        ground = in.uv.x;
+    }
     pbr.material.base_color = alpha_discard(pbr.material.flags, pbr.material.alpha_cutoff, pbr.material.base_color);
     let p = in.world_position.xyz;
     let c = pbr.material.base_color.rgb;
@@ -372,6 +377,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             }
             @if(MASONRY_CRAG) {
                 rgb = overgrown(rgb, p, n, px_m, 0.8);
+                // scree and dry soil gathered at the foot, up to ~15 m
+                // over the terrain (its height under the vertex is in the
+                // first uv, `landmarks::ground_under`), more on what faces up
+                // and in tongues, so the rock does not stop on the ground in
+                // a clean line
+                let tongue = value_noise3(p * 0.11 + 13.0) - 0.5;
+                let grit = value_noise3(p * 1.3 + 3.0);
+                let soil = (1.0 - smoothstep(2.0, 16.0, p.y - ground + tongue * 14.0)) * mix(0.5, 1.0, smoothstep(0.2, 0.8, n.y));
+                let earth = vec3<f32>(0.27, 0.22, 0.15) * (0.75 + 0.5 * grit) * mix(vec3<f32>(1.0), tex.rgb / MEAN_ROCK, 0.5);
+                rgb = mix(rgb, earth, soil * 0.85);
             }
             if surface == PART_ROCK {
                 rgb = overgrown(rgb, p, n, px_m, 0.6);

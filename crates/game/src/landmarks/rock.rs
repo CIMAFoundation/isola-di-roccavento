@@ -34,6 +34,10 @@ pub struct Refine {
     /// Flat tops stay where they are (the beds things stand on); otherwise
     /// every vertex moves alike.
     pub keep_beds: bool,
+    /// Swelling and necking of the steep faces with height, model metres: a
+    /// noise that varies three times faster up than across, so a stack of
+    /// prisms reads as weathered beds, not as a column.
+    pub bulge_m: f32,
 }
 
 fn hash3(i: IVec3) -> f32 {
@@ -219,7 +223,8 @@ pub fn refine(mesh: &mut Mesh, r: &Refine) {
     // --- relief along the normal
     let nor1 = normals(&p);
     for i in 0..n {
-        let d = relief(p[i], r.wave_m) * r.relief_m * free[i];
+        let bulge = noise3(p[i] / r.wave_m * Vec3::new(0.35, 1.2, 0.35) + 71.0) * r.bulge_m;
+        let d = (relief(p[i], r.wave_m) * r.relief_m + bulge) * free[i];
         p[i] += nor1[i] * d;
     }
     // --- normals: smooth across the faces, hard where two meet at more than
@@ -294,14 +299,14 @@ mod tests {
 }
 
 /// The crag under the rocca (model metres; the rocca is drawn at 1.9).
-pub const CRAG: Refine = Refine { edge_m: 1.6, rounding: 1, relief_m: 0.8, wave_m: 4.5, crease_deg: 62.0, keep_beds: true };
+pub const CRAG: Refine = Refine { edge_m: 1.6, rounding: 1, relief_m: 0.8, wave_m: 4.5, crease_deg: 62.0, keep_beds: true, bulge_m: 0.9 };
 
 /// The boulders at the stone tower's foot (model metres; drawn at 2.2):
 /// rounder, a finer grain.
-pub const BOULDERS: Refine = Refine { edge_m: 0.45, rounding: 8, relief_m: 0.25, wave_m: 1.6, crease_deg: 80.0, keep_beds: false };
+pub const BOULDERS: Refine = Refine { edge_m: 0.45, rounding: 8, relief_m: 0.25, wave_m: 1.6, crease_deg: 80.0, keep_beds: false, bulge_m: 0.0 };
 
 /// The coast's boulders and reefs (model metres; drawn at 1-4).
-pub const COAST_BOULDER: Refine = Refine { edge_m: 0.6, rounding: 4, relief_m: 0.12, wave_m: 1.2, crease_deg: 80.0, keep_beds: false };
+pub const COAST_BOULDER: Refine = Refine { edge_m: 0.6, rounding: 4, relief_m: 0.12, wave_m: 1.2, crease_deg: 80.0, keep_beds: false, bulge_m: 0.0 };
 
 /// The sea stacks (model metres, 8 x 13 x 6; drawn at 1.6-3).
-pub const SEA_STACK: Refine = Refine { edge_m: 0.9, rounding: 1, relief_m: 0.3, wave_m: 2.4, crease_deg: 62.0, keep_beds: false };
+pub const SEA_STACK: Refine = Refine { edge_m: 0.9, rounding: 1, relief_m: 0.3, wave_m: 2.4, crease_deg: 62.0, keep_beds: false, bulge_m: 0.0 };

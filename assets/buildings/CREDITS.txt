@@ -13,3 +13,15 @@ Texture fotografiche degli edifici e delle rocce (2026-11-06), usate con KIOSK_S
 Dalle mappe 1K (diffuse, nor_gl, arm) con scripts/pack_building_textures.py:
 <nome>_color.png = colore x occlusione ambientale (sRGB), alfa = rugosita';
 <nome>_normal.png = normali OpenGL.
+
+Case dei borghi, stile realistico (2026-11-06, crates/game/src/materials/house.rs,
+crates/game/src/houses.rs). Sempre Poly Haven, CC0, mappe 1K impacchettate allo stesso modo:
+
+- slate_*.png: "Roof Slates 02"  https://polyhaven.com/a/roof_slates_02  (CC0)
+- rustic_*.png: "Rustic Stone Wall 02"  https://polyhaven.com/a/rustic_stone_wall_02  (CC0)
+- brick_*.png: "Rough Plaster Brick 02" (sotto l'intonaco scrostato)
+  https://polyhaven.com/a/rough_plaster_brick_02  (CC0)
+- plaster2_*.png: "White Rough Plaster"  https://polyhaven.com/a/white_rough_plaster  (CC0)
+- roof2_*.png: "Clay Roof Tiles 03"  https://polyhaven.com/a/clay_roof_tiles_03  (CC0)
+
+Nessun modello 3D scaricato: case, panchine e lampioni sono geometria generata in Rust.

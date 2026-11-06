@@ -159,6 +159,92 @@ struct Glided {
 /// A step longer than this is a cut (a restart, a move of the whole scene), not a walk.
 const GLIDE_MAX_M: f32 = 250.0;
 
+/// The realistic vehicles and boats (`tools/units/build_real_vehicles.py`,
+/// `assets/models/vehicles_real.json`), only in the realistic style
+/// (`models::scans()`): without it, or without the file, the Blender models of
+/// `scripts/build_unit_models.py` and `build_island_models.py` as before
+/// (also with `KIOSK_REAL_VEHICLES=0`, for a comparison).
+pub(crate) fn real_kits() -> Option<&'static std::collections::HashMap<String, crate::models::Kit>> {
+    use std::sync::OnceLock;
+    static REAL: OnceLock<Option<std::collections::HashMap<String, crate::models::Kit>>> = OnceLock::new();
+    crate::models::scans()?;
+    REAL.get_or_init(|| {
+        // `KIOSK_REAL_VEHICLES=0`: the old models with the scans, for a comparison
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("KIOSK_REAL_VEHICLES").as_deref() == Ok("0") {
+            return None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/vehicles_real.json"));
+        #[cfg(target_arch = "wasm32")]
+        let bytes = datafs::take("assets/models/vehicles_real.json");
+        let bytes = bytes.map_err(|e| warn!("realistic vehicles: {e}")).ok()?;
+        serde_json::from_slice(&bytes).map_err(|e| warn!("realistic vehicles: {e}")).ok()
+    })
+    .as_ref()
+}
+
+/// The three bodies of the AIB tender, by team: every team has an engine that
+/// reads as one, and the next team's differs (the roof letter tells them apart).
+const REAL_ENGINES: [&str; 3] = ["engine_rosso", "engine_modulo", "engine_bianco"];
+
+fn real_engine(team: usize) -> Option<&'static str> {
+    let name = REAL_ENGINES[team % REAL_ENGINES.len()];
+    real_kits()?.contains_key(name).then_some(name)
+}
+
+fn real_kit_mesh(m: &crate::models::Kit, shift: Vec3, usage: RenderAssetUsages) -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usage);
+    let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| (Vec3::from_array(*p) - shift).to_array()).collect();
+    let n = positions.len();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals.clone());
+    let alpha = |i: usize| m.surfaces.get(i).map_or(1.0, |&s| materials::surface_alpha(s));
+    let colors: Vec<[f32; 4]> = m.colors.iter().enumerate().map(|(i, c)| [c[0], c[1], c[2], alpha(i)]).collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; n]);
+    mesh.insert_indices(Indices::U32(m.indices.clone()));
+    mesh.compress_indices();
+    mesh
+}
+
+/// A realistic model's still body. It keeps its CPU copy, like `models::unit_mesh`:
+/// Mario reads a team's mesh to bump into it.
+pub(crate) fn real_mesh(name: &str) -> Option<Mesh> {
+    let m = real_kits()?.get(name)?;
+    Some(real_kit_mesh(m, Vec3::ZERO, RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD))
+}
+
+/// The team letter on a realistic engine's roof (`engine_letter_<A..>`), centred
+/// on its pivot, and the pivot: [`update_units`] keeps it upright on screen.
+fn real_letter(letter: char) -> Option<(Mesh, Vec3)> {
+    let m = real_kits()?.get(&format!("engine_letter_{letter}"))?;
+    let pivot = m.rig.as_ref().map_or(Vec3::ZERO, |r| r.pivot);
+    Some((real_kit_mesh(m, pivot, RenderAssetUsages::RENDER_WORLD), pivot))
+}
+
+/// The roof disc with the team letter, turned about its centre so the letter
+/// reads upright from wherever the camera looks (a map label, on the engine).
+#[derive(Component)]
+pub struct RoofLetter {
+    unit: usize,
+}
+
+/// A realistic model's animated parts (wheels, beacons), centred on their pivots, by name.
+fn real_parts(name: &str) -> Vec<(String, Mesh, crate::models::Rig)> {
+    let prefix = format!("{name}.");
+    let mut parts: Vec<_> = real_kits()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, m)| {
+            let rig = m.rig.clone()?;
+            Some((k.strip_prefix(&prefix)?.to_string(), real_kit_mesh(m, rig.pivot, RenderAssetUsages::RENDER_WORLD), rig))
+        })
+        .collect();
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
+    parts
+}
+
 pub fn setup(
     mut commands: Commands,
     sim: Res<Sim>,
@@ -186,9 +272,21 @@ pub fn setup(
         ))
     };
 
+    // The realistic style (`KIOSK_SCANS=1`): the AIB tenders of
+    // `tools/units/build_real_vehicles.py`, three bodies, the team letter on the roof.
+    let mut real_meshes: std::collections::HashMap<&'static str, Handle<Mesh>> = Default::default();
+
     for u in &sim.crews.units {
+        let team = sim.teams.iter().position(|t| t.unit == u.id);
+        let real = (u.kind == UnitKind::Engine).then(|| real_engine(team.unwrap_or(u.id))).flatten();
         let (mesh, scale) = match u.kind {
-            UnitKind::Engine => (engine.clone(), symbol_scale),
+            UnitKind::Engine => match real {
+                Some(name) => (
+                    real_meshes.entry(name).or_insert_with(|| meshes.add(real_mesh(name).expect("baked engine"))).clone(),
+                    symbol_scale,
+                ),
+                None => (engine.clone(), symbol_scale),
+            },
             UnitKind::HandCrew => (crew.clone(), symbol_scale),
             UnitKind::AirTanker => (tanker.clone(), symbol_scale * 1.6),
         };
@@ -199,6 +297,11 @@ pub fn setup(
             UnitKind::HandCrew => "firefighter",
             UnitKind::AirTanker => "tanker",
         };
+        let parts = match real {
+            Some(name) => real_parts(name),
+            None => crate::models::unit_parts(model),
+        };
+        let letter = real.zip(team).and_then(|(_, t)| real_letter((b'A' + t.min(25) as u8) as char));
         commands
             .spawn((
                 (
@@ -216,7 +319,15 @@ pub fn setup(
                 UnitView { id: u.id },
             ))
             .with_children(|parent| {
-                for (_, part, rig) in crate::models::unit_parts(model) {
+                if let Some((letter, pivot)) = letter {
+                    parent.spawn((
+                        Mesh3d(meshes.add(letter)),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_translation(pivot),
+                        RoofLetter { unit: u.id },
+                    ));
+                }
+                for (_, part, rig) in parts {
                     parent.spawn((
                         (
                             Mesh3d(meshes.add(part)),
@@ -324,7 +435,24 @@ pub fn update_units(
         &mut Visibility,
         &MeshMaterial3d<StructureMaterial>,
     )>,
+    mut letters: Query<(&RoofLetter, &mut Transform), Without<UnitView>>,
+    cameras: Query<&GlobalTransform, With<crate::camera::OrbitCamera>>,
 ) {
+    // the roof letters: the top of the letter toward the top of the screen
+    if let Some(cam) = cameras.iter().next() {
+        let f = cam.forward();
+        if f.x.hypot(f.z) > 1e-3 {
+            let screen_up = f.x.atan2(f.z);
+            for (l, mut tf) in &mut letters {
+                if let Some(u) = sim.crews.units.get(l.unit) {
+                    let want = Quat::from_rotation_y(screen_up - (u.heading + std::f32::consts::FRAC_PI_2));
+                    if tf.rotation != want {
+                        tf.rotation = want;
+                    }
+                }
+            }
+        }
+    }
     let now = time.elapsed_secs();
     if glide.0.len() != sim.crews.units.len() {
         glide.0.clear();
@@ -840,6 +968,54 @@ pub fn animate_spray(
         }
         if *vis != Visibility::Inherited {
             *vis = Visibility::Inherited;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    /// The realistic bake, read as `real_kits` reads it but without the
+    /// switch of the realistic style.
+    fn bake() -> HashMap<String, crate::models::Kit> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/vehicles_real.json");
+        serde_json::from_slice(&std::fs::read(path).expect("vehicles_real.json")).expect("valid bake")
+    }
+
+    /// Every engine body and boat the game asks for is baked, valid, within a
+    /// triangle budget (the web build draws them too), and stands on its
+    /// origin; each engine has its four wheels and two beacons, and every team
+    /// letter its roof plate.
+    #[test]
+    fn the_realistic_vehicles_are_baked_within_budget() {
+        let kits = bake();
+        let valid = |name: &str, max_tris: usize| {
+            let m = kits.get(name).unwrap_or_else(|| panic!("no `{name}`"));
+            let n = m.positions.len();
+            assert!(n > 0 && m.normals.len() == n && m.colors.len() == n && m.surfaces.len() == n, "{name}");
+            assert!(m.indices.len() % 3 == 0 && m.indices.iter().all(|&i| (i as usize) < n), "{name}");
+            assert!(m.indices.len() / 3 <= max_tris, "{name}: {} triangles", m.indices.len() / 3);
+            m
+        };
+        for name in super::REAL_ENGINES {
+            let body = valid(name, 9_000);
+            let low = body.positions.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+            assert!(low > -0.05 && low < 0.6, "{name}: lowest point {low}");
+            let parts: Vec<_> = kits.iter().filter(|(k, m)| k.starts_with(&format!("{name}.")) && m.rig.is_some()).collect();
+            assert_eq!(parts.iter().filter(|(_, m)| m.rig.as_ref().unwrap().kind == "wheel").count(), 4, "{name}");
+            assert_eq!(parts.iter().filter(|(_, m)| m.rig.as_ref().unwrap().kind == "blink").count(), 2, "{name}");
+        }
+        for c in 'A'..='H' {
+            valid(&format!("engine_letter_{c}"), 400);
+        }
+        for model in ["gozzo", "peschereccio", "gommone", "motoscafo", "vela"] {
+            for v in 1..=3 {
+                valid(&format!("{model}_{v}"), 4_000);
+            }
+        }
+        for v in 1..=3 {
+            valid(&format!("vela_{v}_vele"), 4_000);
         }
     }
 }

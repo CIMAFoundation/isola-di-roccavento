@@ -46,6 +46,9 @@ mod town_kit;
 // the kit's toy trees, for the scanned trees put in their place (`vegetation`)
 pub(crate) use town_kit::kit_trees;
 
+#[path = "houses.rs"]
+mod houses;
+
 /// Unlit window glass — dark enough that a daylit building reads as an
 /// ordinary wall with punched openings, not a lattice of black holes.
 const WINDOW_GLASS: [f32; 4] = [0.06, 0.07, 0.10, 1.0];
@@ -124,6 +127,7 @@ pub fn spawn(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StructureMaterial>>,
     mut masonry_materials: ResMut<Assets<MasonryMaterial>>,
+    mut house_materials: ResMut<Assets<materials::house::HouseMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let scn = &sim.scn;
@@ -149,7 +153,11 @@ pub fn spawn(
         reflectance: 0.35,
         ..default()
     };
-    let masonry_material = real.as_ref().map(|t| masonry_materials.add(masonry::material(base_material, t, Masonry::Town)));
+    // the houses built facade by facade, in their own material (`houses`,
+    // `materials::house`); the photographed masonry if its files are missing
+    let house_material = real.as_ref().and_then(|_| materials::house::material(base_material.clone(), &mut images)).map(|m| house_materials.add(m));
+    let masonry_material = if house_material.is_some() { None } else { real.as_ref().map(|t| masonry_materials.add(masonry::material(base_material, t, Masonry::Town))) };
+    let ctx = house_material.as_ref().map(|_| houses::Context::new(scn));
     let material = materials.add(materials::structure(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.75,
@@ -189,7 +197,7 @@ pub fn spawn(
         for b in bucket {
             let start = builder.positions.len() as u32;
             let Some((win_start, win_end)) =
-                emit_building(scn, b, levels.get(&b.id).copied(), &mut builder)
+                emit_building(scn, b, levels.get(&b.id).copied(), ctx.as_ref(), &mut builder)
             else {
                 continue;
             };
@@ -217,9 +225,10 @@ pub fn spawn(
         tris += builder.indices.len() / 3;
         let base = builder.colors.clone();
         let mesh = meshes.add(builder.finish());
-        match &masonry_material {
-            Some(m) => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(m.clone())), crate::terrain_mesh::PauseSolid)),
-            None => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())), crate::terrain_mesh::PauseSolid)),
+        match (&house_material, &masonry_material) {
+            (Some(m), _) => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(m.clone())), crate::terrain_mesh::PauseSolid)),
+            (None, Some(m)) => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(m.clone())), crate::terrain_mesh::PauseSolid)),
+            (None, None) => commands.spawn(((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())), crate::terrain_mesh::PauseSolid)),
         };
         chunks.push(Chunk {
             mesh,
@@ -344,6 +353,7 @@ fn emit_building(
     scn: &Scenario,
     b: &Building,
     baked_levels: Option<u8>,
+    ctx: Option<&houses::Context>,
     out: &mut Builder,
 ) -> Option<(u32, u32)> {
     let n = b.ring.len();
@@ -391,6 +401,15 @@ fn emit_building(
     // Wind counter-clockwise so wall normals face outward.
     if signed_area(&ring) < 0.0 {
         ring.reverse();
+    }
+
+    // In the realistic style, a house is built facade by facade (`houses`).
+    if let Some(ctx) = ctx {
+        if matches!(Kind::of(b.kind.as_deref(), area), Kind::House | Kind::Apartments) {
+            if let Some(range) = houses::emit(scn, b, ctx, &ring, out) {
+                return Some(range);
+            }
+        }
     }
 
     // Toy scale: a diorama house is bigger than a real one, so the town reads
@@ -880,6 +899,10 @@ struct Builder {
     /// Quads emitted now face straight up whatever their slope (paving
     /// draped on the ground, `town_kit`).
     up_normals: bool,
+    /// The house each run of vertices belongs to, for the house material's
+    /// uv (`materials::house`): from the vertex index on, the ground at its
+    /// foot and its own number. Empty: no uv.
+    spans: Vec<(u32, [f32; 2])>,
 }
 
 impl Builder {
@@ -908,6 +931,25 @@ impl Builder {
         }
         self.indices
             .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    /// From here on the vertices are of the house standing on `foot`, of
+    /// number `seed` (`materials::house`).
+    fn house_span(&mut self, foot: f32, seed: f32) {
+        self.spans.push((self.positions.len() as u32, [foot, seed]));
+    }
+
+    /// Flat-shaded triangle, wound a-b-c.
+    fn tri(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], color: [f32; 3]) {
+        let n = normal(a, b, c);
+        let start = self.positions.len() as u32;
+        let alpha = self.part_alpha();
+        for v in [a, b, c] {
+            self.positions.push(v);
+            self.normals.push(n);
+            self.colors.push([color[0], color[1], color[2], alpha]);
+        }
+        self.indices.extend_from_slice(&[start, start + 1, start + 2]);
     }
 
     /// A CCW ring extruded from `y0` to `y1`, with a flat cap.
@@ -940,6 +982,7 @@ impl Builder {
     }
 
     fn finish(self) -> Mesh {
+        let n = self.positions.len();
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -947,6 +990,16 @@ impl Builder {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        if !self.spans.is_empty() {
+            let mut uv = vec![[-1.0e4f32, 0.5f32]; n];
+            for (k, &(from, v)) in self.spans.iter().enumerate() {
+                let to = self.spans.get(k + 1).map_or(n, |s| s.0 as usize);
+                for x in &mut uv[(from as usize).min(n)..to.min(n)] {
+                    *x = v;
+                }
+            }
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+        }
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }

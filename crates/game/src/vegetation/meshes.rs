@@ -131,6 +131,24 @@ pub fn variety_mesh(name: &'static str, tier: Tier) -> PlantMesh {
         levels.iter().find_map(|level| scans.level(plant, level))
     });
     let level = |l: &str| crate::models::scan_of(name).and_then(|p| crate::models::scans()?.level(p, l));
+    // a town cypress (the scanned fir drawn slim): a closed column inside
+    // its cards up close, the column alone far away (`Builder::cypress_core`)
+    if let Some((reach, colour)) = cypress_core_of(name) {
+        match (tier, &scan) {
+            (Tier::Proxy | Tier::Far, _) => {
+                let share = if tier == Tier::Proxy { CYPRESS_CORE_FAR } else { CYPRESS_CORE_FARTHEST };
+                b.cypress_core(reach, colour, share, tier == Tier::Proxy);
+                return b.finish(false, false);
+            }
+            (Tier::Near | Tier::Mid | Tier::Full, Some((vertices, indices, leaf_rgb))) => {
+                b.scan(vertices, indices, *leaf_rgb, super::canopy::crown_colour(name), scan_stretch(name));
+                let inner = if tier == Tier::Near { CYPRESS_CORE_NEAR } else { CYPRESS_CORE_MID };
+                b.cypress_core(reach, colour.map(|c| c * CYPRESS_CORE_SHADE), inner, true);
+                return b.finish(true, true);
+            }
+            _ => {}
+        }
+    }
     // a scanned plant past its `lod2`: in boxes, fine then coarse, made of
     // that level; `KIOSK_SCAN_FAR=grumi`: the cards and the lumps it was
     // before, to compare
@@ -209,6 +227,57 @@ pub fn scan_leaf_colour(name: &'static str) -> Option<[f32; 3]> {
     let leaves = scans.leaf_rgb(plant, "lod2").or_else(|| scans.leaf_rgb(plant, "lod3"))?;
     let tint = leaf_tint(leaves, super::canopy::crown_colour(name));
     Some([0, 1, 2].map(|k| 2.0 * tint[k] * leaves[k]))
+}
+
+/// How wide a town cypress's closed column is against the reach of its
+/// leaves ([`Builder::cypress_core`]): up close inside them, filling the
+/// gaps of the scanned fir's open whorls; from `lod1` on (55 m) as wide as
+/// the cards it fills, which slimmed to a cypress's width are slivers (the
+/// fir's cards, squeezed to a fifth of their width, let the sky through:
+/// thin dark stems from 100 m on, 2026-11-06); alone from 755 m on.
+const CYPRESS_CORE_NEAR: f32 = 0.55;
+const CYPRESS_CORE_MID: f32 = 0.9;
+const CYPRESS_CORE_FAR: f32 = 1.0;
+/// Past 1.5 km a column is a pixel or two wide: a little wider, so it
+/// does not break into dashes.
+const CYPRESS_CORE_FARTHEST: f32 = 1.25;
+/// The column inside the cards is in their shade.
+const CYPRESS_CORE_SHADE: f32 = 0.75;
+
+/// A town cypress's column ([`Builder::cypress_core`]): the reach of its
+/// leaves (height of the crown's foot, of its top, radius at its widest;
+/// model units, stretched as the plant is drawn) and their colour, as
+/// [`scan_leaf_colour`]. `None` for any other plant, and for the cypress
+/// without the scans (its authored model). `KIOSK_CYPRESS_CORE=0`: none,
+/// the cypress as it was before the column (for a before/after).
+fn cypress_core_of(name: &'static str) -> Option<([f32; 3], [f32; 3])> {
+    if name.rsplit_once('_').map(|(s, _)| s) != Some("cypress") {
+        return None;
+    }
+    if cfg!(not(target_arch = "wasm32")) && std::env::var("KIOSK_CYPRESS_CORE").as_deref() == Ok("0") {
+        return None;
+    }
+    let plant = crate::models::scan_of(name)?;
+    let (vertices, _, _) = crate::models::scans()?.level(plant, "lod2")?;
+    let stretch = scan_stretch(name);
+    let leaves: Vec<Vec3> = vertices.iter().filter(|v| v.leaf).map(|v| Vec3::from(v.position) * Vec3::new(stretch, 1.0, stretch)).collect();
+    if leaves.len() < 8 {
+        return None;
+    }
+    let mut ys: Vec<f32> = leaves.iter().map(|p| p.y).collect();
+    ys.sort_by(f32::total_cmp);
+    let (foot, top) = (ys[ys.len() / 20], ys[ys.len() - 1]);
+    // the radius most of the leaves stay within, in the widest third
+    let mut best = 0.0f32;
+    for k in 0..3 {
+        let (a, b) = (foot + (top - foot) * k as f32 / 3.0, foot + (top - foot) * (k + 1) as f32 / 3.0);
+        let mut r: Vec<f32> = leaves.iter().filter(|p| p.y >= a && p.y <= b).map(|p| Vec2::new(p.x, p.z).length()).collect();
+        if r.len() >= 4 {
+            r.sort_by(f32::total_cmp);
+            best = best.max(r[r.len() * 3 / 4]);
+        }
+    }
+    Some(([foot, top, best.max(0.02)], scan_leaf_colour(name)?))
 }
 
 /// `KIOSK_SCAN_FAR=grumi`: a scanned plant far away as the lumps it was
@@ -939,6 +1008,54 @@ impl Builder {
             for f in FACES {
                 self.indices.extend([start + f[0], start + f[1], start + f[2]]);
             }
+        }
+    }
+
+    /// A cypress's column (2026-11-06): a closed spindle from the crown's
+    /// foot to its top (`reach`, [`cypress_core_of`]), widest a third of
+    /// the way up and pointed, `share` as wide as the leaves reach; lumpy
+    /// (each vertex in or out a little, by a number of its own), in
+    /// `colour` (linear, over the atlas grey), darker toward the bottom
+    /// and the heart. `fine`: more rings and sides (the far band fewer).
+    /// Opaque, outward faces counter-clockwise; its leaves burn away.
+    fn cypress_core(&mut self, reach: [f32; 3], colour: [f32; 3], share: f32, fine: bool) {
+        let [foot, top, radius] = reach;
+        let (rings, sides) = if fine { (14u32, 9u32) } else { (7, 6) };
+        let grey = crate::models::atlas().grey;
+        let colour = colour.map(|c| c.clamp(0.0, 1.0));
+        let (lo, hi) = (Vec3::new(-radius, foot, -radius), Vec3::new(radius, top, radius));
+        // the profile, 1 at its widest: u^0.55 (1-u)^0.8, widest at u = 0.41
+        let peak = 0.55f32 / 1.35;
+        let norm = peak.powf(0.55) * (1.0 - peak).powf(0.8);
+        let profile = |u: f32| u.powf(0.55) * (1.0 - u).powf(0.8) / norm;
+        let hash = |k: u32| (k.wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0;
+        let start = self.positions.len() as u32;
+        let tip = |b: &mut Self, y: f32| b.vertex(Vec3::new(0.0, y, 0.0), None, Kind::Leaf, grey, [colour[0], colour[1], colour[2], crown_occlusion(Vec3::new(0.0, y, 0.0), lo, hi)]);
+        tip(self, foot);
+        for r in 1..rings {
+            let u = r as f32 / rings as f32;
+            let y = foot + (top - foot) * u;
+            let ring = radius * share * profile(u);
+            for s in 0..sides {
+                let k = r * sides + s;
+                // turned a third of a side every other ring, and a little in or out
+                let a = (s as f32 + 0.35 * (r % 2) as f32 + 0.15 * hash(k * 3 + 1)) / sides as f32 * std::f32::consts::TAU;
+                let bump = 0.82 + 0.3 * hash(k * 3 + 2);
+                let p = Vec3::new(a.cos() * ring * bump, y + (hash(k * 3) - 0.5) * (top - foot) / rings as f32 * 0.5, a.sin() * ring * bump);
+                let occlusion = crown_occlusion(p, lo, hi);
+                self.vertex(p, None, Kind::Leaf, grey, [colour[0], colour[1], colour[2], occlusion]);
+            }
+        }
+        tip(self, top);
+        let ring = |r: u32, s: u32| start + 1 + (r - 1) * sides + s % sides;
+        let last = start + 1 + (rings - 1) * sides;
+        for s in 0..sides {
+            // the foot's fan, looking up from below; then the bands; the top's fan
+            self.indices.extend([start, ring(1, s), ring(1, s + 1)]);
+            for r in 1..rings - 1 {
+                self.indices.extend([ring(r, s), ring(r + 1, s), ring(r + 1, s + 1), ring(r, s), ring(r + 1, s + 1), ring(r, s + 1)]);
+            }
+            self.indices.extend([ring(rings - 1, s), last, ring(rings - 1, s + 1)]);
         }
     }
 

@@ -91,6 +91,9 @@ const CLIMB_S_PER_M: f32 = 2.8;
 const CROWN_SHARE: f32 = 0.5;
 // below it the atlas texel is not leaf
 const ALPHA_CUT: f32 = 0.5;
+// as `vegetation::LEAN_TURNS`, `vegetation::LEAN_MAX`
+const LEAN_TURNS: f32 = 64.0;
+const LEAN_MAX: f32 = 0.12;
 
 // what a vertex is, from the normal's w (`meshes::Kind`)
 fn kind_leaf(k: f32) -> bool { return k > 0.5; }
@@ -160,6 +163,16 @@ fn place(v: PlantVertex) -> Placed {
     let sn = sin(v.foot_yaw.w);
     out.rest = vec3<f32>(c * p.x + sn * p.z, p.y, -sn * p.x + c * p.z);
     var world = v.foot_yaw.xyz + out.rest;
+    // a plant's own lean (`vegetation::lean_yaw`, the towns' trees with
+    // `KIOSK_TOWN_VARIETY=1`): carried in the yaw's whole turns past
+    // `LEAN_TURNS` (its sine and cosine are the same), none below; sheared
+    // with the height, toward one of 16 bearings, by up to `LEAN_MAX`
+    let lean_code = floor(v.foot_yaw.w / 6.2831853) - LEAN_TURNS;
+    if lean_code >= 0.0 {
+        let bearing = (lean_code % 16.0) / 16.0 * 6.2831853;
+        let amount = floor(lean_code / 16.0) / 7.0 * LEAN_MAX;
+        world += vec3<f32>(cos(bearing), 0.0, sin(bearing)) * amount * p.y;
+    }
 
     // wind: the crown leans downwind and sways in gusts, the leaves flutter;
     // a burning plant shakes in its own draught. Weighted by height, so the

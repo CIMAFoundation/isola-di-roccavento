@@ -3,7 +3,10 @@
     python3 scripts/pack_building_textures.py <dir with the downloaded jpgs> assets/buildings
 
 From https://polyhaven.com (CC0): painted_plaster_wall, clay_roof_tiles_02,
-sandstone_blocks_05, marble_cliff_05, each `<id>_{diff,nor_gl,arm}_1k.jpg`. Writes per material
+sandstone_blocks_05, marble_cliff_05 (`materials/masonry.rs`), and for the
+houses (`materials/house.rs`, 2026-11-06) roof_slates_02, rustic_stone_wall_02,
+rough_plaster_brick_02, white_rough_plaster, clay_roof_tiles_03; each
+`<id>_{diff,nor_gl,arm}_1k.jpg`. With `--only <name>...` just those. Writes per material
 `<name>_color.png` (RGB = diffuse x ambient occlusion, sRGB; A = roughness)
 and `<name>_normal.png` (OpenGL normal), and prints the mean linear colour
 that `shaders/masonry.wesl` divides by (MEAN_*).
@@ -15,7 +18,13 @@ from PIL import Image, ImageChops, ImageStat
 
 src, dst = sys.argv[1], sys.argv[2]
 os.makedirs(dst, exist_ok=True)
-for ph, name in [("painted_plaster_wall", "plaster"), ("clay_roof_tiles_02", "roof"), ("sandstone_blocks_05", "stone"), ("marble_cliff_05", "rock")]:
+ALL = [("painted_plaster_wall", "plaster"), ("clay_roof_tiles_02", "roof"), ("sandstone_blocks_05", "stone"), ("marble_cliff_05", "rock"),
+       ("roof_slates_02", "slate"), ("rustic_stone_wall_02", "rustic"), ("rough_plaster_brick_02", "brick"),
+       ("white_rough_plaster", "plaster2"), ("clay_roof_tiles_03", "roof2")]
+only = sys.argv[sys.argv.index("--only") + 1:] if "--only" in sys.argv else None
+for ph, name in ALL:
+    if only is not None and name not in only:
+        continue
     diff = Image.open(f"{src}/{ph}_diff_1k.jpg").convert("RGB")
     ao, rough, _ = Image.open(f"{src}/{ph}_arm_1k.jpg").convert("RGB").split()
     # occlusion only partly: the sun's shadows do the rest

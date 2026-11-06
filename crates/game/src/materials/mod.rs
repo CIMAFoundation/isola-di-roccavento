@@ -17,6 +17,7 @@
 //! not. StandardMaterial's six would leave the terrain no room for its four.
 //! The shared surface functions are in `scenery.wgsl` (`rocca::scenery`).
 
+pub mod house;
 pub mod masonry;
 mod structure;
 mod terrain;
@@ -34,6 +35,6 @@ pub struct MaterialsPlugin;
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         crate::load_wesl!(app, SCENERY_SHADER_HANDLE, "../shaders/scenery.wesl");
-        app.add_plugins((terrain::TerrainPlugin, structure::StructurePlugin, masonry::MasonryPlugin));
+        app.add_plugins((terrain::TerrainPlugin, structure::StructurePlugin, masonry::MasonryPlugin, house::HousePlugin));
     }
 }

@@ -47,6 +47,25 @@ const PAINT_REAL: [[f32; 3]; 7] = [
     [0.46, 0.41, 0.32],
 ];
 
+/// With the photographed masonry, more car colours (linear): the greys and
+/// whites of any car park, and the colours of older Italian cars.
+const PAINT_MORE: [[f32; 3]; 14] = [
+    [0.72, 0.72, 0.72],
+    [0.80, 0.80, 0.78],
+    [0.42, 0.43, 0.45],
+    [0.16, 0.17, 0.18],
+    [0.025, 0.025, 0.03],
+    [0.03, 0.05, 0.12],
+    [0.24, 0.03, 0.03],
+    [0.46, 0.41, 0.32],
+    [0.20, 0.36, 0.52],
+    [0.62, 0.55, 0.38],
+    [0.04, 0.12, 0.06],
+    [0.50, 0.06, 0.04],
+    [0.62, 0.42, 0.04],
+    [0.30, 0.42, 0.48],
+];
+
 /// Draw `b` if it is a landmark or an open space. `false`: not ours, extrude it.
 pub(super) fn emit(scn: &Scenario, b: &Building, out: &mut Builder) -> bool {
     let Some(kind) = b.kind.as_deref() else { return false };
@@ -149,6 +168,19 @@ pub(super) fn emit(scn: &Scenario, b: &Building, out: &mut Builder) -> bool {
                     if hash01(b.id as u64 + i as u64 * 31 + (row > 0.0) as u64 * 7, 0x51) < 0.7 {
                         let car = ["car_hatch", "car_sedan", "car_suv", "car_van"][(hash01(b.id as u64 + i as u64, 0x52) * 4.0) as usize % 4];
                         let paint = if out.real { PAINT_REAL } else { PAINT }[(hash01(b.id as u64 + i as u64 * 3 + row as u64, 0x53) * 7.0) as usize % 7];
+                        if out.real {
+                            // more kinds (a three-wheeled Ape now and then),
+                            // more colours, and parked as people park: a
+                            // little askew, a little off the bay's middle
+                            let k = b.id as u64 + i as u64 * 7 + (row > 0.0) as u64 * 1013;
+                            let r = hash01(k, 0x54);
+                            let car = if r < 0.08 { "car_ape" } else if r < 0.13 { "car_camper" } else { ["car_hatch", "car_hatch", "car_sedan", "car_suv", "car_van"][(hash01(k, 0x55) * 5.0) as usize % 5] };
+                            let paint = PAINT_MORE[(hash01(k, 0x56) * PAINT_MORE.len() as f32) as usize % PAINT_MORE.len()];
+                            let skew = (hash01(k, 0x57) - 0.5) * 0.14;
+                            let off = [(hash01(k, 0x58) - 0.5) * 0.6, (hash01(k, 0x59) - 0.5) * 0.8];
+                            f.put(scn, out, car, [a + off[0], row * lv * 0.27 + off[1]], crate::visual_scale::CAR, skew + if row > 0.0 { 0.0 } else { PI }, Some(paint));
+                            continue;
+                        }
                         f.put(scn, out, car, [a, row * lv * 0.27], crate::visual_scale::CAR, if row > 0.0 { 0.0 } else { PI }, Some(paint));
                     }
                 }
@@ -911,6 +943,18 @@ fn put(scn: &Scenario, out: &mut Builder, name: &str, p: Pos, scale: f32, yaw: f
     if out.real && matches!(name, "street_tree" | "cypress") {
         return;
     }
+    // With the photographed masonry, the street furniture comes in kinds
+    // (`furniture`): chosen by where it stands, the same every time.
+    if out.real && matches!(name, "bench" | "streetlight") {
+        let hv = hash01(((p.x * 8.0) as i64 as u64).wrapping_mul(0x9E37) ^ (((p.y * 8.0) as i64 as u64) << 21), 0x5150);
+        let y = ground_at(scn, p).max(0.0);
+        let f = furniture::At { c: p, y: y - 0.05, yaw, k: scale };
+        match name {
+            "bench" if hv < 0.62 => return furniture::bench(out, &f, hv / 0.62),
+            "streetlight" if hv < 0.7 => return furniture::lamp(out, &f, hv / 0.7),
+            _ => {}
+        }
+    }
     let scale = scale * if matches!(name, "street_tree" | "cypress") {
         crate::visual_scale::TREE
     } else {
@@ -1052,5 +1096,143 @@ mod tests {
         let m = kit("church");
         let added = blind_wall_panes(m, "church", &glass_panes(m));
         assert!(!added.iter().any(|p| p.ax == 0 && (p.lo[0] - 8.0).abs() < 0.3 && p.lo[2] < 3.0 && p.hi[2] > -3.0 && p.hi[1] < 11.0));
+    }
+}
+
+/// Street furniture of the realistic style, drawn here rather than from the
+/// kit: benches of stone and of painted slats on iron, cast-iron lamp posts
+/// with lanterns. Sized as the kit's (`bench` 2 m, `streetlight` 6.4 m, at
+/// the scale the kit puts them at).
+mod furniture {
+    use scenario::Pos;
+
+    use super::super::houses::face;
+    use super::super::{linear, Builder};
+    use crate::materials::masonry::Part;
+
+    const METAL: u8 = 2;
+    const WOOD: u8 = 10;
+
+    /// Where a piece stands: its foot, turned `yaw`, scaled `k`.
+    pub(in super::super) struct At {
+        pub c: Pos,
+        pub y: f32,
+        pub yaw: f32,
+        pub k: f32,
+    }
+
+    impl At {
+        /// A model point (x right, y up, z back) in the world, as `place` turns it.
+        fn w(&self, p: [f32; 3]) -> [f32; 3] {
+            let (sn, cs) = self.yaw.sin_cos();
+            let (x, z) = (p[0] * self.k, p[2] * self.k);
+            [self.c.x + x * cs + z * sn, self.y + p[1] * self.k, -self.c.y - x * sn + z * cs]
+        }
+        fn n(&self, n: [f32; 3]) -> [f32; 3] {
+            let (sn, cs) = self.yaw.sin_cos();
+            [n[0] * cs + n[2] * sn, n[1], -n[0] * sn + n[2] * cs]
+        }
+    }
+
+    /// A box `lo`..`hi` in the model; `bottom`: its underside too.
+    fn cube(out: &mut Builder, at: &At, lo: [f32; 3], hi: [f32; 3], col: [f32; 3], bottom: bool) {
+        let p = |x: f32, y: f32, z: f32| at.w([x, y, z]);
+        let (a, b) = (lo, hi);
+        face(out, [p(a[0], b[1], a[2]), p(b[0], b[1], a[2]), p(b[0], b[1], b[2]), p(a[0], b[1], b[2])], at.n([0.0, 1.0, 0.0]), col);
+        if bottom {
+            face(out, [p(a[0], a[1], a[2]), p(b[0], a[1], a[2]), p(b[0], a[1], b[2]), p(a[0], a[1], b[2])], at.n([0.0, -1.0, 0.0]), col);
+        }
+        face(out, [p(a[0], a[1], a[2]), p(b[0], a[1], a[2]), p(b[0], b[1], a[2]), p(a[0], b[1], a[2])], at.n([0.0, 0.0, -1.0]), col);
+        face(out, [p(a[0], a[1], b[2]), p(b[0], a[1], b[2]), p(b[0], b[1], b[2]), p(a[0], b[1], b[2])], at.n([0.0, 0.0, 1.0]), col);
+        face(out, [p(a[0], a[1], a[2]), p(a[0], a[1], b[2]), p(a[0], b[1], b[2]), p(a[0], b[1], a[2])], at.n([-1.0, 0.0, 0.0]), col);
+        face(out, [p(b[0], a[1], a[2]), p(b[0], a[1], b[2]), p(b[0], b[1], b[2]), p(b[0], b[1], a[2])], at.n([1.0, 0.0, 0.0]), col);
+    }
+
+    /// An upright octagonal post from `y0` (radius `r0`) to `y1` (`r1`).
+    fn post(out: &mut Builder, at: &At, x: f32, z: f32, y0: f32, y1: f32, r0: f32, r1: f32, col: [f32; 3]) {
+        let n = 8;
+        for i in 0..n {
+            let (a0, a1) = (std::f32::consts::TAU * i as f32 / n as f32, std::f32::consts::TAU * (i + 1) as f32 / n as f32);
+            let am = (a0 + a1) * 0.5;
+            let q = [
+                at.w([x + r0 * a0.cos(), y0, z + r0 * a0.sin()]),
+                at.w([x + r0 * a1.cos(), y0, z + r0 * a1.sin()]),
+                at.w([x + r1 * a1.cos(), y1, z + r1 * a1.sin()]),
+                at.w([x + r1 * a0.cos(), y1, z + r1 * a0.sin()]),
+            ];
+            face(out, q, at.n([am.cos(), 0.0, am.sin()]), col);
+        }
+    }
+
+    /// A bench: `h` < 0.5 of stone, else slats painted green or brown on
+    /// cast-iron ends.
+    pub(in super::super) fn bench(out: &mut Builder, at: &At, h: f32) {
+        if h < 0.45 {
+            // a slab of grey stone on two blocks
+            out.part = Part::Stone as u8;
+            let stone = linear(if h < 0.22 { [0.62, 0.60, 0.56] } else { [0.50, 0.48, 0.45] });
+            cube(out, at, [-1.05, 0.40, -0.28], [1.05, 0.52, 0.26], stone, true);
+            for x in [-0.75, 0.75] {
+                cube(out, at, [x - 0.14, 0.0, -0.22], [x + 0.14, 0.40, 0.20], stone, false);
+            }
+        } else {
+            let paint = linear(if h < 0.75 { [0.12, 0.26, 0.16] } else { [0.42, 0.27, 0.15] });
+            out.part = WOOD;
+            for k in 0..3 {
+                let z = -0.24 + k as f32 * 0.16;
+                cube(out, at, [-1.0, 0.44, z], [1.0, 0.48, z + 0.12], paint, true);
+            }
+            for k in 0..2 {
+                let y = 0.62 + k as f32 * 0.18;
+                cube(out, at, [-1.0, y, 0.20], [1.0, y + 0.12, 0.24], paint, true);
+            }
+            out.part = METAL;
+            let iron = [0.02, 0.02, 0.022];
+            for x in [-0.85, 0.85] {
+                cube(out, at, [x - 0.03, 0.0, -0.26], [x + 0.03, 0.44, -0.20], iron, false);
+                cube(out, at, [x - 0.03, 0.0, 0.18], [x + 0.03, 0.98, 0.24], iron, false);
+                cube(out, at, [x - 0.03, 0.40, -0.26], [x + 0.03, 0.44, 0.24], iron, true);
+            }
+        }
+        out.part = 0;
+    }
+
+    /// A lamp post of cast iron: `h` < 0.55 a straight post with a lantern
+    /// on top, else a post with a curled arm and a lantern hanging from it.
+    pub(in super::super) fn lamp(out: &mut Builder, at: &At, h: f32) {
+        out.part = METAL;
+        let iron = if h < 0.3 || h > 0.8 { [0.015, 0.015, 0.017] } else { [0.02, 0.05, 0.035] };
+        // base, shaft, collar
+        post(out, at, 0.0, 0.0, 0.0, 0.9, 0.32, 0.22, iron);
+        cube(out, at, [-0.3, 0.88, -0.3], [0.3, 0.98, 0.3], iron, true);
+        post(out, at, 0.0, 0.0, 0.98, 4.9, 0.12, 0.08, iron);
+        let lantern = |out: &mut Builder, x: f32, z: f32, y: f32| {
+            out.part = METAL;
+            cube(out, at, [x - 0.26, y, z - 0.26], [x + 0.26, y + 0.1, z + 0.26], iron, true);
+            // glass, warm
+            out.part = 0;
+            let glass = [0.95, 0.88, 0.62];
+            for (a, b) in [((-0.22, -0.22), (0.22, -0.22)), ((0.22, -0.22), (0.22, 0.22)), ((0.22, 0.22), (-0.22, 0.22)), ((-0.22, 0.22), (-0.22, -0.22))] {
+                let q = [at.w([x + a.0, y + 0.1, z + a.1]), at.w([x + b.0, y + 0.1, z + b.1]), at.w([x + b.0 * 1.3, y + 0.85, z + b.1 * 1.3]), at.w([x + a.0 * 1.3, y + 0.85, z + a.1 * 1.3])];
+                let nm = [(a.0 + b.0) * 0.5, 0.0, (a.1 + b.1) * 0.5];
+                face(out, q, at.n(nm), glass);
+            }
+            out.part = METAL;
+            // its little roof
+            cube(out, at, [x - 0.36, y + 0.85, z - 0.36], [x + 0.36, y + 0.95, z + 0.36], iron, true);
+            post(out, at, x, z, y + 0.95, y + 1.25, 0.3, 0.04, iron);
+        };
+        if h < 0.55 {
+            post(out, at, 0.0, 0.0, 4.9, 5.2, 0.08, 0.14, iron);
+            lantern(out, 0.0, 0.0, 5.2);
+        } else {
+            post(out, at, 0.0, 0.0, 4.9, 5.6, 0.08, 0.06, iron);
+            // the arm toward the street (the kit's arm points +z)
+            cube(out, at, [-0.05, 5.5, 0.0], [0.05, 5.6, 1.3], iron, true);
+            cube(out, at, [-0.03, 5.2, 0.1], [0.03, 5.5, 0.16], iron, false);
+            cube(out, at, [-0.03, 5.0, 1.24], [0.03, 5.5, 1.3], iron, false);
+            lantern(out, 0.0, 1.27, 3.95);
+        }
+        out.part = 0;
     }
 }

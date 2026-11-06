@@ -389,17 +389,26 @@ const CYPRESS_DARK: f32 = 0.7;
 /// are drawn. The piazzas get holm oaks, the gardens olives with a few holm
 /// and cork oaks, the cypresses the scanned fir drawn slim (a dark column,
 /// as a cypress reads from the game's view; without that scan, a slim holm
-/// oak). They are plants like the others: same levels, shadows and fire.
-/// `KIOSK_TOWN_TREES=0` leaves the towns bare, for a before/after.
+/// oak; its column `meshes::Builder::cypress_core`). They are plants like
+/// the others: same levels, shadows and fire.
+/// `KIOSK_TOWN_TREES=0` leaves the towns bare, for a before/after;
+/// `KIOSK_TOWN_VARIETY=1` (a trial, off: [`town_variety`]) more species,
+/// each plant its own size and lean, and rows where a town is bare.
 pub(super) fn town_trees(scn: &Scenario) -> Vec<Inst> {
     let off = cfg!(not(target_arch = "wasm32")) && std::env::var("KIOSK_TOWN_TREES").as_deref() == Ok("0");
     if crate::models::scans().is_none() || off {
         return Vec::new();
     }
+    let variety = town_variety();
     // the cypress: the scanned fir drawn slim, or (without it) a holm oak
     let (cypress, slim) = if crate::models::scan_of("cypress_1").is_some() { ("cypress", CYPRESS_SLIM) } else { ("holm", 0.3) };
+    let kit: Vec<TownSpot> = crate::buildings::kit_trees(scn).into_iter().map(|t| TownSpot { cypress: t.cypress, at: t.at, scale: t.scale, yaw: t.yaw }).collect();
+    let mut spots: Vec<(TownSpot, Option<&'static str>)> = kit.iter().map(|t| (*t, None)).collect();
+    if variety {
+        spots.extend(town_rows(scn, &kit));
+    }
     let mut out = Stand::default();
-    for (k, t) in crate::buildings::kit_trees(scn).into_iter().enumerate() {
+    for (k, (t, row)) in spots.into_iter().enumerate() {
         let mut rng = Rng::seeded((0x7EE5_0000 + k as u64) ^ ((t.at.x.to_bits() as u64) << 20) ^ t.at.y.to_bits() as u64);
         let ground = scn.terrain.height_at(t.at);
         let base = Vec3::new(t.at.x, ground, -t.at.y);
@@ -409,9 +418,20 @@ pub(super) fn town_trees(scn: &Scenario) -> Vec<Inst> {
         // the scanned trees turn as they like: their variety follows the yaw
         let yaw = (t.yaw + rng.unit() * std::f32::consts::TAU).rem_euclid(std::f32::consts::TAU);
         let toy = crate::visual_scale::TREE * t.scale;
-        if t.cypress {
+        // with the variety: each plant its own height, width and lean (drawn
+        // after the rest, so without it every plant is as it was)
+        let (mut tall, mut wide, mut lean) = (1.0, 1.0, [0.0, 0.0]);
+        if variety {
+            tall = 0.8 + rng.unit() * 0.45;
+            wide = 0.85 + rng.unit() * 0.5;
+            lean = [rng.unit() * std::f32::consts::TAU, rng.unit()];
+        }
+        let first = out.inst.len();
+        if t.cypress || row == Some("cypress") {
             // the toy cypress is 10.5 m tall and a quarter as wide
-            let height = 10.5 * toy * (0.9 + rng.unit() * 0.2);
+            let height = 10.5 * toy * (0.9 + rng.unit() * 0.2) * tall;
+            // a cypress keeps its column: less wider or narrower, hardly leaning
+            let (slim, lean_max) = (slim * (0.85 + 0.3 * (wide - 0.85) / 0.5), 0.15);
             // a sapling's whorls are open: three of them in one column, each
             // turned, close it into the dense dark spindle of a cypress
             let layers = if cypress == "cypress" { CYPRESS_LAYERS } else { 1 };
@@ -420,19 +440,209 @@ pub(super) fn town_trees(scn: &Scenario) -> Vec<Inst> {
                 let h = height * (1.0 - 0.06 * l as f32);
                 out.model(cypress, base, Vec3::new(h * slim, h, h * slim), turn, mul(leaf, CYPRESS_DARK), wood);
             }
+            lean[1] *= lean_max;
         } else {
             // the toy street tree is 6.2 m tall, about as wide as tall
-            let height = 6.2 * toy * (0.9 + rng.unit() * 0.2);
-            let species = match (rng.unit() * 10.0) as u32 {
-                _ if t.scale >= 1.6 => "holm",
-                0..=5 => "olive",
-                6..=8 => "holm",
-                _ => "cork",
+            let height = 6.2 * toy * (0.9 + rng.unit() * 0.2) * tall;
+            let u = rng.unit();
+            let species = match row {
+                Some(s) => s,
+                None if !variety => match (u * 10.0) as u32 {
+                    _ if t.scale >= 1.6 => "holm",
+                    0..=5 => "olive",
+                    6..=8 => "holm",
+                    _ => "cork",
+                },
+                // the piazzas: holm oaks, a stone pine or a carob among them
+                None if t.scale >= 1.6 => match (u * 20.0) as u32 {
+                    0..=12 => "holm",
+                    13..=16 => "pine",
+                    _ => "carob",
+                },
+                // the gardens: olives first, then the island's other trees
+                None => match (u * 20.0) as u32 {
+                    0..=6 => "olive",
+                    7..=9 => "holm",
+                    10..=11 => "cork",
+                    12..=14 => "carob",
+                    15..=16 => "arbutus",
+                    17 => "aleppo",
+                    _ => "pine",
+                },
             };
-            out.model(species, base, Vec3::new(height * 1.1, height, height * 1.1), yaw, leaf, wood);
+            // a strawberry tree is small, a pine tall and spread
+            let (h, w) = match species {
+                "arbutus" => (0.6, 1.0),
+                "pine" | "aleppo" => (1.5, 0.9),
+                _ => (1.0, 1.1),
+            };
+            let height = height * h;
+            out.model(species, base, Vec3::new(height * w * wide, height, height * w * wide), yaw, leaf, wood);
+            // an olive or a strawberry tree leans; an oak or a pine a little less
+            lean[1] *= if matches!(species, "olive" | "arbutus") { 1.0 } else { 0.6 };
+        }
+        if variety {
+            for i in &mut out.inst[first..] {
+                i.yaw = lean_yaw(i.yaw, lean[0], lean[1]);
+            }
         }
     }
     out.inst
+}
+
+/// A town tree's place: the kit's (`town_kit::KitTree`) or a row's.
+#[derive(Clone, Copy)]
+struct TownSpot {
+    cypress: bool,
+    at: Pos,
+    scale: f32,
+    yaw: f32,
+}
+
+/// `KIOSK_TOWN_VARIETY=1` (2026-11-06, the user: «fai più varietà»; a
+/// trial, off until confirmed): the towns' trees of more species, each its
+/// own size and lean, and rows of trees along the streets of the towns
+/// with few ([`town_rows`]). The desktop only.
+fn town_variety() -> bool {
+    cfg!(not(target_arch = "wasm32")) && std::env::var("KIOSK_TOWN_VARIETY").as_deref() == Ok("1")
+}
+
+/// A plant's lean in its yaw (2026-11-06, `KIOSK_TOWN_VARIETY`): whole turns
+/// past [`LEAN_TURNS`] carry one of 16 bearings and of 8 steps up to
+/// [`LEAN_MAX`] (`share` of it, 0..1) of shear with the height; the sine
+/// and cosine of the yaw stay those of `yaw`, so all else reads it as it
+/// was. Below `LEAN_TURNS` (every other plant) no lean (`plant_common::place`).
+pub(super) fn lean_yaw(yaw: f32, bearing: f32, share: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let dir = ((bearing.rem_euclid(TAU) / TAU * 16.0).round() as u32) % 16;
+    let step = (share.clamp(0.0, 1.0) * 7.0).round() as u32;
+    if step == 0 {
+        return yaw;
+    }
+    let code = (step * 16 + dir) as f32;
+    // a half turn on, the yaw within the half turn either side: the whole
+    // turns stay whole whichever way the division rounds
+    let around = (yaw.rem_euclid(TAU) - PI).clamp(-PI + 1e-3, PI - 1e-3);
+    TAU * (LEAN_TURNS + code + 0.5) + around
+}
+
+/// As `plant_common.wesl`.
+pub(super) const LEAN_TURNS: f32 = 64.0;
+pub(super) const LEAN_MAX: f32 = 0.12;
+
+/// Rows of trees along the streets of the towns that have few
+/// (`KIOSK_TOWN_VARIETY`): of a town's houses, those with fewer trees than
+/// half their number in the kit get, along the `ROW_ROADS` drivable roads
+/// with room for the longest, a tree every `ROW_STEP_M`, `ROW_OFFSET_M` off
+/// the road's axis, where it stands in the town (within `ROW_TOWN_M` of a
+/// house) and clear of houses, other roads, other trees and the sea. One
+/// species a road; cypresses on both sides, the others on one.
+fn town_rows(scn: &Scenario, kit: &[TownSpot]) -> Vec<(TownSpot, Option<&'static str>)> {
+    const ROW_STEP_M: f32 = 13.0;
+    const ROW_OFFSET_M: f32 = 6.5;
+    const ROW_TOWN_M: f32 = 45.0;
+    const ROW_ROADS: usize = 2;
+    const SPECIES: [&str; 5] = ["holm", "pine", "olive", "cypress", "holm"];
+    let v = &scn.vectors;
+    let homes: Vec<&scenario::Building> = v.buildings.iter().filter(|b| matches!(b.kind.as_deref(), Some("house" | "villa" | "terrace" | "shop"))).collect();
+    // which towns are bare: trees per house of the kit, by the nearest house's town
+    let mut count: std::collections::HashMap<&str, (usize, usize)> = std::collections::HashMap::new();
+    for b in &homes {
+        count.entry(b.locality.as_deref().unwrap_or("")).or_default().0 += 1;
+    }
+    let near_home = |p: Vec2| homes.iter().map(|b| (Vec2::from(b.centroid).distance(p), b)).min_by(|a, b| a.0.total_cmp(&b.0));
+    for t in kit {
+        if let Some((d, b)) = near_home(Vec2::new(t.at.x, t.at.y)) {
+            if d < 60.0 {
+                count.entry(b.locality.as_deref().unwrap_or("")).or_default().1 += 1;
+            }
+        }
+    }
+    let bare = |town: &str| count.get(town).is_some_and(|&(houses, trees)| (trees as f32) < 0.5 * houses as f32);
+    let seg_dist = |p: Vec2, a: Vec2, b: Vec2| {
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+        p.distance(a + ab * t)
+    };
+    let in_building = |p: Vec2| {
+        v.buildings.iter().any(|b| {
+            let ring: Vec<Vec2> = b.ring.iter().map(|q| Vec2::from(*q)).collect();
+            let near = (0..ring.len()).any(|i| seg_dist(p, ring[i], ring[(i + 1) % ring.len()]) < 3.5);
+            let mut inside = false;
+            for i in 0..ring.len() {
+                let (a, c) = (ring[i], ring[(i + 1) % ring.len()]);
+                if (a.y > p.y) != (c.y > p.y) && p.x < a.x + (p.y - a.y) / (c.y - a.y) * (c.x - a.x) {
+                    inside = !inside;
+                }
+            }
+            near || inside
+        })
+    };
+    // the places a row could take: (town, road, the side, where)
+    let mut could: Vec<(&str, usize, bool, Vec2)> = Vec::new();
+    for (r, road) in v.roads.iter().enumerate().filter(|(_, r)| r.drivable && r.line.len() >= 2) {
+        let line: Vec<Vec2> = road.line.iter().map(|q| Vec2::from(*q)).collect();
+        let mut walked = 0.0f32;
+        for seg in line.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            let len = a.distance(b);
+            if len < 1e-3 {
+                continue;
+            }
+            let dir = (b - a) / len;
+            let side = Vec2::new(-dir.y, dir.x);
+            let mut s = (ROW_STEP_M - walked % ROW_STEP_M) % ROW_STEP_M;
+            while s < len {
+                let on = a + dir * s;
+                for left in [false, true] {
+                    let p = on + side * if left { ROW_OFFSET_M } else { -ROW_OFFSET_M };
+                    let Some((d, home)) = near_home(p) else { continue };
+                    let town = home.locality.as_deref().unwrap_or("");
+                    if d > ROW_TOWN_M || !bare(town) || scn.terrain.height_at(Pos { x: p.x, y: p.y }) < 1.0 {
+                        continue;
+                    }
+                    let near_road = v.roads.iter().any(|r| r.line.windows(2).any(|w| seg_dist(p, Vec2::from(w[0]), Vec2::from(w[1])) < ROW_OFFSET_M - 0.5));
+                    if !near_road && !in_building(p) {
+                        could.push((town, r, left, p));
+                    }
+                }
+                s += ROW_STEP_M;
+            }
+            walked += len;
+        }
+    }
+    // of a bare town, its `ROW_ROADS` roads with the longest rows; an
+    // avenue of cypresses on both sides, any other row on one
+    let mut by_road: std::collections::BTreeMap<(&str, usize), usize> = std::collections::BTreeMap::new();
+    for &(town, r, _, _) in &could {
+        *by_road.entry((town, r)).or_default() += 1;
+    }
+    let mut chosen: Vec<(&str, usize, usize)> = by_road.iter().map(|(&(t, r), &n)| (t, r, n)).collect();
+    chosen.sort_by(|a, b| a.0.cmp(b.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
+    let mut kept: Vec<(&str, usize)> = Vec::new();
+    for (town, r, _) in chosen {
+        if kept.iter().filter(|k| k.0 == town).count() < ROW_ROADS {
+            kept.push((town, r));
+        }
+    }
+    let mut placed: Vec<Vec2> = kit.iter().map(|t| Vec2::new(t.at.x, t.at.y)).collect();
+    let mut out = Vec::new();
+    for (town, r, left, p) in could {
+        let road = &v.roads[r];
+        let species = SPECIES[(road.id.unsigned_abs() % SPECIES.len() as u64) as usize];
+        if !kept.contains(&(town, r)) || (species != "cypress" && left != (road.id % 2 == 0)) || placed.iter().any(|q| q.distance(p) < 8.0) {
+            continue;
+        }
+        placed.push(p);
+        let yaw = hash01(p.x, p.y) * std::f32::consts::TAU;
+        out.push((TownSpot { cypress: false, at: Pos { x: p.x, y: p.y }, scale: 1.5, yaw }, Some(species)));
+    }
+    out
+}
+
+fn hash01(x: f32, y: f32) -> f32 {
+    let mut r = Rng::seeded(((x.to_bits() as u64) << 32) ^ y.to_bits() as u64 ^ 0x2077_5EED);
+    r.unit()
 }
 
 /// Which species a plant of fuel class `fuel` at `p` is (`models::SPECIES`).
@@ -569,5 +779,31 @@ impl Rng {
     /// Uniform in `[0, 1)`.
     pub fn unit(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lean travels in the yaw's whole turns and leaves its sine and
+    /// cosine as they were; no lean, the yaw itself (every other plant
+    /// stays below `LEAN_TURNS`, which the shader reads as none).
+    #[test]
+    fn a_lean_rides_on_the_yaw() {
+        use std::f32::consts::TAU;
+        for k in 0..200 {
+            let yaw = k as f32 / 200.0 * TAU;
+            assert_eq!(lean_yaw(yaw, 1.0, 0.0), yaw);
+            let (bearing, share) = ((k * 7 % 16) as f32 / 16.0 * TAU, 1.0 - (k % 7) as f32 / 7.0);
+            let w = lean_yaw(yaw, bearing, share);
+            assert!((w.cos() - yaw.cos()).abs() < 2e-3 && (w.sin() - yaw.sin()).abs() < 2e-3, "{yaw} {w}");
+            // as `plant_common::place` reads it
+            let code = (w / TAU).floor() - LEAN_TURNS;
+            assert!(code >= 16.0, "{yaw}: {code}");
+            assert_eq!(code % 16.0, (k * 7 % 16) as f32);
+            let amount = (code / 16.0).floor() / 7.0 * LEAN_MAX;
+            assert!((amount - share * LEAN_MAX).abs() < 1e-4, "{amount}");
+        }
     }
 }
