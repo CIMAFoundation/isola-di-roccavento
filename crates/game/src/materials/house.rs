@@ -14,6 +14,11 @@
 //! ground at its foot, `y` a number of its own in 0..1 (how worn it is, which
 //! plaster and which clay), `buildings::Builder::house_span`.
 //!
+//! The downloaded house models (`buildings::house_models`, 2026-11-07) are
+//! drawn in it too, one mesh for many houses: their vertex alpha is a role,
+//! their colours and their state come from a small texture by instance
+//! (`data_image`).
+//!
 //! Without the scans nothing here is created.
 
 use bevy::asset::{uuid_handle, RenderAssetUsages};
@@ -58,6 +63,41 @@ pub struct HouseFinish {
     /// OpenGL tangent-space normals.
     #[texture(102, dimension = "2d_array")]
     pub normal: Handle<Image>,
+    /// The downloaded house models' colours and state, a column per house
+    /// (`DATA_ROWS` rows; `buildings::house_models`): read by the meshes with
+    /// a second uv, by their instance's tag.
+    #[texture(103, sample_type = "float", filterable = false)]
+    pub data: Handle<Image>,
+}
+
+/// Rows of the house models' data (`house.wesl`): wall (alpha: the house's
+/// number), trim (alpha: its ground), roof (alpha: slate), shutters, door
+/// (alpha: its state, `buildings::Damage` plus 4 for lit windows), frames.
+pub const DATA_ROWS: u32 = 6;
+
+/// The house models' data, `columns` houses of `DATA_ROWS` texels, given
+/// house by house. Kept in the main world too: `buildings::damage` writes a
+/// house's state into it, and the texture (no mips) is updated in place.
+pub fn data_image(texels: &[[f32; 4]], columns: u32) -> Image {
+    let columns = columns.max(1);
+    let mut bytes = vec![0u8; (columns * DATA_ROWS) as usize * 16];
+    for (k, t) in texels.iter().enumerate().take((columns * DATA_ROWS) as usize) {
+        // the texels are given house by house, a column each: to rows
+        let (house, row) = (k as u32 / DATA_ROWS, k as u32 % DATA_ROWS);
+        let at = ((row * columns + house) * 16) as usize;
+        for (i, v) in t.iter().enumerate() {
+            bytes[at + i * 4..at + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    let mut image = Image::new(
+        Extent3d { width: columns, height: DATA_ROWS, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        bytes,
+        TextureFormat::Rgba32Float,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    image
 }
 
 pub type HouseMaterial = ExtendedMaterial<StandardMaterial, HouseFinish>;
@@ -79,11 +119,11 @@ impl Plugin for HousePlugin {
 
 /// The house material over `base`, if the realistic look is on and the
 /// photographs load; `None` otherwise (the buildings keep their usual look).
-pub fn material(base: StandardMaterial, images: &mut Assets<Image>) -> Option<HouseMaterial> {
+pub fn material(base: StandardMaterial, images: &mut Assets<Image>, data: Handle<Image>) -> Option<HouseMaterial> {
     crate::models::scans()?;
     let color = array(&LAYERS.map(|n| format!("{n}_color.png")), true)?;
     let normal = array(&LAYERS.map(|n| format!("{n}_normal.png")), false)?;
-    Some(HouseMaterial { base, extension: HouseFinish { color: images.add(color), normal: images.add(normal) } })
+    Some(HouseMaterial { base, extension: HouseFinish { color: images.add(color), normal: images.add(normal), data } })
 }
 
 /// A file of `assets/buildings/`: of the source tree on the desktop, of the

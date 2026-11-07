@@ -1,0 +1,441 @@
+{
+ "version": 1,
+ "credits": [
+  "Poly Haven, Modular Urban Apartments Facade, James Ray Cock, CC0 (https://polyhaven.com/a/modular_urban_apartments_facade)"
+ ],
+ "layout": "per vertex 13 bytes: 3 i16 position in mm, 3 i8 normal x 127, 4 u8 (r, g, b, role): a tinted role's grey is its tint factor x 127.5, a baked role's colour sRGB; then u16 indices, from an even offset",
+ "houses": [
+  {
+   "name": "kit_3x3_s2_hip",
+   "source": "kit",
+   "storeys": 2,
+   "roof": "hip",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 14083,
+     "indices": 15636,
+     "vertex_offset": 0,
+     "index_offset": 183080
+    },
+    {
+     "vertices": 532,
+     "indices": 1062,
+     "vertex_offset": 214352,
+     "index_offset": 221268
+    }
+   ],
+   "size": [
+    9.0,
+    6.75,
+    9.0
+   ],
+   "height": 10.679
+  },
+  {
+   "name": "kit_3x3_s3_gable",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "gable",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 20740,
+     "indices": 23190,
+     "vertex_offset": 223392,
+     "index_offset": 493012
+    },
+    {
+     "vertices": 768,
+     "indices": 1572,
+     "vertex_offset": 539392,
+     "index_offset": 549376
+    }
+   ],
+   "size": [
+    9.0,
+    9.75,
+    9.0
+   ],
+   "height": 13.679
+  },
+  {
+   "name": "kit_3x3_s4_hip",
+   "source": "kit",
+   "storeys": 4,
+   "roof": "hip",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 18501,
+     "indices": 21198,
+     "vertex_offset": 552520,
+     "index_offset": 793034
+    },
+    {
+     "vertices": 618,
+     "indices": 1314,
+     "vertex_offset": 835430,
+     "index_offset": 843464
+    }
+   ],
+   "size": [
+    9.0,
+    12.75,
+    9.0
+   ],
+   "height": 16.679
+  },
+  {
+   "name": "kit_4x3_s2_hip",
+   "source": "kit",
+   "storeys": 2,
+   "roof": "hip",
+   "family": "B",
+   "lods": [
+    {
+     "vertices": 18260,
+     "indices": 20274,
+     "vertex_offset": 846092,
+     "index_offset": 1083472
+    },
+    {
+     "vertices": 684,
+     "indices": 1380,
+     "vertex_offset": 1124020,
+     "index_offset": 1132912
+    }
+   ],
+   "size": [
+    12.0,
+    6.75,
+    9.0
+   ],
+   "height": 10.679
+  },
+  {
+   "name": "kit_4x3_s3_hip",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "hip",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 23963,
+     "indices": 26811,
+     "vertex_offset": 1135672,
+     "index_offset": 1447192
+    },
+    {
+     "vertices": 884,
+     "indices": 1824,
+     "vertex_offset": 1500814,
+     "index_offset": 1512306
+    }
+   ],
+   "size": [
+    12.0,
+    9.75,
+    9.0
+   ],
+   "height": 13.679
+  },
+  {
+   "name": "kit_4x3_s3_gable",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "gable",
+   "family": "D",
+   "lods": [
+    {
+     "vertices": 26208,
+     "indices": 29280,
+     "vertex_offset": 1515954,
+     "index_offset": 1856658
+    },
+    {
+     "vertices": 610,
+     "indices": 1404,
+     "vertex_offset": 1915218,
+     "index_offset": 1923148
+    }
+   ],
+   "size": [
+    12.0,
+    9.75,
+    9.0
+   ],
+   "height": 13.679
+  },
+  {
+   "name": "kit_4x3_s4_hip",
+   "source": "kit",
+   "storeys": 4,
+   "roof": "hip",
+   "family": "C",
+   "lods": [
+    {
+     "vertices": 33763,
+     "indices": 38229,
+     "vertex_offset": 1925956,
+     "index_offset": 2364876
+    },
+    {
+     "vertices": 822,
+     "indices": 1866,
+     "vertex_offset": 2441334,
+     "index_offset": 2452020
+    }
+   ],
+   "size": [
+    12.0,
+    12.75,
+    9.0
+   ],
+   "height": 16.679
+  },
+  {
+   "name": "kit_4x3_s2_gable",
+   "source": "kit",
+   "storeys": 2,
+   "roof": "gable",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 15279,
+     "indices": 16947,
+     "vertex_offset": 2455752,
+     "index_offset": 2654380
+    },
+    {
+     "vertices": 574,
+     "indices": 1164,
+     "vertex_offset": 2688274,
+     "index_offset": 2695736
+    }
+   ],
+   "size": [
+    12.0,
+    6.75,
+    9.0
+   ],
+   "height": 10.679
+  },
+  {
+   "name": "kit_5x3_s3_gable",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "gable",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 19755,
+     "indices": 22197,
+     "vertex_offset": 2698064,
+     "index_offset": 2954880
+    },
+    {
+     "vertices": 714,
+     "indices": 1536,
+     "vertex_offset": 2999274,
+     "index_offset": 3008556
+    }
+   ],
+   "size": [
+    15.0,
+    9.75,
+    9.0
+   ],
+   "height": 13.679
+  },
+  {
+   "name": "kit_5x3_s2_hip",
+   "source": "kit",
+   "storeys": 2,
+   "roof": "hip",
+   "family": "B",
+   "lods": [
+    {
+     "vertices": 18930,
+     "indices": 21030,
+     "vertex_offset": 3011628,
+     "index_offset": 3257718
+    },
+    {
+     "vertices": 702,
+     "indices": 1440,
+     "vertex_offset": 3299778,
+     "index_offset": 3308904
+    }
+   ],
+   "size": [
+    15.0,
+    6.75,
+    9.0
+   ],
+   "height": 10.679
+  },
+  {
+   "name": "kit_4x4_s3_hip",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "hip",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 25717,
+     "indices": 28779,
+     "vertex_offset": 3311784,
+     "index_offset": 3646106
+    },
+    {
+     "vertices": 940,
+     "indices": 1962,
+     "vertex_offset": 3703664,
+     "index_offset": 3715884
+    }
+   ],
+   "size": [
+    12.0,
+    9.75,
+    12.0
+   ],
+   "height": 14.309
+  },
+  {
+   "name": "kit_5x4_s3_hip",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "hip",
+   "family": "D",
+   "lods": [
+    {
+     "vertices": 34295,
+     "indices": 38205,
+     "vertex_offset": 3719808,
+     "index_offset": 4165644
+    },
+    {
+     "vertices": 766,
+     "indices": 1812,
+     "vertex_offset": 4242054,
+     "index_offset": 4252012
+    }
+   ],
+   "size": [
+    15.0,
+    9.75,
+    12.0
+   ],
+   "height": 14.309
+  },
+  {
+   "name": "kit_5x4_s4_hip",
+   "source": "kit",
+   "storeys": 4,
+   "roof": "hip",
+   "family": "C",
+   "lods": [
+    {
+     "vertices": 45194,
+     "indices": 51357,
+     "vertex_offset": 4255636,
+     "index_offset": 4843158
+    },
+    {
+     "vertices": 1056,
+     "indices": 2442,
+     "vertex_offset": 4945872,
+     "index_offset": 4959600
+    }
+   ],
+   "size": [
+    15.0,
+    12.75,
+    12.0
+   ],
+   "height": 17.309
+  },
+  {
+   "name": "kit_6x3_s3_gable",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "gable",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 22998,
+     "indices": 25884,
+     "vertex_offset": 4964484,
+     "index_offset": 5263458
+    },
+    {
+     "vertices": 876,
+     "indices": 1854,
+     "vertex_offset": 5315226,
+     "index_offset": 5326614
+    }
+   ],
+   "size": [
+    18.0,
+    9.75,
+    9.0
+   ],
+   "height": 13.679
+  },
+  {
+   "name": "kit_6x4_s4_hip",
+   "source": "kit",
+   "storeys": 4,
+   "roof": "hip",
+   "family": "C",
+   "lods": [
+    {
+     "vertices": 47926,
+     "indices": 54252,
+     "vertex_offset": 5330322,
+     "index_offset": 5953360
+    },
+    {
+     "vertices": 1106,
+     "indices": 2574,
+     "vertex_offset": 6061864,
+     "index_offset": 6076242
+    }
+   ],
+   "size": [
+    18.0,
+    12.75,
+    12.0
+   ],
+   "height": 17.309
+  },
+  {
+   "name": "kit_7x4_s3_hip",
+   "source": "kit",
+   "storeys": 3,
+   "roof": "hip",
+   "family": "A",
+   "lods": [
+    {
+     "vertices": 37004,
+     "indices": 41361,
+     "vertex_offset": 6081390,
+     "index_offset": 6562442
+    },
+    {
+     "vertices": 1388,
+     "indices": 2898,
+     "vertex_offset": 6645164,
+     "index_offset": 6663208
+    }
+   ],
+   "size": [
+    21.0,
+    9.75,
+    12.0
+   ],
+   "height": 14.309
+  }
+ ]
+}

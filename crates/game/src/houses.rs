@@ -75,12 +75,12 @@ impl Context {
 
     /// How far out in its town `b` stands: 0 at the centre, 1 at the edge of
     /// four houses in five.
-    fn outskirts(&self, b: &Building) -> f32 {
+    pub(super) fn outskirts(&self, b: &Building) -> f32 {
         let Some((c, r)) = b.locality.as_ref().and_then(|l| self.centres.get(l)) else { return 0.5 };
         ((b.centroid[0] - c.x).powi(2) + (b.centroid[1] - c.y).powi(2)).sqrt() / r
     }
 
-    fn road_distance(&self, p: [f32; 2]) -> f32 {
+    pub(super) fn road_distance(&self, p: [f32; 2]) -> f32 {
         let mut best = f32::MAX;
         for [a, b] in &self.roads {
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
@@ -94,7 +94,7 @@ impl Context {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Type {
+pub(super) enum Type {
     /// Tall and narrow, of the old centres.
     Schiera,
     /// A town house of some standing: cornice, bands, painted frames.
@@ -120,19 +120,20 @@ enum Roof {
     Terrace,
 }
 
-/// Everything about a house that is chosen once.
-struct Style {
-    ty: Type,
-    storeys: usize,
+/// Everything about a house that is chosen once (also by the downloaded
+/// models, `house_models`: their type, storeys and colours).
+pub(super) struct Style {
+    pub(super) ty: Type,
+    pub(super) storeys: usize,
     roof: Roof,
-    slate: bool,
-    wall: [f32; 3],
-    trim: [f32; 3],
-    roof_c: [f32; 3],
-    shutters: Option<[f32; 3]>,
-    frame: [f32; 3],
-    sill: [f32; 3],
-    door: [f32; 3],
+    pub(super) slate: bool,
+    pub(super) wall: [f32; 3],
+    pub(super) trim: [f32; 3],
+    pub(super) roof_c: [f32; 3],
+    pub(super) shutters: Option<[f32; 3]>,
+    pub(super) frame: [f32; 3],
+    pub(super) sill: [f32; 3],
+    pub(super) door: [f32; 3],
     /// Painted frames round the windows.
     painted_frames: bool,
     /// Painted quoins at the corners.
@@ -142,7 +143,7 @@ struct Style {
     /// A cornice of three steps under the eave (else a plain one).
     cornice: bool,
     /// 0 fresh .. 1 old (`house.wesl`).
-    worn: f32,
+    pub(super) worn: f32,
 }
 
 /// Ligurian washes (sRGB, for the photographed plaster: a little lighter
@@ -164,7 +165,7 @@ const WALLS: [[f32; 3]; 14] = [
     [0.88, 0.72, 0.66], // dusty pink
 ];
 
-const SHUTTERS: [[f32; 3]; 7] = [
+pub(super) const SHUTTERS: [[f32; 3]; 7] = [
     [0.18, 0.36, 0.24], // Genoa green
     [0.12, 0.26, 0.18], // dark green
     [0.42, 0.52, 0.40], // sage
@@ -200,7 +201,7 @@ fn jitter(c: [f32; 3], h: f32, k: f32) -> [f32; 3] {
     [(c[0] * f).min(1.0), (c[1] * f * g).min(1.0), (c[2] * f / g).min(1.0)]
 }
 
-fn style(b: &Building, area: f32, outskirts: f32) -> Style {
+pub(super) fn style(b: &Building, area: f32, outskirts: f32) -> Style {
     let h = |s: u64| hash01(b.id as u64, 0x4800 + s);
     let tag = b.kind.as_deref().unwrap_or("house");
     let ty = match tag {

@@ -108,9 +108,10 @@ def scans_for_the_web():
     found = [("assets/models/vegetation_scans.json", json.dumps(index).encode()),
              ("assets/models/vegetation_scans.bin", bytes(kept)),
              ("assets/models/foliage_scans.png", png.getvalue())]
-    # the realistic rocca (scripts/build_rocca_real.py, landmarks::rocca_scans)
-    # and vehicles (tools/units/build_real_vehicles.py, units.rs): as they are
-    for n in ("rocca_scans.json", "vehicles_real.json"):
+    # the realistic rocca (scripts/build_rocca_real.py, landmarks::rocca_scans),
+    # vehicles (tools/units/build_real_vehicles.py, units.rs) and house models
+    # (tools/buildings/build_real_houses.py, buildings::house_models): as they are
+    for n in ("rocca_scans.json", "vehicles_real.json", "houses_real.json", "houses_real.bin"):
         if os.path.exists(os.path.join(src, n)):
             found.append(("assets/models/" + n, open(os.path.join(src, n), "rb").read()))
     return found

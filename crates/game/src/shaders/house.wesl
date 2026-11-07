@@ -20,10 +20,14 @@ import bevy_pbr::render::pbr_types::{PbrInput, STANDARD_MATERIAL_FLAGS_UNLIT_BIT
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 import game::shaders::noise::{hash21, value_noise};
 import game::shaders::faded_shadow::apply_pbr_lighting_faded;
+import bevy_pbr::render::mesh_functions::get_tag;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var house_color: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var house_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var house_normal: texture_2d_array<f32>;
+// The downloaded house models (`house_models.rs`): a column per house, its
+// colours and its state (`materials::house::DATA_ROWS`).
+@group(constants::MATERIAL_BIND_GROUP) @binding(103) var house_data: texture_2d<f32>;
 
 const SURFACE_PAINT: u32 = 1u;
 const SURFACE_METAL: u32 = 2u;
@@ -140,9 +144,9 @@ fn prop_albedo(c: vec3<f32>, p: vec3<f32>, n: vec3<f32>, px_m: f32) -> vec3<f32>
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr = pbr_input_from_standard_material(in, is_front);
     @if(VERTEX_COLORS)
-    let surface = surface_id(in.color.a);
+    var surface = surface_id(in.color.a);
     @else
-    let surface = 0u;
+    var surface = 0u;
     // the house's ground and its own number (none: the kit's props)
     var foot = -1.0e4;
     var seed = 0.5;
@@ -152,7 +156,52 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     pbr.material.base_color = alpha_discard(pbr.material.flags, pbr.material.alpha_cutoff, pbr.material.base_color);
     let p = in.world_position.xyz;
-    let c = pbr.material.base_color.rgb;
+    var c = pbr.material.base_color.rgb;
+    // A downloaded house model (`house_models.rs`, the meshes with a second
+    // uv): one mesh drawn for many houses, each its own instance. The vertex
+    // says what it is (its role, in the alpha) and how much lighter or
+    // darker than its role the model's texture is there (a grey of half
+    // that); the house's colours, ground, number and state are in its
+    // column of `house_data`.
+    @if(VERTEX_UVS_B && VERTEX_COLORS) {
+        let m_col = i32(get_tag(in.instance_index));
+        let m_wall = textureLoad(house_data, vec2<i32>(m_col, 0), 0);
+        let m_trim = textureLoad(house_data, vec2<i32>(m_col, 1), 0);
+        let m_roof = textureLoad(house_data, vec2<i32>(m_col, 2), 0);
+        let m_shut = textureLoad(house_data, vec2<i32>(m_col, 3), 0);
+        let m_door = textureLoad(house_data, vec2<i32>(m_col, 4), 0);
+        let m_frame = textureLoad(house_data, vec2<i32>(m_col, 5), 0);
+        seed = m_wall.a;
+        foot = m_trim.a;
+        let m_role = u32(round(in.color.a * 255.0)) - 40u;
+        let m_k = in.color.r * 2.0;
+        switch m_role {
+            case 0u: { c = m_wall.rgb * m_k; surface = HOUSE_PLASTER; }
+            case 1u: { c = m_trim.rgb * m_k; surface = HOUSE_PAINT; }
+            case 2u: { c = m_roof.rgb; surface = select(PART_TILES, HOUSE_SLATE, m_roof.a > 0.5); }
+            case 3u: { c = vec3<f32>(0.06, 0.07, 0.10); surface = SURFACE_GLASS; }
+            case 4u: { c = m_frame.rgb * m_k; surface = PART_FRAME; }
+            case 5u: { c = m_shut.rgb; surface = SURFACE_SHUTTER; }
+            case 6u: { c = m_door.rgb * m_k; surface = SURFACE_WOOD; }
+            case 7u: { c = vec3<f32>(0.07) * m_k; surface = SURFACE_METAL; }
+            case 8u: { c = m_trim.rgb * m_k * 0.8; surface = PART_STONE; }
+            case 10u: { c = m_wall.rgb * m_k * 0.92; surface = HOUSE_REVEAL; }
+            default: { c = in.color.rgb; surface = HOUSE_PLASTER; }
+        }
+        // the fire, as `buildings::recolor_structure` does it to the
+        // houses in the chunks: 1 warm, 2 alight, 3 charred; 4 lit windows
+        let m_state = u32(round(m_door.a));
+        switch m_state & 3u {
+            case 1u: { c = vec3<f32>(min(c.r * 0.85 + 0.18, 1.3), c.g * 0.80 + 0.06, c.b * 0.6); }
+            case 2u: { c = vec3<f32>(2.4, 0.75, 0.14); }
+            case 3u: { c = vec3<f32>(0.10, 0.09, 0.09) + c * vec3<f32>(0.08, 0.07, 0.07); }
+            default: {
+                if (m_state & 4u) != 0u && m_role == 3u {
+                    c = vec3<f32>(2.1, 1.55, 0.85);
+                }
+            }
+        }
+    }
     let n = normalize(pbr.N);
     // derivatives first, before anything branches
     let dpx = dpdx(p);

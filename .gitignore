@@ -22,3 +22,6 @@ target-piante/
 
 # Plant source models (tools/vegetation/fetch_polyhaven.py), gigabytes
 /vegetation_src/
+
+# House source models (tools/buildings/fetch_houses.sh), downloaded
+/buildings_src/

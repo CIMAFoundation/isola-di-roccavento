@@ -49,6 +49,9 @@ pub(crate) use town_kit::kit_trees;
 #[path = "houses.rs"]
 mod houses;
 
+#[path = "house_models.rs"]
+mod house_models;
+
 /// Unlit window glass — dark enough that a daylit building reads as an
 /// ordinary wall with punched openings, not a lattice of black holes.
 const WINDOW_GLASS: [f32; 4] = [0.06, 0.07, 0.10, 1.0];
@@ -105,6 +108,10 @@ struct Structure {
     lit: bool,
     /// Simulated time this structure caught, if it has.
     alight_at_s: f32,
+    /// A downloaded model stands here (`house_models`): its column of the
+    /// models' data texture, where its state is drawn (its vertices in the
+    /// chunk are only the footing).
+    model: Option<u32>,
 }
 
 struct Chunk {
@@ -117,6 +124,9 @@ struct Chunk {
 #[derive(Resource)]
 pub struct Buildings {
     chunks: Vec<Chunk>,
+    /// The house models' data texture and its texels as built, house by
+    /// house (`materials::house::data_image`), if any model stands.
+    models: Option<(Handle<Image>, Vec<[f32; 4]>)>,
     /// Sim generation `damage` last ran for (`u64::MAX` = none, after a restart).
     damage_gen: u64,
 }
@@ -155,7 +165,12 @@ pub fn spawn(
     };
     // the houses built facade by facade, in their own material (`houses`,
     // `materials::house`); the photographed masonry if its files are missing
-    let house_material = real.as_ref().and_then(|_| materials::house::material(base_material.clone(), &mut images)).map(|m| house_materials.add(m));
+    // the downloaded house models' colours and state (`house_models`), filled
+    // once the houses are placed
+    let model_data = images.add(materials::house::data_image(&[], 1));
+    let house_material = real.as_ref().and_then(|_| materials::house::material(base_material.clone(), &mut images, model_data.clone())).map(|m| house_materials.add(m));
+    let library = house_material.as_ref().and_then(|_| house_models::Library::load(&mut meshes));
+    let mut placed: Vec<house_models::Placement> = Vec::new();
     let masonry_material = if house_material.is_some() { None } else { real.as_ref().map(|t| masonry_materials.add(masonry::material(base_material, t, Masonry::Town))) };
     let ctx = house_material.as_ref().map(|_| houses::Context::new(scn));
     let material = materials.add(materials::structure(StandardMaterial {
@@ -196,11 +211,16 @@ pub fn spawn(
 
         for b in bucket {
             let start = builder.positions.len() as u32;
+            let mut model = None;
             let Some((win_start, win_end)) =
-                emit_building(scn, b, levels.get(&b.id).copied(), ctx.as_ref(), &mut builder)
+                emit_building(scn, b, levels.get(&b.id).copied(), ctx.as_ref(), library.as_ref(), &mut model, &mut builder)
             else {
                 continue;
             };
+            let model = model.map(|p| {
+                placed.push(p);
+                placed.len() as u32 - 1
+            });
             let households = residents.get(&b.id).cloned().unwrap_or_default();
             structures.push(Structure {
                 households,
@@ -215,6 +235,7 @@ pub fn spawn(
                 drawn: Damage::None as u8,
                 lit: false,
                 alight_at_s: f32::INFINITY,
+                model,
             });
             count += 1;
         }
@@ -242,8 +263,18 @@ pub fn spawn(
         chunks.len(),
         tris as f32 / 1e6
     );
+    let models = match (&library, &house_material) {
+        (Some(lib), Some(m)) if !placed.is_empty() => {
+            house_models::spawn(&mut commands, lib, &placed, m);
+            let texels: Vec<[f32; 4]> = placed.iter().flat_map(|p| p.texels).collect();
+            let _ = images.insert(&model_data, materials::house::data_image(&texels, placed.len() as u32));
+            Some((model_data, texels))
+        }
+        _ => None,
+    };
     commands.insert_resource(Buildings {
         chunks,
+        models,
         damage_gen: u64::MAX,
     });
 }
@@ -354,6 +385,8 @@ fn emit_building(
     b: &Building,
     baked_levels: Option<u8>,
     ctx: Option<&houses::Context>,
+    library: Option<&house_models::Library>,
+    model: &mut Option<house_models::Placement>,
     out: &mut Builder,
 ) -> Option<(u32, u32)> {
     let n = b.ring.len();
@@ -403,7 +436,17 @@ fn emit_building(
         ring.reverse();
     }
 
-    // In the realistic style, a house is built facade by facade (`houses`).
+    // In the realistic style, a downloaded model where one fits
+    // (`house_models`); else a house built facade by facade (`houses`).
+    if let (Some(ctx), Some(lib)) = (ctx, library) {
+        if matches!(Kind::of(b.kind.as_deref(), area), Kind::House | Kind::Apartments) {
+            if let Some(p) = house_models::place(lib, scn, b, ctx, &ring, out) {
+                *model = Some(p);
+                let end = out.positions.len() as u32;
+                return Some((end, end));
+            }
+        }
+    }
     if let Some(ctx) = ctx {
         if matches!(Kind::of(b.kind.as_deref(), area), Kind::House | Kind::Apartments) {
             if let Some(range) = houses::emit(scn, b, ctx, &ring, out) {
@@ -1058,6 +1101,7 @@ pub fn reset(
     mut restarted: MessageReader<crate::sim::SimRestarted>,
     mut buildings: ResMut<Buildings>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if restarted.is_empty() {
         return;
@@ -1072,6 +1116,11 @@ pub fn reset(
         }
         if let Some(mut mesh) = meshes.get_mut(&chunk.mesh) {
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, chunk.base.clone());
+        }
+    }
+    if let Some((h, texels)) = &buildings.models {
+        if let Some(mut img) = images.get_mut(h) {
+            *img = materials::house::data_image(texels, (texels.len() / materials::house::DATA_ROWS as usize) as u32);
         }
     }
 }
@@ -1132,6 +1181,7 @@ pub fn damage(
     sim: Res<Sim>,
     mut buildings: ResMut<Buildings>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut frame: ResMut<crate::streamed_mesh::StreamedFrame>,
 ) {
     // The sim is flagged changed every frame (kiosk systems take it mutably);
@@ -1145,7 +1195,9 @@ pub fn damage(
     let warm: Vec<bool> = fields.iter().map(|f| f.radiant + f.ember > 0.05).collect();
     let lost: Vec<bool> = fields.iter().map(|f| f.alight).collect();
 
-    let Buildings { chunks, .. } = &mut *buildings;
+    let Buildings { chunks, models, .. } = &mut *buildings;
+    // the models whose state changed: (column, state)
+    let mut model_states: Vec<(u32, u8)> = Vec::new();
 
     for chunk in chunks.iter_mut() {
         // the vertices of the structures that change
@@ -1171,6 +1223,9 @@ pub fn damage(
                 s.drawn = want;
                 dirty.start = dirty.start.min(s.vert_start as usize);
                 dirty.end = dirty.end.max(s.vert_end as usize);
+                if let Some(m) = s.model {
+                    model_states.push((m, want | if s.lit { 4 } else { 0 }));
+                }
             }
         }
         if dirty.is_empty() {
@@ -1189,5 +1244,20 @@ pub fn damage(
             }
         }
         crate::streamed_mesh::write_range(&mut frame, chunk.mesh.id(), mesh, dirty);
+    }
+    // The models' state, in their column of the data texture (the door's
+    // alpha, `house.wesl`): written in place, it is a few kilobytes.
+    if let (Some((h, texels)), false) = (models.as_ref(), model_states.is_empty()) {
+        let columns = (texels.len() / materials::house::DATA_ROWS as usize) as u32;
+        if let Some(mut img) = images.get_mut(h) {
+            if let Some(data) = img.data.as_mut() {
+                for (col, state) in model_states {
+                    let at = ((4 * columns + col) * 16 + 12) as usize;
+                    if let Some(b) = data.get_mut(at..at + 4) {
+                        b.copy_from_slice(&(state as f32).to_le_bytes());
+                    }
+                }
+            }
+        }
     }
 }

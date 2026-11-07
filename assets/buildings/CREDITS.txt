@@ -24,4 +24,4 @@ crates/game/src/houses.rs). Sempre Poly Haven, CC0, mappe 1K impacchettate allo 
 - plaster2_*.png: "White Rough Plaster"  https://polyhaven.com/a/white_rough_plaster  (CC0)
 - roof2_*.png: "Clay Roof Tiles 03"  https://polyhaven.com/a/clay_roof_tiles_03  (CC0)
 
-Nessun modello 3D scaricato: case, panchine e lampioni sono geometria generata in Rust.
+Panchine e lampioni sono geometria generata in Rust. Dal 2026-11-07, con le scansioni, gran parte delle case sono modelli costruiti dal kit CC0 "Modular Urban Apartments Facade" di Poly Haven (assets/models/CREDITS.txt, houses_real.*); le altre restano generate in Rust.
