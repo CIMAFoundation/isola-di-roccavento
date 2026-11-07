@@ -22,6 +22,8 @@ mod field;
 mod fields;
 mod fire_shader;
 mod fire_lab;
+mod fire_ahead;
+mod fire_fluid;
 mod fire_view;
 mod fire_volumetric;
 mod forecast_view;
@@ -193,6 +195,7 @@ fn main() -> anyhow::Result<()> {
     .add_plugins((sky::SkyPlugin, sea::SeaPlugin, boats::BoatsPlugin, landmarks::LandmarksPlugin, coast::CoastPlugin))
     .init_state::<AppState>()
     .init_resource::<units::Glide>()
+    .init_resource::<fire_ahead::FireAhead>()
     .init_resource::<kiosk::snap::SnapView>()
     .init_resource::<kiosk::snap::SnapHide>()
     .init_resource::<record::Recorder>()
@@ -252,6 +255,7 @@ fn main() -> anyhow::Result<()> {
     app.add_plugins(horizon::HorizonPlugin);
     app.add_plugins(godrays::GodRaysPlugin);
     app.add_plugins(fire_volumetric::FireVolumetricPlugin);
+    app.add_plugins(fire_fluid::FireFluidPlugin);
     app.add_plugins(render_scale::RenderScalePlugin);
     app.add_plugins(vegetation::PlantRenderPlugin);
     #[cfg(not(target_arch = "wasm32"))]
@@ -390,6 +394,7 @@ fn kiosk_systems(app: &mut App) {
             (fire_view::reset, buildings::reset, overlays::reset, units::reset, kiosk::marks::reset)
                 .after(kiosk::step)
                 .run_if(in_state(AppState::Playing)),
+            fire_ahead::update.after(kiosk::step).before(fire_view::update_fire_map).run_if(in_state(AppState::Playing)),
             (
                 fire_view::update_fire_map,
                 fire_view::update_flames,

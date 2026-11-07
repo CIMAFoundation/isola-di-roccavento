@@ -360,7 +360,12 @@ impl Plugin for FireVolumetricPlugin {
         crate::load_wesl!(app, MARCH_SHADER, "shaders/fire_march.wesl");
         crate::load_wesl!(app, COMPOSITE_SHADER, "shaders/fire_composite.wesl");
         crate::load_wesl!(app, RESOLVE_SHADER, "shaders/fire_resolve.wesl");
-        app.insert_resource(VolumeSettings::from_env()).add_systems(Update, tag_cameras);
+        app.insert_resource(VolumeSettings::from_env()).add_systems(Update, tag_cameras).add_systems(Startup, |mut images: ResMut<Assets<Image>>| {
+            // the lab has no game: a front map that says nothing (`Params::front` off)
+            if images.get(&crate::fire_ahead::FRONT_MAP).is_none() {
+                let _ = images.insert(&crate::fire_ahead::FRONT_MAP, crate::fire_ahead::front_image(1, 1));
+            }
+        });
         if !lab {
             app.add_systems(Update, update_from_sim.run_if(in_state(crate::AppState::Playing)));
         }
@@ -442,6 +447,13 @@ struct Params {
     /// width strode where nothing smokes, the optical depth a step of thin
     /// smoke aims at and how many times longer it may be for it.
     stride: Vec4,
+    /// The front map (`fire_ahead`): the drawing clock less its base (s),
+    /// 1 when the flames' band is read from it.
+    front: Vec4,
+    /// The flames' fluid (`fire_fluid`): its corner (m, Bevy x, z), its
+    /// voxel (m), 1 on; then voxels a side, up, the voxel's height (m).
+    fluid: Vec4,
+    fluid2: Vec4,
 }
 
 /// The wind of the last few minutes of sim time: smoke aloft drifted with
@@ -692,6 +704,7 @@ fn update_from_sim(
     settings: Res<VolumeSettings>,
     state: Option<ResMut<PlumeState>>,
     mut images: ResMut<Assets<Image>>,
+    ahead: Option<Res<crate::fire_ahead::FireAhead>>,
 ) {
     let Some(mut state) = state else {
         let t = &sim.scn.terrain;
@@ -710,8 +723,13 @@ fn update_from_sim(
     let dt = std::mem::replace(&mut state.since, 0.0);
     state.generation = sim.generation;
     let w = sim.scn.world;
-    let now = sim.time_s() as f32;
+    // on the drawing clock, with the cells the lookahead lights within the
+    // map's next rewrite or two (`fire_ahead`): the march strides finely
+    // where the front will be when the shaders draw it
+    let ahead = ahead.filter(|_| crate::fire_ahead::on());
+    let now = ahead.as_ref().map_or(sim.time_s() as f32, |a| a.clock as f32);
     let (fire_state, arrival, intensity) = (sim.fire.state(), sim.fire.arrival_times(), sim.fire.intensity());
+    let soon = 2.0 * PLUME_INTERVAL_S * sim.speed.max(60.0);
     let wind = smoke_wind(&sim);
     rebuild(
         &mut state,
@@ -722,9 +740,30 @@ fn update_from_sim(
         Vec2::new(wind.x, wind.y),
         wind.w,
         &settings,
-        |i| (fire_state[i] != CellFire::Unburnt && arrival[i] != i32::MIN).then(|| (arrival[i] as f32, intensity[i])),
+        |i| match ahead.as_ref() {
+            // a cell only foreseen has no intensity yet: its neighbours'
+            Some(a) => a.drawn_arrival(&sim.game, i, soon).map(|t| (t, if fire_state[i] == CellFire::Unburnt { near_intensity(intensity, w.fire_cols, i) } else { intensity[i] })),
+            None => (fire_state[i] != CellFire::Unburnt && arrival[i] != i32::MIN).then(|| (arrival[i] as f32, intensity[i])),
+        },
         |i| drawn_ground(&sim.scn, i),
     );
+}
+
+/// The strongest fireline intensity round cell `i` (kW/m; its eight
+/// neighbours), for a cell the lookahead lights before the game does.
+fn near_intensity(intensity: &[f32], cols: usize, i: usize) -> f32 {
+    let (r, c) = ((i / cols) as i64, (i % cols) as i64);
+    let rows = (intensity.len() / cols) as i64;
+    let mut best = 0.0f32;
+    for dr in -1..=1 {
+        for dc in -1..=1 {
+            let (rr, cc) = (r + dr, c + dc);
+            if rr >= 0 && cc >= 0 && rr < rows && cc < cols as i64 {
+                best = best.max(intensity[(rr * cols as i64 + cc) as usize]);
+            }
+        }
+    }
+    best
 }
 
 /// The ground the scene draws at the centre of fire cell `i`
@@ -815,6 +854,8 @@ fn write_mips(data: &mut [u8], level0: &[[f32; 4]], cols: usize, rows: usize) {
 #[derive(Resource)]
 struct Extracted {
     params: Params,
+    /// The front map's clock and whether it is on (`Params::front`).
+    front: Vec4,
     noise: AssetId<Image>,
     near: f32,
     div: u32,
@@ -833,6 +874,7 @@ fn extract(
     state: Extract<Option<Res<PlumeState>>>,
     settings: Extract<Option<Res<VolumeSettings>>>,
     cams: Extract<Query<(RenderEntity, &Projection), With<FireVolumeCamera>>>,
+    ahead: Extract<Option<Res<crate::fire_ahead::FireAhead>>>,
 ) {
     let params = state.as_ref().and_then(|s| s.params);
     let mut near = 0.1;
@@ -851,7 +893,13 @@ fn extract(
     let clear = settings.as_ref().map_or(600.0, |s| s.clear_m);
     let show = settings.as_ref().map_or(3.0, |s| f32::from(s.show_flames) + 2.0 * f32::from(s.show_smoke) + 4.0 * s.count.min(3) as f32 + 16.0 * f32::from(s.solo) + 32.0 * s.mark.min(3) as f32 + 128.0 * f32::from(s.offset));
     match (params, state.as_ref()) {
-        (Some(params), Some(s)) => commands.insert_resource(Extracted { params, noise: s.noise.id(), near, div, show, clear }),
+        (Some(params), Some(s)) => {
+            let front = match ahead.as_ref() {
+                Some(a) if crate::fire_ahead::on() => Vec4::new((a.clock - a.base) as f32, 1.0, 0.0, 0.0),
+                _ => Vec4::ZERO,
+            };
+            commands.insert_resource(Extracted { params, front, noise: s.noise.id(), near, div, show, clear })
+        }
         _ => commands.remove_resource::<Extracted>(),
     }
 }
@@ -902,6 +950,10 @@ fn init_pipelines(
                     sampler(SamplerBindingType::Filtering),
                     // the ground
                     texture_2d(TextureSampleType::Float { filterable: true }),
+                    // the front map, the fluid's state and its sampler
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                    texture_3d(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
                 ),
             ),
         )
@@ -1139,6 +1191,7 @@ fn prepare(
     queue: Res<RenderQueue>,
     views: Query<(Entity, &ExtractedView, &ExtractedCamera, &Msaa, Option<&MainPassResolutionOverride>), With<VolumeView>>,
     time: Res<Time>,
+    fluid: Option<Res<crate::fire_fluid::FluidFrame>>,
 ) {
     let Some(extracted) = extracted else {
         histories.0.clear();
@@ -1273,6 +1326,10 @@ fn prepare(
         params.rays = rays_from_clip(world_from_view, view.clip_from_view);
         params.eye = eye.extend(1.0);
         params.more.w = time.elapsed_secs_wrapped();
+        params.front = extracted.front;
+        if let Some(now) = fluid.as_ref().and_then(|f| f.frame) {
+            (params.fluid, params.fluid2) = now.march();
+        }
         let mut uniform = UniformBuffer::from(params);
         uniform.write_buffer(&device, &queue);
         commands.entity(entity).insert(ViewData {
@@ -1296,6 +1353,7 @@ fn draw(
     extracted: Option<Res<Extracted>>,
     images: Res<RenderAssets<GpuImage>>,
     stamps: Option<Res<crate::bench::PassStamps>>,
+    fluid: Option<Res<crate::fire_fluid::FluidGpu>>,
     mut ctx: RenderContext,
 ) {
     let (entity, target, depth, view_bind_group, data) = view.into_inner();
@@ -1313,10 +1371,17 @@ fn draw(
         Some(ready) => ready,
         None => None,
     };
-    let (Some(plume), Some(noise), Some(ground)) = (images.get(PLUME_MAP.id()), images.get(extracted.noise), images.get(GROUND_MAP.id()))
+    let (Some(plume), Some(noise), Some(ground), Some(front)) =
+        (images.get(PLUME_MAP.id()), images.get(extracted.noise), images.get(GROUND_MAP.id()), images.get(crate::fire_ahead::FRONT_MAP.id()))
     else {
         return;
     };
+    // the flames' fluid, a step before the march reads it
+    if let Some(fluid) = fluid.as_ref() {
+        let device = ctx.render_device().clone();
+        crate::fire_fluid::step(ctx.command_encoder(), &device, fluid, &pipeline_cache, &images);
+    }
+    let fluid_view = fluid.as_ref().filter(|f| f.active).map(|f| (f.latest(), &f.sampler));
     // under multisampling the composite draws into the samples the main
     // pass left, and they are resolved anew
     let samples = if data.multisampled {
@@ -1342,6 +1407,9 @@ fn draw(
             &noise.texture_view,
             &noise.sampler,
             &ground.texture_view,
+            &front.texture_view,
+            fluid_view.map_or(&noise.texture_view, |f| f.0),
+            fluid_view.map_or(&noise.sampler, |f| f.1),
         )),
     );
     let resolve_group = device.create_bind_group(
@@ -1446,6 +1514,62 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WESL shader of the volumes as plain WGSL for naga: the imports
+    /// stubbed (the few fields of Bevy's bindings it reads), each `@if(X)`
+    /// item dropped and the `@else` one kept (the variant without `X`).
+    fn without_wesl(src: &str, stubs: &str) -> String {
+        let mut out = String::from(stubs);
+        let mut lines = src.lines().peekable();
+        while let Some(line) = lines.next() {
+            let t = line.trim_start();
+            if t.starts_with("import ") {
+                continue;
+            }
+            if t == "@else" {
+                continue;
+            }
+            if t.starts_with("@if(") {
+                // skip the next item: a line, or a block to its closing brace
+                let mut depth = 0i32;
+                let mut opened = false;
+                for l in lines.by_ref() {
+                    depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+                    opened |= l.contains('{');
+                    if (opened && depth <= 0) || (!opened && l.trim_end().ends_with(';')) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    const MARCH_STUBS: &str = "
+struct FullscreenVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
+struct StubView { world_position: vec3<f32>, exposure: f32 };
+@group(0) @binding(0) var<uniform> view: StubView;
+struct StubGlobals { time: f32, pad: vec3<f32> };
+@group(0) @binding(1) var<uniform> globals: StubGlobals;
+struct StubLight { direction_to_light: vec3<f32>, pad: f32, color: vec4<f32> };
+struct StubLights { directional_lights: array<StubLight, 1>, ambient_color: vec4<f32>, n_directional_lights: u32 };
+@group(0) @binding(2) var<uniform> lights: StubLights;
+fn apply_scene_fog(c: vec4<f32>, p: vec3<f32>) -> vec4<f32> { return c; }
+";
+
+    /// The march is valid WGSL (its imports stubbed): the game compiles it
+    /// only when it draws the volumes.
+    #[test]
+    fn the_march_validates() {
+        let src = without_wesl(include_str!("shaders/fire_march.wesl"), MARCH_STUBS);
+        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+    }
 
     #[test]
     fn a_steady_wind_drifts_straight_and_spreads_nothing() {

@@ -903,6 +903,7 @@ pub fn build(
     // shader adds a grain there so the meadow keeps its contrast (0 = no blades)
     mask.rect.w = if gfx.cover_m > 0.0 { crate::near_cover::BANDS_M[crate::near_cover::BANDS_M.len() - 1] } else { 0.0 };
     let _ = images.insert(&crate::ground_mask::GRASS_MAP, crate::ground_mask::grass_map(scn));
+    let _ = images.insert(&crate::fire_ahead::FRONT_MAP, crate::fire_ahead::front_image(scn.world.fire_cols, scn.world.fire_rows));
 
     // the base grid: every `stride`-th sample
     let (cols, rows, posting) = ((t.cols - 1) / stride + 1, (t.rows - 1) / stride + 1, t.posting * stride as f32);

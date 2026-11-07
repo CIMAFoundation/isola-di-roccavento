@@ -32,6 +32,9 @@ struct Terrain {
     canopy_conifer: vec4<f32>,
     canopy_broadleaf: vec4<f32>,
     canopy_macchia: vec4<f32>,
+    // x: the drawing clock less the front map's base (s); y > 0.5: the
+    // front map is read (`fire_ahead`)
+    fire_front: vec4<f32>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> terrain: Terrain;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var road_tex: texture_2d<f32>;
@@ -51,6 +54,9 @@ struct Terrain {
 @group(constants::MATERIAL_BIND_GROUP) @binding(9) var detail_tex: texture_2d_array<f32>;
 @if(REAL_GROUND)
 @group(constants::MATERIAL_BIND_GROUP) @binding(10) var detail_samp: sampler;
+// The front drawn ahead of the game's (`fire_ahead::FRONT_MAP`): a line a
+// fire cell, read texel by texel.
+@group(constants::MATERIAL_BIND_GROUP) @binding(11) var front_tex: texture_2d<f32>;
 
 // Dry karst, not wet slate: a low reflectance keeps the sun's specular lobe
 // from painting a bright sheet across every ridge.
@@ -481,6 +487,30 @@ fn with_canopy(rgb_in: vec3<f32>, p: vec3<f32>, cover_in: f32, kind: f32, light:
     return mix(near_rgb, far_rgb, far);
 }
 
+// The fire map's g and b (`fire_view::update_fire_map`) from the front
+// map instead (`fire_ahead`): each corner's share burnt on this frame's
+// clock, and its arrival, then bilinear as the filter would. g how burnt, b
+// the arrival against now weighted by g; r and a stay the fire map's.
+fn front_fire(uv: vec2<f32>, fire: vec4<f32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(front_tex));
+    let at = uv * vec2<f32>(dims) - 0.5;
+    let c0 = vec2<i32>(floor(at));
+    let f = at - floor(at);
+    let clock = terrain.fire_front.x;
+    var g = 0.0;
+    var b = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2<i32>(k & 1, k >> 1);
+        let wk = mix(1.0 - f.x, f.x, f32(o.x)) * mix(1.0 - f.y, f.y, f32(o.y));
+        let l = textureLoad(front_tex, clamp(c0 + o, vec2<i32>(0), dims - 1), 0);
+        let v = l.g + l.b * clock;
+        let s = select(clamp(v, l.a, 1.0), clamp(v, 0.0, l.a), l.b >= 0.0);
+        g += wk * s;
+        b += wk * s * min(l.r - clock, 0.0);
+    }
+    return vec4<f32>(fire.r, g, b, fire.a);
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let p = in.world_position.xyz;
@@ -492,7 +522,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // read at a point warped by ~7 m as `field::FireField::warp` does.
     let wn = vec2<f32>(p.x, -p.z);
     let fire_warp = vec2<f32>(value_noise(wn * 0.045 + 11.0), value_noise(wn * 0.045 + vec2<f32>(3.0, 29.0))) - 0.5;
-    let fire_s = textureSample(grass_tex, grass_samp, (wn + fire_warp * 14.0) * terrain.mask_rect.xy);
+    let fire_uv = (wn + fire_warp * 14.0) * terrain.mask_rect.xy;
+    var fire_s = textureSample(grass_tex, grass_samp, fire_uv);
+    if terrain.fire_front.y > 0.5 {
+        fire_s = front_fire(fire_uv, fire_s);
+    }
     let mpp = max(length(dpdx(p.xz)), length(dpdy(p.xz)));
     // colour and normal per sample (texel centres on the samples), not per
     // vertex: the mesh may be coarser than the data

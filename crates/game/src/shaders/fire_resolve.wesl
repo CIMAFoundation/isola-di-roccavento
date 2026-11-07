@@ -39,6 +39,9 @@ struct Params {
     eye: vec4<f32>,
     more: vec4<f32>,
     stride: vec4<f32>,
+    front: vec4<f32>,
+    fluid: vec4<f32>,
+    fluid2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;

@@ -29,6 +29,9 @@ struct Params {
     eye: vec4<f32>,
     more: vec4<f32>,
     stride: vec4<f32>,
+    front: vec4<f32>,
+    fluid: vec4<f32>,
+    fluid2: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> p: Params;
@@ -41,6 +44,11 @@ struct Params {
 @group(1) @binding(4) var noise_tex: texture_3d<f32>;
 @group(1) @binding(5) var noise_samp: sampler;
 @group(1) @binding(6) var ground_tex: texture_2d<f32>;
+// the front drawn ahead of the game's (`fire_ahead::FRONT_MAP`), read
+// texel by texel; the flames' fluid (`fire_fluid`), heat in w
+@group(1) @binding(7) var front_tex: texture_2d<f32>;
+@group(1) @binding(8) var fluid_tex: texture_3d<f32>;
+@group(1) @binding(9) var fluid_samp: sampler;
 
 struct Out {
     @location(0) color: vec4<f32>,
@@ -355,6 +363,58 @@ fn tongues_at(pos: vec3<f32>, yr: f32, wide: f32, foot: f32, small: f32, t: f32)
     return n;
 }
 
+// How alight the ground is at a point (Bevy x, z), from the front map on
+// this frame's clock (`fire_ahead`): each corner's share burnt and how long
+// it has flamed, as `fire_volumetric::rebuild` makes the band, bilinear.
+// The plume map's own band moves on only as often as it is rewritten.
+fn front_band(xz: vec2<f32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(front_tex));
+    let at = vec2<f32>(xz.x, -xz.y) * p.map.xy * vec2<f32>(dims) - 0.5;
+    let c0 = vec2<i32>(floor(at));
+    let fr = at - floor(at);
+    let clock = p.front.x;
+    var band = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2<i32>(k & 1, k >> 1);
+        let wk = mix(1.0 - fr.x, fr.x, f32(o.x)) * mix(1.0 - fr.y, fr.y, f32(o.y));
+        let l = textureLoad(front_tex, clamp(c0 + o, vec2<i32>(0), dims - 1), 0);
+        let v = l.g + l.b * clock;
+        let s = select(clamp(v, l.a, 1.0), clamp(v, 0.0, l.a), l.b >= 0.0);
+        let flaming = clamp(1.0 - max(clock - l.r, 0.0) / FLAMING_S, 0.0, 1.0);
+        let edge = flaming * flaming * flaming;
+        band += wk * s * smoothstep(0.05, 0.3, flaming) * (0.45 + 0.55 * edge);
+    }
+    return band;
+}
+
+// As `fire_view::FLAMING_S`.
+const FLAMING_S = 540.0;
+
+// How much the fluid has the say at `pos` (0 none): inside its grid, faded
+// over the last 40 m of it and up its top, off where the flames are drawn
+// larger than true (`grow`) or a march pixel spans more than a voxel.
+fn fluid_weight(pos: vec3<f32>, h: f32, grow: f32, foot: f32) -> f32 {
+    if p.fluid.w < 0.5 {
+        return 0.0;
+    }
+    let size = p.fluid2.x * p.fluid.z;
+    let rel = pos.xz - p.fluid.xy;
+    let edge = min(min(rel.x, rel.y), min(size - rel.x, size - rel.y));
+    let top = p.fluid2.y * p.fluid2.z;
+    return smoothstep(0.0, 40.0, edge) * (1.0 - smoothstep(top * 0.75, top, h)) * (1.0 - smoothstep(1.05, 1.3, grow)) * (1.0 - smoothstep(1.0, 2.5, foot / p.fluid.z));
+}
+
+// The fluid's heat at `pos`, `h` over the ground (its grid follows the
+// ground; it wraps, and so does the sampler).
+fn fluid_heat(pos: vec3<f32>, h: f32) -> f32 {
+    let uvw = vec3<f32>(
+        (pos.x / p.fluid.z + 0.5) / p.fluid2.x,
+        (max(h, 0.0) / p.fluid2.z + 0.5) / p.fluid2.y,
+        (pos.z / p.fluid.z + 0.5) / p.fluid2.x,
+    );
+    return textureSampleLevel(fluid_tex, fluid_samp, uvw, 0.0).w;
+}
+
 // The flames at `pos`, `h` over the ground, where a march pixel spans
 // `foot` metres: x how far the noise is over the flame's edge there (the
 // flame is where it is over 0, soft over `look2.x`), y how high up the
@@ -362,9 +422,28 @@ fn tongues_at(pos: vec3<f32>, yr: f32, wide: f32, foot: f32, small: f32, t: f32)
 fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     // the band read through a wobble of a cell or so: no squares
     let wob = noise(vec3<f32>(pos.xz / 90.0, 0.71), 0.0).rg - 0.5;
-    let fire = plume(pos.xz + wob * p.map.z * 2.2, 0.0);
+    var fire = plume(pos.xz + wob * p.map.z * 2.2, 0.0);
+    if p.front.y > 0.5 {
+        fire.g = front_band(pos.xz + wob * p.map.z * 2.2);
+    }
+    // the fluid: its heat is a flame, the tongues' noise its grain; it adds
+    // to the tongues below, where the stronger of the two is drawn
+    let wf = fluid_weight(pos, h, grow, foot);
+    var fl = vec3<f32>(0.0);
+    if wf > 0.0 && h > -8.0 {
+        let heat = fluid_heat(pos, h);
+        if heat > 0.02 {
+            let wide = max(4.0 * p.look.w / 14.0, foot * 3.0);
+            let octave = log2(wide);
+            let n = tongues_at(pos, clamp(h / 12.0, 0.0, 1.0), exp2(floor(octave)), foot, 0.0, t);
+            let yr = clamp(1.0 - heat / 0.9, 0.0, 0.98);
+            // the noise carves the heat into tongues (a low threshold drew a
+            // sheet as thick as the heat)
+            fl = vec3<f32>(heat * (0.35 + 1.0 * n) - 0.42, yr, 1.0);
+        }
+    }
     if fire.g <= 0.02 {
-        return vec3<f32>(0.0);
+        return fl * wf;
     }
     let clumps = noise(vec3<f32>(pos.xz * 0.028, 0.37), 0.0).b;
     let clump = smoothstep(0.3, 0.75, clumps);
@@ -374,7 +453,7 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     // metre): the depth stops the ray there
     let yr = max(h, 0.0) / hf;
     if yr >= 1.0 || h <= -8.0 {
-        return vec3<f32>(0.0);
+        return fl * wf;
     }
     // a tongue as tall as the flame and a third as wide (`lingue` scales
     // the width), never under a few march pixels: a fixed size cut the
@@ -401,7 +480,14 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
         // two patterns mixed are flatter than either
         n = 0.5 + (mix(n, above, up) - 0.5) / sqrt(up * up + (1.0 - up) * (1.0 - up));
     }
-    return vec3<f32>(n - (0.33 + 0.26 * yr + 0.20 * (1.0 - band)), yr, 1.0);
+    let noise_fl = vec3<f32>(n - (0.33 + 0.26 * yr + 0.20 * (1.0 - band)), yr, 1.0);
+    if wf > 0.0 && fl.z > 0.0 {
+        // the fluid adds to the tongues: the stronger flame of the two (the
+        // fluid alone left the band behind the front without flames)
+        let f = mix(noise_fl, fl, wf);
+        return select(noise_fl, f, f.x > noise_fl.x);
+    }
+    return noise_fl;
 }
 
 // The mean of `smoothstep(0, w, f)` while `f` runs straight from `a` to

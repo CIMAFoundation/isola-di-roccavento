@@ -57,6 +57,13 @@ impl Sim {
         Ok(())
     }
 
+    /// The simulated second to draw at: the game's time and the part of a
+    /// step the clock has run since (less than [`STEP_S`]). Only the drawing
+    /// reads it (`fire_ahead`); the game is where its last step left it.
+    pub fn draw_time_s(&self) -> f64 {
+        self.game.time_s() as f64 + f64::from(self.accumulator.clamp(0.0, STEP_S as f32))
+    }
+
     /// Fast automation clock: fixed model steps, stopping exactly at a decision
     /// or the end. Does not accumulate wall time or skip simulation work.
     #[cfg(any(test, target_arch = "wasm32"))]

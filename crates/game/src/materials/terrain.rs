@@ -21,6 +21,9 @@ struct TerrainUniform {
     canopy_conifer: Vec4,
     canopy_broadleaf: Vec4,
     canopy_macchia: Vec4,
+    /// x: the drawing clock less the front map's base (s,
+    /// `fire_ahead::FireAhead::base`); y: 1 when the front map is read.
+    fire_front: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
@@ -55,6 +58,10 @@ pub struct TerrainMaterial {
     #[texture(9, dimension = "2d_array")]
     #[sampler(10)]
     pub ground_detail: Handle<Image>,
+    /// The front drawn ahead of the game's (`fire_ahead::FRONT_MAP`), read
+    /// texel by texel.
+    #[texture(11)]
+    front_map: Handle<Image>,
 }
 
 impl TerrainMaterial {
@@ -79,7 +86,22 @@ impl TerrainMaterial {
             ground_normal,
             #[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
             ground_detail,
+            front_map: crate::fire_ahead::FRONT_MAP,
         }
+    }
+
+    /// The drawing clock against the front map's base (`fire_ahead`).
+    pub fn front_clock(&self) -> f32 {
+        self.uniform.fire_front.x
+    }
+
+    pub fn front_on(&self) -> bool {
+        self.uniform.fire_front.y > 0.5
+    }
+
+    pub fn set_front_clock(&mut self, rel: f32, on: bool) {
+        self.uniform.fire_front.x = rel;
+        self.uniform.fire_front.y = f32::from(on);
     }
 
     /// How far the colours are drawn toward grey, 0..1 (`tactical.rs`).

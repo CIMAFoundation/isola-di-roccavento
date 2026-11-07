@@ -153,6 +153,25 @@ impl Game {
         Ok(Job { epoch, snapshot, members, done: 0, counts: std::array::from_fn(|_| vec![0; n]), arrivals: vec![] })
     }
 
+    /// The fire a few minutes ahead, for drawing only (2026-11-07, user:
+    /// «do lookahead in the sim and interpolate between to have a less jarry
+    /// frontline»): the core's snapshot now and one member with the wind as
+    /// it is and as announced, unperturbed. Run it for `horizon_s` with
+    /// [`Snapshot::run`]: per cell the second it is lit. Its own seed (the
+    /// core's draws are not in the checkpoint), so a cell it lights may stay
+    /// unlit in the game: what it says is a guess, and nothing the game
+    /// decides reads it. Reads the state, changes nothing.
+    pub fn lookahead_job(&self) -> Result<(Snapshot, Member)> {
+        let now = self.time_s();
+        let snapshot = self.fire.snapshot(&self.scn)?;
+        let weather = match self.territory.shifted(&self.case) {
+            Some((at, w)) if now >= at => w,
+            _ => self.fire.weather(),
+        };
+        let later = self.territory.shifted(&self.case).filter(|&(at, _)| at > now);
+        Ok((snapshot, Member { seed: mix(self.seed ^ mix(now as u64 ^ 0x100C_A11E)), now: weather, later }))
+    }
+
     /// The forecast due now, computed here (headless; the kiosk runs
     /// [`Job`] off the frame).
     pub fn forecast(&self) -> Result<Forecast> {
