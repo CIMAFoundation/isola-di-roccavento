@@ -390,6 +390,9 @@ fn front_band(xz: vec2<f32>) -> f32 {
 // As `fire_view::FLAMING_S`.
 const FLAMING_S = 540.0;
 
+// How much the fluid's heat moves a tongue's edge (`noise_fl.x`)
+const PUFF = 0.25;
+
 // How much the fluid has the say at `pos` (0 none): inside its grid, faded
 // over the last 40 m of it and up its top, off where the flames are drawn
 // larger than true (`grow`) or a march pixel spans more than a voxel.
@@ -404,15 +407,15 @@ fn fluid_weight(pos: vec3<f32>, h: f32, grow: f32, foot: f32) -> f32 {
     return smoothstep(0.0, 40.0, edge) * (1.0 - smoothstep(top * 0.75, top, h)) * (1.0 - smoothstep(1.05, 1.3, grow)) * (1.0 - smoothstep(1.0, 2.5, foot / p.fluid.z));
 }
 
-// The fluid's heat at `pos`, `h` over the ground (its grid follows the
-// ground; it wraps, and so does the sampler).
-fn fluid_heat(pos: vec3<f32>, h: f32) -> f32 {
+// The fluid at `pos`, `h` over the ground: velocity (m/s) in xyz, heat in
+// w (its grid follows the ground; it wraps, and so does the sampler).
+fn fluid_at(pos: vec3<f32>, h: f32) -> vec4<f32> {
     let uvw = vec3<f32>(
         (pos.x / p.fluid.z + 0.5) / p.fluid2.x,
         (max(h, 0.0) / p.fluid2.z + 0.5) / p.fluid2.y,
         (pos.z / p.fluid.z + 0.5) / p.fluid2.x,
     );
-    return textureSampleLevel(fluid_tex, fluid_samp, uvw, 0.0).w;
+    return textureSampleLevel(fluid_tex, fluid_samp, uvw, 0.0);
 }
 
 // The flames at `pos`, `h` over the ground, where a march pixel spans
@@ -430,8 +433,10 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     // to the tongues below, where the stronger of the two is drawn
     let wf = fluid_weight(pos, h, grow, foot);
     var fl = vec3<f32>(0.0);
+    var air = vec4<f32>(0.0);
     if wf > 0.0 && h > -8.0 {
-        let heat = fluid_heat(pos, h);
+        air = fluid_at(pos, h);
+        let heat = air.w;
         if heat > 0.02 {
             let wide = max(4.0 * p.look.w / 14.0, foot * 3.0);
             let octave = log2(wide);
@@ -474,16 +479,31 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     let up = smoothstep(0.6, 1.0, fract(octave));
     // a flame a few march pixels tall shows no rising, see `tongues_at`
     let small = 1.0 - smoothstep(6.0, 24.0, hf / foot);
-    var n = tongues_at(pos, yr, under, foot, small, t);
+    // the fluid bends the tongues: the pattern is read where the air at
+    // this height came from, so they lean and sway with the gusts and the
+    // swirls (a lean of at most the flame's height)
+    var at = pos;
+    if wf > 0.0 {
+        let lean = air.xz / max(air.y, 2.5) * max(h, 0.0) * p.fluid2.w;
+        let room = hf;
+        at = pos - vec3<f32>(clamp(lean.x, -room, room), 0.0, clamp(lean.y, -room, room)) * wf;
+    }
+    var n = tongues_at(at, yr, under, foot, small, t);
     if up > 0.0 {
-        let above = tongues_at(pos, yr, under * 2.0, foot, small, t);
+        let above = tongues_at(at, yr, under * 2.0, foot, small, t);
         // two patterns mixed are flatter than either
         n = 0.5 + (mix(n, above, up) - 0.5) / sqrt(up * up + (1.0 - up) * (1.0 - up));
     }
-    let noise_fl = vec3<f32>(n - (0.33 + 0.26 * yr + 0.20 * (1.0 - band)), yr, 1.0);
-    if wf > 0.0 && fl.z > 0.0 {
-        // the fluid adds to the tongues: the stronger flame of the two (the
-        // fluid alone left the band behind the front without flames)
+    var noise_fl = vec3<f32>(n - (0.33 + 0.26 * yr + 0.20 * (1.0 - band)), yr, 1.0);
+    if wf > 0.0 {
+        // the fluid's heat swells the tongues where a puff rises: flames
+        // that pulse and climb in gusts (taking away where it is cold
+        // shrank the whole front: the heat is patchy)
+        noise_fl.x += wf * PUFF * max(air.w - 0.12, 0.0);
+    }
+    if wf > 0.0 && fl.z > 0.0 && yr > 0.5 {
+        // in the tongues' upper half and over them, the fluid's own flame,
+        // the stronger of the two (lower down it drew a pale sheet)
         let f = mix(noise_fl, fl, wf);
         return select(noise_fl, f, f.x > noise_fl.x);
     }

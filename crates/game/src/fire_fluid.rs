@@ -4,7 +4,7 @@
 //!
 //! A grid of [`N`] x [`N`] x [`K`] voxels, [`DX`] m a side and [`DZ`] m
 //! up, counted from the drawn ground, round the point the camera looks at
-//! (384 m a side, 48 m up). Each frame, on the GPU (`shaders/
+//! (192 m a side, 32 m up). Each frame, on the GPU (`shaders/
 //! fire_fluid.wesl`):
 //!
 //! 1. **advection** of velocity and heat, semi-Lagrangian (Stam), and the
@@ -55,8 +55,8 @@ const SHADER: Handle<Shader> = uuid_handle!("5e1d9a73-2c84-4b6f-9d07-a38e1f6c52b
 pub const N: u32 = 128;
 pub const K: u32 = 32;
 /// Metres a voxel spans across and up.
-pub const DX: f32 = 3.0;
-pub const DZ: f32 = 1.5;
+pub const DX: f32 = 1.5;
+pub const DZ: f32 = 1.0;
 /// Jacobi sweeps a frame.
 const JACOBI: usize = 24;
 /// Past this distance from the camera to its focus (m) nothing is stepped:
@@ -90,11 +90,13 @@ pub struct FluidSettings {
     /// The heat at the flame's tip, and the speed its top is reckoned at.
     pub tip: f32,
     pub rise: f32,
+    /// How far the air bends the tongues (1: as far as it carries them).
+    pub lean: f32,
 }
 
 impl Default for FluidSettings {
     fn default() -> Self {
-        FluidSettings { buoyancy: 40.0, hold: 0.8, swirl: 0.35, drag: 0.5, source_m: 2.5, heat: 1.0, tip: 0.3, rise: 3.5 }
+        FluidSettings { buoyancy: 40.0, hold: 0.8, swirl: 0.35, drag: 0.9, source_m: 2.5, heat: 1.0, tip: 0.3, rise: 3.5, lean: 1.6 }
     }
 }
 
@@ -114,6 +116,7 @@ impl FluidSettings {
                     "calore" => s.heat = v,
                     "punta" => s.tip = v.clamp(0.02, 0.9),
                     "salita" => s.rise = v,
+                    "piega" => s.lean = v,
                     _ => warn!("KIOSK_FLUIDO_SET: {k}?"),
                 }
             }
@@ -142,11 +145,11 @@ pub struct FluidNow {
 
 impl FluidNow {
     /// For the march: the grid's corner (m), its voxel, 1; then voxels a
-    /// side, up, and the voxel's height.
+    /// side, up, the voxel's height and how far the air bends the tongues.
     pub fn march(&self) -> (Vec4, Vec4) {
         (
             Vec4::new(self.origin.x as f32 * DX, self.origin.y as f32 * DX, DX, 1.0),
-            Vec4::new(N as f32, K as f32, DZ, 0.0),
+            Vec4::new(N as f32, K as f32, DZ, self.settings.lean),
         )
     }
 }
@@ -436,7 +439,7 @@ mod gpu_tests {
     }
 
     /// The fluid's own passes, run as the game runs them, on a grid of
-    /// 32 x 32 x 32 (96 m a side) across a band alight 20 m wide (flames
+    /// 32 x 32 x 32 across a band alight 20 m wide (flames
     /// 10 m tall, wind 2 m/s across it), without a window; then the heat
     /// and the rise by height.
     /// Needs a GPU: skipped where there is none.
@@ -528,7 +531,8 @@ mod gpu_tests {
             mapped_at_creation: false,
         });
         let s = super::FluidSettings::from_env();
-        let origin = IVec2::new(100, 100);
+        // the grid centred on the band (x 340-360 m)
+        let origin = IVec2::new((350.0 / DX) as i32 - S as i32 / 2, 100);
         let dt = 1.0 / 30.0;
         let mut latest = 0usize;
         let steps = 120;
