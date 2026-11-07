@@ -54,6 +54,8 @@ mod browser {
             "player": k.player, "error": k.error, "baseline_ready": k.baseline().is_some(),
             "step": k.step, "expect": k.expect().map(|e| format!("{e:?}")), "selection": format!("{:?}", k.selection),
             "paused": sim.paused(), "over": sim.is_over(),
+            // a burning cell in the middle of the list, as `KIOSK_SNAP`'s `at=front`
+            "front": sim.fire.active_cells().get(sim.fire.active_cells().len() / 2).map(|&c| { let p = sim.scn.world.centre_of(c); [p.x, p.y] }),
             "teams": sim.teams.iter().enumerate().map(|(t, team)| serde_json::json!({ "name": team.name, "status": sim.team_status(t), "hex": team.hex.map(|h| [h.centre().x, h.centre().y]) })).collect::<Vec<_>>(),
             "districts": sim.districts.iter().map(|d| serde_json::json!({ "name": d.name })).collect::<Vec<_>>(),
             "controls": CONTROLS.with(|c| c.borrow().clone()),
