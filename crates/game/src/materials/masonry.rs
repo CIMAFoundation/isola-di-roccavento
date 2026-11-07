@@ -171,7 +171,9 @@ fn file(name: &str) -> Option<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))]
     let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/buildings").join(name));
     #[cfg(target_arch = "wasm32")]
-    let bytes = datafs::take(format!("assets/buildings/{name}"));
+    // `read`, not `take`: masonry and houses both read plaster, roof and stone
+    // (2026-11-07: with `take` the houses found them gone on the web)
+    let bytes = datafs::read(format!("assets/buildings/{name}"));
     bytes.map_err(|e| warn!("masonry: assets/buildings/{name}: {e}")).ok()
 }
 
