@@ -85,6 +85,15 @@ pub fn camera() -> Option<(scenario::Pos, f32, f32, f32)> {
     }
     None
 }
+/// In automation, `roccaPlaytest.hide = 1` takes isochrones, marks and the
+/// interface out of the picture, as `KIOSK_SNAP`'s `ui=0,marks=0,iso=0`.
+pub fn hide() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    if active() {
+        return browser::number("hide") > 0.5;
+    }
+    false
+}
 /// In automation, countdowns advance only when the agent asks to elapse time.
 pub fn delta(normal: f32) -> f32 {
     #[cfg(target_arch = "wasm32")]

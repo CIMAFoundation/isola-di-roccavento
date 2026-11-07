@@ -587,8 +587,8 @@ pub fn hide_marks(
     >,
 ) {
     // Mario has the whole map: no isochrones, hexes, cones or other marks
-    let hide = if mario.active { SnapHide { iso: true, marks: true, ui: hide.ui } } else { *hide };
-    if !active() && !mario.active {
+    let hide = if mario.active || crate::playtest::hide() { SnapHide { iso: true, marks: true, ui: hide.ui } } else { *hide };
+    if !active() && !mario.active && !crate::playtest::hide() {
         return;
     }
     if hide.iso {
@@ -605,7 +605,7 @@ pub fn hide_marks(
 
 /// After egui has made its output: no interface in the picture.
 pub fn hide_ui(hide: Res<SnapHide>, mut out: Query<&mut bevy_egui::EguiRenderOutput>) {
-    if hide.ui {
+    if hide.ui || crate::playtest::hide() {
         for mut o in &mut out {
             o.paint_jobs = Default::default();
         }
