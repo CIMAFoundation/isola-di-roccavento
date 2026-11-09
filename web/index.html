@@ -16,15 +16,17 @@
       /* Winit may request a backing-buffer resize; CSS size stays with the
          safe-area container even when its inline pixel dimensions change. */
       #rocca { display: block; width: 100% !important; height: 100% !important; outline: none; touch-action: none; -webkit-user-select: none; user-select: none; }
-      #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #222; font: 18px system-ui, sans-serif; pointer-events: none; text-align: center; padding: 0 24px; }
+      #loading { position: fixed; inset: 0; background: #d0c6b4; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #222; font: 18px system-ui, sans-serif; pointer-events: none; text-align: center; padding: 0 24px; }
       #loading h1 { margin: 0; font-size: 28px; font-weight: 600; }
       #loading small { font-size: 14px; color: #555; }
       #bar { width: min(420px, 80vw); height: 10px; border-radius: 5px; background: rgba(0, 0, 0, .15); overflow: hidden; }
       #fill { height: 100%; width: 0; background: #b5451b; border-radius: 5px; transition: width .2s; }
       #rom-toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: min(560px, 90vw); padding: 10px 16px; border-radius: 10px; background: rgba(20, 20, 20, .85); color: #fff; font: 15px system-ui, sans-serif; text-align: center; pointer-events: none; opacity: 0; transition: opacity .25s; }
       #rom-toast.on { opacity: 1; }
-      #bar.wait #fill { width: 35%; animation: slide 1.1s ease-in-out infinite alternate; }
-      @keyframes slide { from { margin-left: 0; } to { margin-left: 65%; } }
+      #bar.wait #fill { width: 35%; will-change: transform; animation: slide 1.1s ease-in-out infinite alternate; }
+      /* a transform, which the compositor runs: the bar keeps moving while the
+         game builds the island and the page's thread is busy for many seconds */
+      @keyframes slide { from { transform: translateX(0); } to { transform: translateX(186%); } }
       /* Intro page: shown first; the wasm is only fetched once «Gioca» is pressed. */
       #intro { --navy: #06264a; --blue: #0a5aa8; --cyan: #19b4e6; --ink: #14202e; --paper: #f4f7fb; position: fixed; inset: 0; z-index: 10; overflow-y: auto; overflow-x: hidden; background: #fff; color: var(--ink); font: 17px/1.55 'Montserrat', 'Helvetica Neue', system-ui, sans-serif; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; transition: opacity .35s; }
       #intro.leaving { opacity: 0; pointer-events: none; }
@@ -323,7 +325,14 @@
       const webgpu = (async () => {
         const want = new URLSearchParams(location.search).get('gpu');
         if (!webgpuBuilt || want === '0' || (want !== '1' && window.roccaProfile !== 'media')) return false;
-        try { return !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch (e) { return false; }
+        try {
+          const ok = !!(navigator.gpu && await navigator.gpu.requestAdapter());
+          // The realistic style wherever the WebGPU build runs, on every profile
+          // (the game shortens its LODs on the light one): the game and the
+          // download below read this when the address does not say (`?scans=0`).
+          if (ok) window.roccaAuto = { scans: '1' };
+          return ok;
+        } catch (e) { return false; }
       })();
       // The WebGPU build calls this when its renderer stops on an error: the
       // same page again, on WebGL2.
@@ -419,11 +428,11 @@
         const files = {};
         const native = !lowMemory && typeof DecompressionStream === 'function';
         window.roccaDataGzip = !native;
-        // what only a trial reads is downloaded when the address asks for
-        // it: the scanned plants (`?scans=1`, the WebGPU build only)
+        // what not every browser reads is downloaded when the address or the
+        // page's choice asks for it: the realistic style (the WebGPU build only)
         const asked = new URLSearchParams(location.search);
         const gpuBuild = await webgpu;
-        const wanted = manifest.filter(f => !f.only || (gpuBuild && asked.get(f.only) === '1'));
+        const wanted = manifest.filter(f => !f.only || (gpuBuild && (asked.get(f.only) ?? window.roccaAuto?.[f.only]) === '1'));
         const pending = wanted.values();
         async function worker() {
           for (const file of pending) {
@@ -585,14 +594,14 @@
         })()
           .then(([module]) => {
             status.textContent = roccaText('starting');
-            return init({ module_or_path: module });
-          }).then(() => { loading.remove(); focusCanvas(); })
+            // Until the game has drawn (`page_ready`): building the island holds
+            // the page's thread for seconds, and without this it is a black screen.
+            window.roccaGameDrawn = () => { loading.remove(); focusCanvas(); };
+            // let the page paint the bar before the wasm takes the thread
+            return new Promise(r => requestAnimationFrame(() => setTimeout(r))).then(() => init({ module_or_path: module }));
+          })
           .catch(error => {
-            if (String(error).includes(winitControlFlow)) {
-              loading.remove();
-              focusCanvas();
-              return;
-            }
+            if (String(error).includes(winitControlFlow)) return;
             loading.textContent = roccaText('failed', { e: error });
             console.error(error);
           });

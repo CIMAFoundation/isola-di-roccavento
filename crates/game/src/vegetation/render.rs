@@ -87,7 +87,8 @@ const FULL_SHADOW_M: f32 = 250.0;
 /// Beyond, the plant is drawn in boxes made of its `lod2`
 /// (`meshes::Builder::scan_voxels`): small ones ([`Tier::Proxy`]) up to
 /// `SCAN_LUMP_M`, fewer and larger ([`Tier::Far`]) past it.
-/// `KIOSK_SCAN_LOD=<near>,<mid>,<far>,<lumps>` (m) for trials.
+/// `KIOSK_SCAN_LOD=<near>,<mid>,<far>,<lumps>` (m) for trials (web:
+/// `?scan_lod=`).
 ///
 /// The first three end a little short of where one of the sun's cascades
 /// begins to be read (56, 206 and 760 m with four cascades,
@@ -99,12 +100,25 @@ const NEAR_M: f32 = 55.0;
 const MID_M: f32 = 205.0;
 const SCAN_FAR_M: f32 = 755.0;
 const SCAN_LUMP_M: f32 = 1500.0;
+/// The same thresholds on a light profile (2026-11-09: «scans anche su
+/// profili leggeri, con i lod spostati parecchio»): the two near levels end
+/// much sooner. The boxes must not: from 340 m they were green cubes in the
+/// game's own view, a style of their own, so the real model goes on as far
+/// as this profile's plant LOD (`Graphics::BASSA.lod_m`).
+const LIGHT_SCAN_LOD: [f32; 4] = [20.0, 90.0, 600.0, 1500.0];
 
 fn scan_lod() -> [f32; 4] {
     static LOD: std::sync::OnceLock<[f32; 4]> = std::sync::OnceLock::new();
     *LOD.get_or_init(|| {
-        let v: Vec<f32> = std::env::var("KIOSK_SCAN_LOD").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
-        if v.len() == 4 { [v[0], v[1], v[2], v[3]] } else { [NEAR_M, MID_M, SCAN_FAR_M, SCAN_LUMP_M] }
+        let trial = if cfg!(target_arch = "wasm32") { crate::quality::web_param("scan_lod") } else { std::env::var("KIOSK_SCAN_LOD").ok() };
+        let v: Vec<f32> = trial.unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if v.len() == 4 {
+            [v[0], v[1], v[2], v[3]]
+        } else if crate::models::scans().is_some() && crate::quality::Graphics::light() {
+            LIGHT_SCAN_LOD
+        } else {
+            [NEAR_M, MID_M, SCAN_FAR_M, SCAN_LUMP_M]
+        }
     })
 }
 

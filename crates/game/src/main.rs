@@ -369,6 +369,25 @@ fn teardown_scene(
     }
 }
 
+/// Tells the page the game has drawn, so it takes its loading screen away
+/// (`window.roccaGameDrawn`, `web/index.html`): on the second frame in the
+/// game, the first one that follows a drawn one. Until then the scene is being
+/// built, the page's thread is busy and the canvas is black.
+#[cfg(target_arch = "wasm32")]
+fn page_ready(mut frames: Local<u32>) {
+    *frames += 1;
+    if *frames != 2 {
+        return;
+    }
+    use wasm_bindgen::JsCast;
+    let global = js_sys::global();
+    if let Ok(f) = js_sys::Reflect::get(&global, &"roccaGameDrawn".into()) {
+        if let Ok(f) = f.dyn_into::<js_sys::Function>() {
+            let _ = f.call0(&global);
+        }
+    }
+}
+
 /// The kiosk's schedule.
 fn kiosk_systems(app: &mut App) {
     // Since bevy_egui 0.42 the interface is drawn only inside the egui pass
@@ -377,6 +396,8 @@ fn kiosk_systems(app: &mut App) {
     app.add_systems(bevy_egui::EguiPrimaryContextPass, kiosk::ui::draw.run_if(in_state(AppState::Playing)));
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(bevy_egui::EguiPrimaryContextPass, kiosk::ui::fps.after(kiosk::ui::draw).run_if(in_state(AppState::Playing)));
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Update, page_ready.run_if(in_state(AppState::Playing)));
     app.add_systems(Update, near_cover::update.run_if(in_state(AppState::Playing)));
     app.add_systems(Update, kiosk::view::curtain.after(sky::update_sky).run_if(in_state(AppState::Playing)));
     app.add_systems(

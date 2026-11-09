@@ -47,6 +47,8 @@ const STRETCH: f32 = 1.15;
 /// Distance (m, camera to the house's middle) where the light model takes
 /// over; `KIOSK_HOUSE_LOD_M` to move it.
 const LOD_M: f32 = 420.0;
+/// The same on a light profile (`Graphics::light`, 2026-11-09).
+const LIGHT_LOD_M: f32 = 220.0;
 
 #[derive(serde::Deserialize)]
 struct Index {
@@ -318,10 +320,11 @@ pub(super) fn place(lib: &Library, scn: &Scenario, b: &Building, ctx: &Context, 
 
 /// The entities of the placed houses, house `i` reading column `i`.
 pub(super) fn spawn(commands: &mut Commands, lib: &Library, placed: &[Placement], material: &Handle<HouseMaterial>) {
+    let default_m = if crate::quality::Graphics::light() { LIGHT_LOD_M } else { LOD_M };
     #[cfg(not(target_arch = "wasm32"))]
-    let lod_m = std::env::var("KIOSK_HOUSE_LOD_M").ok().and_then(|v| v.parse().ok()).unwrap_or(LOD_M);
+    let lod_m = std::env::var("KIOSK_HOUSE_LOD_M").ok().and_then(|v| v.parse().ok()).unwrap_or(default_m);
     #[cfg(target_arch = "wasm32")]
-    let lod_m = LOD_M;
+    let lod_m = default_m;
     let mut tris = [0usize; 2];
     let mut uses = vec![0usize; lib.models.len()];
     for (i, p) in placed.iter().enumerate() {

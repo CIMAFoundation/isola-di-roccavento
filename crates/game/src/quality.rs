@@ -185,6 +185,13 @@ impl Graphics {
         ..Graphics::WEB_MEDIA
     };
 
+    /// This run asked for a light level (`bassa`, the light profile in the
+    /// browser): what has distances of its own (the realistic style's LODs)
+    /// shortens them.
+    pub fn light() -> bool {
+        Graphics::from_env().lod_m <= Graphics::BASSA.lod_m
+    }
+
     /// The preset from `KIOSK_QUALITY`, then the `KIOSK_GFX` overrides, then
     /// the old `KIOSK_VEG_DENSITY` (which still wins for the vegetation).
     /// In the browser the page decides (`window.roccaProfile`, see `web/index.html`).
@@ -384,14 +391,19 @@ fn web_profile() -> Option<String> {
     None
 }
 
-/// A parameter of the page's address (`?gfx=veg=0`, see [`Graphics::from_env`]).
-/// Always `None` on the desktop.
+/// A parameter of the page's address (`?gfx=veg=0`, see [`Graphics::from_env`]),
+/// or, if the address does not say, what the page chose for this browser
+/// (`window.roccaAuto`, `web/index.html`). Always `None` on the desktop.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_param(name: &str) -> Option<String> {
     let location = js_sys::Reflect::get(&js_sys::global(), &"location".into()).ok()?;
     let search = js_sys::Reflect::get(&location, &"search".into()).ok()?.as_string()?;
     let search = js_sys::decode_uri_component(&search).ok()?.as_string()?;
-    search.trim_start_matches('?').split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| v.to_string()))
+    let asked = search.trim_start_matches('?').split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| v.to_string()));
+    asked.or_else(|| {
+        let auto = js_sys::Reflect::get(&js_sys::global(), &"roccaAuto".into()).ok()?;
+        js_sys::Reflect::get(&auto, &name.into()).ok()?.as_string()
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
