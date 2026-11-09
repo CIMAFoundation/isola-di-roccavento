@@ -58,12 +58,12 @@ HT
 # What the game loads: the one scenario, the behaviours, the fuels, the sounds,
 # the models and pictures.
 python3 -I - "$root" "$out" <<'PY'
-import gzip, hashlib, json, os, sys
+import gzip, hashlib, json, os, re, sys
 
 root, out = sys.argv[1], sys.argv[2]
 files = []
 # assets/: the models and pictures the desktop binary has compiled in (2026-10-30)
-for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "data/sounds", "assets/models", "assets/characters", "assets/scenarios", "assets/brand"):
+for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "data/sounds", "assets/models", "assets/characters", "assets/scenarios", "assets/brand", "assets/terrain"):
     for d, _, names in os.walk(os.path.join(root, sub)):
         for n in names:
             rel = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
@@ -71,7 +71,8 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
             # the logo: the game halves the 1200 px one (kiosk/characters.rs)
             # the scanned plants (`models::scans`) are not sent as they are: 20 MB
             # of meshes and 22 MB of cards. A lighter set is built below.
-            if rel.startswith("assets/") and (not rel.endswith((".json", ".png")) or "preview" in rel or "_scans" in rel or "_real" in rel or rel == "assets/brand/cima_logo_white.png"):
+            # the terrain's baked meshes (`terrain_bake`) go as they are
+            if rel.startswith("assets/") and not rel.startswith("assets/terrain/") and (not rel.endswith((".json", ".png")) or "preview" in rel or "_scans" in rel or "_real" in rel or rel == "assets/brand/cima_logo_white.png"):
                 continue
             files.append(rel)
 files.append("data/fuels_eu12.json")
@@ -155,9 +156,16 @@ for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     open(dest, "wb").write(gz)
     h = hashlib.sha256(gz).hexdigest()[:12]
-    manifest.append({"path": path, "url": f"./{path}.gz?v={h}", "bytes": len(gz)})
+    entry = {"path": path, "url": f"./{path}.gz?v={h}", "bytes": len(gz)}
+    # one baked terrain per grid: the page takes the one its build draws
+    baked = re.fullmatch(r"assets/terrain/(?:tin|ground)_s(\d+)(_real)?\.bin", path)
+    if baked:
+        entry["stride"] = int(baked.group(1))
+        if baked.group(2):
+            entry["only"] = "scans"
+    manifest.append(entry)
 json.dump(manifest, open(os.path.join(out, "data", "manifest.json"), "w"), indent=0)
-always = [m for m in manifest if "only" not in m]
+always = [m for m in manifest if "only" not in m and "stride" not in m]
 print("data: %d files, %.1f MB gzipped (of %.1f MB)" % (
     len(always), sum(m["bytes"] for m in always) / 1e6,
     sum(os.path.getsize(os.path.join(root, m["path"])) for m in always) / 1e6))
@@ -184,11 +192,16 @@ done
 v="$(shasum "$out"/game_bg.wasm | cut -c1-12)"
 vg="$v"
 [ "$gpu" = 1 ] && vg="$(shasum "$out"/game_gpu_bg.wasm | cut -c1-12)"
+# what the page's percentage counts for the wasm (web/index.html, `wasmSize`)
+sz="$(wc -c < "$out"/game_bg.wasm.gz | tr -d ' ')"
+szg="$sz"
+[ "$gpu" = 1 ] && szg="$(wc -c < "$out"/game_gpu_bg.wasm.gz | tr -d ' ')"
 li="$(shasum web/i18n.js | cut -c1-12)"
 # the data list's URL carries its hash, as the wasm's does
 m="$(shasum "$out"/data/manifest.json | cut -c1-12)"
 sed -e "s#'./game.js'#'./game.js?v=$v'#" -e "s#'./game_bg.wasm'#'./game_bg.wasm?v=$v'#" \
   -e "s#'./game_gpu.js'#'./game_gpu.js?v=$vg'#" -e "s#'./game_gpu_bg.wasm'#'./game_gpu_bg.wasm?v=$vg'#" \
+  -e "s#const wasmSize = { webgl2: 0, webgpu: 0 }#const wasmSize = { webgl2: $sz, webgpu: $szg }#" \
   -e "s#const webgpuBuilt = true#const webgpuBuilt = $([ "$gpu" = 1 ] && echo true || echo false)#" \
   -e "s#\"./i18n.js\"#\"./i18n.js?v=$li\"#" -e "s#'./data/manifest.json'#'./data/manifest.json?v=$m'#" \
   web/index.html > "$out"/index.html

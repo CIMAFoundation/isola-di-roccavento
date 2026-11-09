@@ -882,74 +882,21 @@ struct Grid {
     normal: Vec<[f32; 3]>,
 }
 
-pub fn build(
-    scn: &Scenario,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<TerrainMaterial>,
-    images: &mut Assets<Image>,
-    gfx: &crate::quality::Graphics,
-) {
-    // Terrain samples per base mesh vertex (`Graphics::terrain_stride`): every
-    // sample natively; in the browser every fourth (20 m), which WebGL can
-    // draw. The data (and so the agents and every height lookup) stay at full
-    // resolution. The colour and normal textures have one texel per base
-    // vertex; natively, chunks farther away are meshed at 2x and 4x that
-    // stride (`LOD1_M`, `LOD2_M`) and read the same textures.
-    let stride = gfx.terrain_stride.max(1);
+/// The ground's textures and which chunks lie under the sea: all that depends
+/// only on the island (and on the realistic palette, `real_palette`).
+fn compute_ground(scn: &Scenario, shore: &ShoreField, grid: &Grid, stride: usize) -> crate::terrain_bake::GroundTexels {
     let t = &scn.terrain;
-    let mut mask = crate::ground_mask::build(scn, gfx);
-    // beyond this distance from the eye there are no real blades: the terrain
-    // shader adds a grain there so the meadow keeps its contrast (0 = no blades)
-    mask.rect.w = if gfx.cover_m > 0.0 { crate::near_cover::BANDS_M[crate::near_cover::BANDS_M.len() - 1] } else { 0.0 };
-    let _ = images.insert(&crate::ground_mask::GRASS_MAP, crate::ground_mask::grass_map(scn));
-    let _ = images.insert(&crate::fire_ahead::FRONT_MAP, crate::fire_ahead::front_image(scn.world.fire_cols, scn.world.fire_rows));
-
-    // the base grid: every `stride`-th sample
-    let (cols, rows, posting) = ((t.cols - 1) / stride + 1, (t.rows - 1) / stride + 1, t.posting * stride as f32);
-    let shore = ShoreField::new(scn);
-    let sea = mask.sea;
-
-    // Per sample: shaped height, normal and ground colour. The colour and the
-    // normal go to textures, so the look does not depend on the mesh density.
-    let mut grid = Grid { cols, posting, elev: Vec::with_capacity(cols * rows), normal: Vec::with_capacity(cols * rows) };
+    let (cols, rows, posting) = (grid.cols, grid.elev.len() / grid.cols, grid.posting);
+    let (mask, sea) = crate::ground_mask::texels(scn, stride);
+    // Per sample: the ground colour and the normal go to textures, so the look
+    // does not depend on the mesh density.
     let mut colour_px: Vec<u8> = Vec::with_capacity(cols * rows * 4);
     let mut normal_px: Vec<u8> = Vec::with_capacity(cols * rows * 8);
-    for r in 0..rows {
-        for c in 0..cols {
-            let gx = c as f32 * posting;
-            // row 0 is the north edge; world +y is north
-            let gy = t.height_m - r as f32 * posting;
-            let p = Pos { x: gx, y: gy };
-            let raw = t.elev[(r * stride).min(t.rows - 1) * t.cols + (c * stride).min(t.cols - 1)];
-            let shore_d = shore.at(p);
-            let elev = cliff_elev(scn, &shore, p, raw);
-            // Deliberately the plain heightfield normal, not a
-            // noise-perturbed one: a jittered normal feeds
-            // straight into the directional light's shadow-map bias,
-            // and at a jitter scale finer than the shadow map texel
-            // it produces exactly the blotchy close-range
-            // self-shadowing this comment is here to stop someone
-            // reintroducing (it shipped once, briefly).
-            let n = if shore_d > COAST_REACH_M {
-                t.normal_at(p)
-            } else {
-                // the same formula as `normal_at`, over the shaped ground
-                let d = posting;
-                let h = |q: Pos| cliff_elev(scn, &shore, q, t.height_at(q));
-                let (hl, hr) = (h(Pos { x: p.x - d, ..p }), h(Pos { x: p.x + d, ..p }));
-                let (hd, hu) = (h(Pos { y: p.y - d, ..p }), h(Pos { y: p.y + d, ..p }));
-                let (nx, ny, nz) = (hl - hr, 2.0 * d, hd - hu);
-                let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                [nx / len, ny / len, nz / len]
-            };
-            let n = [n[0], n[1], -n[2]];
-            grid.elev.push(elev);
-            grid.normal.push(n);
-            let col = ground_color(scn, &sea, elev, n[1], p, shore_d);
-            colour_px.extend(col.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
-            colour_px.push(255);
-        }
+    for (i, (&elev, n)) in grid.elev.iter().zip(&grid.normal).enumerate() {
+        let p = Pos { x: (i % cols) as f32 * posting, y: t.height_m - (i / cols) as f32 * posting };
+        let col = ground_color(scn, &sea, elev, n[1], p, shore.at(p));
+        colour_px.extend(col.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+        colour_px.push(255);
     }
     // The canopy (`vegetation::canopy`): its cover in the colour's alpha, its
     // kind and brightness beside the normal's x and z (y is rebuilt, it is
@@ -978,6 +925,106 @@ pub fn build(
             normal_px.extend_from_slice(&f16_bits(v).to_le_bytes());
         }
     }
+    let (chunks_x, chunks_y) = ((cols - 1).div_ceil(CHUNK), (rows - 1).div_ceil(CHUNK));
+    let mut under = vec![false; chunks_x * chunks_y];
+    for cy in 0..chunks_y {
+        for cx in 0..chunks_x {
+            let (c0, r0) = (cx * CHUNK, cy * CHUNK);
+            let (ncx, ncy) = (CHUNK.min(cols - 1 - c0), CHUNK.min(rows - 1 - r0));
+            under[cy * chunks_x + cx] = (r0..=r0 + ncy).all(|r| (c0..=c0 + ncx).all(|c| grid.elev[r * cols + c] < SUBMERGED_M));
+        }
+    }
+    crate::terrain_bake::GroundTexels { cols, mask, colour: colour_px, normal: normal_px, colours: canopy.colours, under }
+}
+
+/// The mesh levels at this stride: the browser's coarsest grid has only one.
+fn levels_for(stride: usize) -> &'static [usize] {
+    if stride >= 4 { &LEVELS[..1] } else { &LEVELS }
+}
+
+/// Every chunk's adaptive meshes at every level of this stride.
+fn all_tin_meshes(scn: &Scenario, shore: &ShoreField, grid: &Grid, stride: usize) -> crate::terrain_bake::Chunks {
+    let (cols, rows) = (grid.cols, grid.elev.len() / grid.cols);
+    let chunks = ((cols - 1).div_ceil(CHUNK), (rows - 1).div_ceil(CHUNK));
+    tin_geometry(scn, shore, grid, rows, chunks, levels_for(stride), stride, (TIN_TOL_COARSE_M, KERB_STEP_COARSE_M, TIN_CANDIDATES_COARSE))
+}
+
+/// Height and normal of every sample of the base grid, shaped at the coast.
+fn shaped_grid(scn: &Scenario, shore: &ShoreField, stride: usize) -> Grid {
+    let t = &scn.terrain;
+    let (cols, rows, posting) = ((t.cols - 1) / stride + 1, (t.rows - 1) / stride + 1, t.posting * stride as f32);
+    let mut grid = Grid { cols, posting, elev: Vec::with_capacity(cols * rows), normal: Vec::with_capacity(cols * rows) };
+    for r in 0..rows {
+        for c in 0..cols {
+            // row 0 is the north edge; world +y is north
+            let p = Pos { x: c as f32 * posting, y: t.height_m - r as f32 * posting };
+            let raw = t.elev[(r * stride).min(t.rows - 1) * t.cols + (c * stride).min(t.cols - 1)];
+            let elev = cliff_elev(scn, shore, p, raw);
+            // Deliberately the plain heightfield normal, not a
+            // noise-perturbed one: a jittered normal feeds
+            // straight into the directional light's shadow-map bias,
+            // and at a jitter scale finer than the shadow map texel
+            // it produces exactly the blotchy close-range
+            // self-shadowing this comment is here to stop someone
+            // reintroducing (it shipped once, briefly).
+            let n = if shore.at(p) > COAST_REACH_M {
+                t.normal_at(p)
+            } else {
+                // the same formula as `normal_at`, over the shaped ground
+                let d = posting;
+                let h = |q: Pos| cliff_elev(scn, shore, q, t.height_at(q));
+                let (hl, hr) = (h(Pos { x: p.x - d, ..p }), h(Pos { x: p.x + d, ..p }));
+                let (hd, hu) = (h(Pos { y: p.y - d, ..p }), h(Pos { y: p.y + d, ..p }));
+                let (nx, ny, nz) = (hl - hr, 2.0 * d, hd - hu);
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                [nx / len, ny / len, nz / len]
+            };
+            grid.elev.push(elev);
+            grid.normal.push([n[0], n[1], -n[2]]);
+        }
+    }
+    grid
+}
+
+pub fn build(
+    scn: &Scenario,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<TerrainMaterial>,
+    images: &mut Assets<Image>,
+    gfx: &crate::quality::Graphics,
+) {
+    // Terrain samples per base mesh vertex (`Graphics::terrain_stride`): every
+    // sample natively; in the browser every fourth (20 m), which WebGL can
+    // draw. The data (and so the agents and every height lookup) stay at full
+    // resolution. The colour and normal textures have one texel per base
+    // vertex; natively, chunks farther away are meshed at 2x and 4x that
+    // stride (`LOD1_M`, `LOD2_M`) and read the same textures.
+    let stride = gfx.terrain_stride.max(1);
+    let t = &scn.terrain;
+    let _ = images.insert(&crate::ground_mask::GRASS_MAP, crate::ground_mask::grass_map(scn));
+    let _ = images.insert(&crate::fire_ahead::FRONT_MAP, crate::fire_ahead::front_image(scn.world.fire_cols, scn.world.fire_rows));
+
+    // the base grid: every `stride`-th sample
+    let (cols, rows, posting) = ((t.cols - 1) / stride + 1, (t.rows - 1) / stride + 1, t.posting * stride as f32);
+    // What depends only on the island is read from the bake, where there is
+    // one (`terrain_bake`, the browser); otherwise computed, from the shaped grid.
+    let baked_ground = crate::terrain_bake::read_ground(stride, real_palette().is_some(), (cols, rows));
+    let baked_tin = if tin_enabled() { crate::terrain_bake::read(stride, posting) } else { None };
+    let shaped = (baked_ground.is_none() || baked_tin.is_none()).then(|| {
+        let shore = ShoreField::new(scn);
+        let grid = shaped_grid(scn, &shore, stride);
+        (shore, grid)
+    });
+    let crate::terrain_bake::GroundTexels { mask, colour: colour_px, normal: normal_px, colours, under, .. } =
+        baked_ground.unwrap_or_else(|| {
+            let (shore, grid) = shaped.as_ref().expect("computed when nothing is baked");
+            compute_ground(scn, shore, grid, stride)
+        });
+    let (mask_image, mut mask_rect) = crate::ground_mask::image(scn, mask);
+    // beyond this distance from the eye there are no real blades: the terrain
+    // shader adds a grain there so the meadow keeps its contrast (0 = no blades)
+    mask_rect.w = if gfx.cover_m > 0.0 { crate::near_cover::BANDS_M[crate::near_cover::BANDS_M.len() - 1] } else { 0.0 };
     let colour_tex = images.add(if crate::vegetation::canopy::forest_shade() {
         // with its mips: the canopy's cover averaged over 2^k samples, read by
         // the terrain shader as the forest's occlusion (`forest_shade`)
@@ -994,10 +1041,10 @@ pub fn build(
         t.height_m / (posting * rows as f32) + 0.5 / rows as f32,
     );
 
-    let _ = images.insert(&crate::ground_mask::ROAD_MASK, mask.image);
+    let _ = images.insert(&crate::ground_mask::ROAD_MASK, mask_image);
     crate::fields::insert_soil(images);
     let mut terrain_material = TerrainMaterial::new(
-        mask.rect,
+        mask_rect,
         tex_rect,
         crate::ground_mask::ROAD_MASK,
         crate::ground_mask::GRASS_MAP,
@@ -1005,11 +1052,11 @@ pub fn build(
         normal_tex,
         images.add(crate::textures::ground_detail_image()),
     );
-    terrain_material.set_canopy(canopy.colours, canopy_fade(gfx));
+    terrain_material.set_canopy(colours, canopy_fade(gfx));
     terrain_material.set_forest_shade(if crate::vegetation::canopy::forest_shade() { 1.0 } else { 0.0 }, posting);
     let material = materials.add(terrain_material);
 
-    let levels: &[usize] = if stride >= 4 { &LEVELS[..1] } else { &LEVELS };
+    let levels = levels_for(stride);
     // distances at which each level hands over to the next
     let cuts = [LOD1_M, LOD2_M];
     let (chunks_x, chunks_y) = ((cols - 1).div_ceil(CHUNK), (rows - 1).div_ceil(CHUNK));
@@ -1019,7 +1066,10 @@ pub fn build(
     let tin = tin_enabled();
     let started = bevy::platform::time::Instant::now();
     let mut tin_meshes = if tin {
-        tin_geometry(scn, &shore, &grid, rows, (chunks_x, chunks_y), levels, stride, (TIN_TOL_COARSE_M, KERB_STEP_COARSE_M, TIN_CANDIDATES_COARSE))
+        baked_tin.unwrap_or_else(|| {
+            let (shore, grid) = shaped.as_ref().expect("computed when nothing is baked");
+            all_tin_meshes(scn, shore, grid, stride)
+        })
     } else {
         Default::default()
     };
@@ -1039,14 +1089,15 @@ pub fn build(
             // its visibility range measures from
             let origin = [(c0 as f32 + ncx as f32 * 0.5) * posting, (r0 as f32 + ncy as f32 * 0.5) * posting - t.height_m];
             let centre = Vec3::new(origin[0], 0.0, origin[1]);
-            let under = (r0..=r0 + ncy).all(|r| (c0..=c0 + ncx).all(|c| grid.elev[r * cols + c] < SUBMERGED_M));
+            let under = under[cy * chunks_x + cx];
             submerged += usize::from(under);
             // a hidden chunk keeps only the finest level
             let used = if under { &levels[..1] } else { levels };
             for (k, &f) in used.iter().enumerate() {
-                let mesh = match tin_meshes.remove(&(cx, cy, k)) {
-                    Some(g) => geometry_mesh(g),
-                    None => level_mesh(&grid, (c0, r0), (ncx, ncy), f, origin, t.height_m),
+                let mesh = match (tin_meshes.remove(&(cx, cy, k)), &shaped) {
+                    (Some(g), _) => geometry_mesh(g),
+                    (None, Some((_, grid))) => level_mesh(grid, (c0, r0), (ncx, ncy), f, origin, t.height_m),
+                    (None, None) => continue,
                 };
                 tris[k] += mesh.indices().map_or(0, |i| i.len() / 3);
                 let mesh = meshes.add(mesh);
@@ -1106,6 +1157,123 @@ pub fn cell_ground(scn: &Scenario, c: Cell) -> (Pos, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strides the browser's builds use (`quality`: WebGPU 1, WebGL2 2 on
+    /// a computer and 4 on a phone), each with its fresh meshes.
+    fn web_terrain() -> Vec<(usize, f32, crate::terrain_bake::Chunks)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(scn) = Scenario::load(&dir) else { return Vec::new() };
+        let shore = ShoreField::new(&scn);
+        [1, 2, 4].map(|stride| {
+            let grid = shaped_grid(&scn, &shore, stride);
+            (stride, grid.posting, all_tin_meshes(&scn, &shore, &grid, stride))
+        }).into()
+    }
+
+    fn baked_path(stride: usize) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../assets/terrain/tin_s{stride}.bin"))
+    }
+
+    /// The ground bakes this run can make: the realistic palette is the WebGPU
+    /// build's (`KIOSK_SCANS=1`), the plain one the WebGL2 builds'.
+    fn web_ground() -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(scn) = Scenario::load(&dir) else { return Vec::new() };
+        let shore = ShoreField::new(&scn);
+        let real = real_palette().is_some();
+        let strides: &[usize] = if real { &[1] } else { &[2, 4] };
+        strides.iter().map(|&stride| {
+            let grid = shaped_grid(&scn, &shore, stride);
+            let name = crate::terrain_bake::ground_file(stride, real);
+            (std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(name), crate::terrain_bake::encode_ground(&compute_ground(&scn, &shore, &grid, stride)))
+        }).collect()
+    }
+
+    fn graded() -> Option<Vec<u8>> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        Some(Scenario::load(&dir).ok()?.terrain.graded_bytes())
+    }
+
+    /// Writes the bakes of `assets/terrain/`: run it, with and without
+    /// `KIOSK_SCANS=1`, when the ground, the roads or the meshing change
+    /// (`baked_terrain_is_current` says when).
+    #[test]
+    #[ignore]
+    fn bake_web_terrain() {
+        for (stride, posting, chunks) in web_terrain() {
+            let path = baked_path(stride);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = crate::terrain_bake::encode(&chunks, posting);
+            eprintln!("tin_s{stride}.bin: {} chunks, {:.1} MB", chunks.len(), bytes.len() as f32 / 1e6);
+            std::fs::write(path, bytes).unwrap();
+        }
+        for (path, bytes) in web_ground() {
+            eprintln!("{}: {:.1} MB", path.display(), bytes.len() as f32 / 1e6);
+            std::fs::write(path, bytes).unwrap();
+        }
+        if let Some(bytes) = graded() {
+            eprintln!("graded.bin: {:.1} MB", bytes.len() as f32 / 1e6);
+            std::fs::write(baked_path(0).with_file_name("graded.bin"), bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn baked_terrain_is_current() {
+        let stale = "is out of date: cargo test --release -p game bake_web_terrain -- --ignored, with and without KIOSK_SCANS=1";
+        for (stride, posting, chunks) in web_terrain() {
+            let fresh = crate::terrain_bake::encode(&chunks, posting);
+            let file = std::fs::read(baked_path(stride)).expect("assets/terrain: bake it");
+            assert!(file == fresh, "assets/terrain/tin_s{stride}.bin {stale}");
+        }
+        for (path, fresh) in web_ground() {
+            assert!(std::fs::read(&path).expect("assets/terrain: bake it") == fresh, "{} {stale}", path.display());
+        }
+        if let Some(fresh) = graded() {
+            assert!(std::fs::read(baked_path(0).with_file_name("graded.bin")).expect("assets/terrain: bake it") == fresh, "graded.bin {stale}");
+        }
+    }
+
+    #[test]
+    fn a_baked_ground_decodes_to_the_same_texels() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(scn) = Scenario::load(&dir) else { return };
+        let shore = ShoreField::new(&scn);
+        let grid = shaped_grid(&scn, &shore, 4);
+        let g = compute_ground(&scn, &shore, &grid, 4);
+        let back = crate::terrain_bake::decode_ground(&crate::terrain_bake::encode_ground(&g), (grid.cols, grid.elev.len() / grid.cols)).unwrap();
+        assert!(back.mask.data == g.mask.data && (back.mask.nx, back.mask.ny) == (g.mask.nx, g.mask.ny));
+        assert!(back.colour == g.colour && back.normal == g.normal && back.under == g.under);
+        assert_eq!(back.colours, g.colours);
+    }
+
+    /// What is decoded is the same surface: every triangle, its winding
+    /// included, on the same quantised vertices.
+    #[test]
+    fn a_baked_terrain_decodes_to_the_same_triangles() {
+        use crate::terrain_bake::{decode, encode, height_range, quantised};
+        for (_, posting, chunks) in web_terrain().into_iter().filter(|w| w.0 == 4) {
+            let (y0, dy) = height_range(&chunks);
+            let unit = posting / 256.0;
+            let back = decode(&encode(&chunks, posting), posting).unwrap();
+            assert_eq!(back.len(), chunks.len());
+            let triangles = |g: &crate::terrain_tin::ChunkGeometry| {
+                let mut t: Vec<[[i32; 3]; 3]> = g.indices.chunks_exact(3).map(|i| {
+                    let mut v = [i[0], i[1], i[2]].map(|k| quantised(g.positions[k as usize], unit, y0, dy));
+                    let first = (0..3).min_by_key(|&a| v[a]).unwrap();
+                    v.rotate_left(first);
+                    v
+                }).collect();
+                t.sort();
+                t
+            };
+            for (key, g) in &chunks {
+                assert!(triangles(g) == triangles(&back[key]), "chunk {key:?}");
+                for n in &back[key].normals {
+                    assert!((n[0] * n[0] + n[1] * n[1] + n[2] * n[2] - 1.0).abs() < 1e-3);
+                }
+            }
+        }
+    }
 
     /// How far the browser's terrain (base stride 4) sits from `height_at`,
     /// where plants, engines and houses stand: the old 20 m grid against the

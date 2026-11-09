@@ -64,6 +64,7 @@ mod sky_light;
 mod sim;
 mod sound;
 mod streamed_mesh;
+mod terrain_bake;
 mod terrain_mesh;
 mod terrain_tin;
 mod textures;

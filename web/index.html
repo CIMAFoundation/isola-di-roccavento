@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Isola di Roccavento</title>
     <style>
-      html, body, #game { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #d0c6b4; }
+      html, body, #game { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #002d4b; }
       #game { position: fixed; inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); width: auto; height: auto; }
       body { overscroll-behavior: none; }
       dialog { box-sizing: border-box; width: min(360px, calc(100vw - 32px)); border: 1px solid #fac346; border-radius: 14px; padding: 20px; background: #121418; color: white; font: 18px system-ui; }
@@ -16,11 +16,15 @@
       /* Winit may request a backing-buffer resize; CSS size stays with the
          safe-area container even when its inline pixel dimensions change. */
       #rocca { display: block; width: 100% !important; height: 100% !important; outline: none; touch-action: none; -webkit-user-select: none; user-select: none; }
-      #loading { position: fixed; inset: 0; background: #d0c6b4; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #222; font: 18px system-ui, sans-serif; pointer-events: none; text-align: center; padding: 0 24px; }
+      /* the colours of cimafoundation.org (its Elementor kit, 2026-11-09) */
+      #loading { position: fixed; inset: 0; background: radial-gradient(circle at 50% 40%, #004070, #002d4b 55%, #001e31); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #fff; font: 17px 'Montserrat', 'Helvetica Neue', system-ui, sans-serif; pointer-events: none; text-align: center; padding: 0 24px; }
       #loading h1 { margin: 0; font-size: 28px; font-weight: 600; }
-      #loading small { font-size: 14px; color: #555; }
-      #bar { width: min(420px, 80vw); height: 10px; border-radius: 5px; background: rgba(0, 0, 0, .15); overflow: hidden; }
-      #fill { height: 100%; width: 0; background: #b5451b; border-radius: 5px; transition: width .2s; }
+      #loading small { font-size: 14px; color: #c6c6c6; }
+      #loading img { width: min(132px, 36vw); height: auto; margin-bottom: 10px; }
+      #percent { min-height: 1.2em; font-size: 44px; font-weight: 700; line-height: 1.2; color: #1bb8d1; font-variant-numeric: tabular-nums; }
+      #status { font-size: 15px; color: #c6c6c6; }
+      #bar { width: min(420px, 80vw); height: 10px; border-radius: 5px; background: rgba(255, 255, 255, .16); overflow: hidden; }
+      #fill { height: 100%; width: 0; background: #1bb8d1; border-radius: 5px; transition: width .2s; }
       #rom-toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: min(560px, 90vw); padding: 10px 16px; border-radius: 10px; background: rgba(20, 20, 20, .85); color: #fff; font: 15px system-ui, sans-serif; text-align: center; pointer-events: none; opacity: 0; transition: opacity .25s; }
       #rom-toast.on { opacity: 1; }
       #bar.wait #fill { width: 35%; will-change: transform; animation: slide 1.1s ease-in-out infinite alternate; }
@@ -208,7 +212,9 @@
     </div>
     <main id="game"><canvas id="rocca" tabindex="0"></canvas></main>
     <div id="loading">
+      <img src="./img/cima_logo_white.png" alt="CIMA Foundation">
       <h1>Isola di Roccavento</h1>
+      <div id="percent"></div>
       <div id="bar" class="wait"><div id="fill"></div></div>
       <div id="status" data-t="loading">Caricamento del territorio e della simulazione…</div>
     </div>
@@ -304,6 +310,7 @@
       const bar = document.querySelector('#bar');
       const fill = document.querySelector('#fill');
       const status = document.querySelector('#status');
+      const percent = document.querySelector('#percent');
 
 
       // Graphics profile: low on phones and tablets (a coarse primary pointer),
@@ -354,6 +361,24 @@
       // is of what travels (the data is gzipped by build_web.sh; the wasm is
       // compressed by the server), summed over every download in progress.
       let loadedBytes = 0;
+      // The percentage: what has arrived, file by file, of what the data list
+      // and the build say will travel (a file already cached counts as arrived).
+      // It measures the downloads only: while the game builds the island the
+      // page's thread is busy, nothing can be written, and the bar just slides.
+      const wasmSize = { webgl2: 0, webgpu: 0 };
+      const expected = new Map();
+      const arrivedBytes = new Map();
+      let totalBytes = 0;
+      function arrived(url, bytes) {
+        arrivedBytes.set(url, Math.min(bytes, expected.get(url) ?? 0));
+        if (!totalBytes) return;
+        let sum = 0;
+        for (const n of arrivedBytes.values()) sum += n;
+        const shown = Math.floor(100 * sum / totalBytes);
+        bar.classList.remove('wait');
+        fill.style.width = `${shown}%`;
+        percent.textContent = `${shown} %`;
+      }
       async function download(url, cacheName, prune) {
         // The URL carries a hash of the content (build_web.sh), so a cached copy
         // is valid for as long as the URL is the same. Phone browsers evict or
@@ -370,20 +395,25 @@
             if (prune) for (const key of await store.keys()) if (key.url !== new URL(url, location.href).href) await store.delete(key);
           } catch (e) { store = null; }
         }
-        if (response) return response;
+        if (response) { arrived(url, Infinity); return response; }
+        arrived(url, 0);
         response = await fetch(url);
         if (!response.ok) throw new Error(`${url}: ${response.status}`);
         // Cloning a large streamed wasm response can buffer an entire extra
         // copy when the cache writer and compiler consume at different rates.
         // Read existing cached wasm on phones, but let HTTP cache handle misses.
         if (store && !(lowMemory && cacheName === 'rocca-wasm')) store.put(url, response.clone()).catch(() => {});
-        if (!response.body) return response;
+        if (!response.body) { arrived(url, Infinity); return response; }
+        let received = 0;
         const counted = response.body.pipeThrough(new TransformStream({
           transform(chunk, controller) {
             loadedBytes += chunk.length;
+            received += chunk.length;
+            arrived(url, received);
             status.textContent = roccaText('downloaded', { n: (loadedBytes / 1e6).toFixed(1) });
             controller.enqueue(chunk);
           },
+          flush() { arrived(url, Infinity); },
         }));
         return new Response(counted, { headers: response.headers });
       }
@@ -412,12 +442,24 @@
       // host, 2026-10-30) must not pair this build with another's data
       const manifestUrl = './data/manifest.json';
 
+      let manifestRead = null;
+      const readManifest = () => manifestRead ??= retried('data/manifest.json', async () => {
+        const listed = await fetch(manifestUrl, { cache: 'no-cache' });
+        if (!listed.ok) throw new Error(`data/manifest.json: ${listed.status}`);
+        return listed.json();
+      });
+      // what not every browser reads is downloaded when the address or the
+      // page's choice asks for it: the realistic style (the WebGPU build only)
+      async function wantedFiles() {
+        const manifest = await readManifest();
+        const asked = new URLSearchParams(location.search);
+        const gpuBuild = await webgpu;
+        // the terrain baked for the grid this build draws (`Graphics::terrain_stride`)
+        const stride = gpuBuild ? 1 : window.roccaProfile === 'bassa' ? 4 : 2;
+        return manifest.filter(f => (!f.stride || f.stride === stride) && (!f.only || (gpuBuild && (asked.get(f.only) ?? window.roccaAuto?.[f.only]) === '1')));
+      }
       async function loadData() {
-        const manifest = await retried('data/manifest.json', async () => {
-          const listed = await fetch(manifestUrl, { cache: 'no-cache' });
-          if (!listed.ok) throw new Error(`data/manifest.json: ${listed.status}`);
-          return listed.json();
-        });
+        const manifest = await readManifest();
         if (window.caches) {
           try {
             const store = await caches.open('rocca-data');
@@ -428,12 +470,7 @@
         const files = {};
         const native = !lowMemory && typeof DecompressionStream === 'function';
         window.roccaDataGzip = !native;
-        // what not every browser reads is downloaded when the address or the
-        // page's choice asks for it: the realistic style (the WebGPU build only)
-        const asked = new URLSearchParams(location.search);
-        const gpuBuild = await webgpu;
-        const wanted = manifest.filter(f => !f.only || (gpuBuild && (asked.get(f.only) ?? window.roccaAuto?.[f.only]) === '1'));
-        const pending = wanted.values();
+        const pending = (await wantedFiles()).values();
         async function worker() {
           for (const file of pending) {
             files[file.path] = await retried(file.path, async () => {
@@ -524,7 +561,6 @@
         const message = document.createElement('div');
         message.id = 'loading';
         message.style.pointerEvents = 'auto';
-        message.style.background = '#d0c6b4';
         message.textContent = roccaText('gfx_lost');
         const retry = document.createElement('button');
         retry.textContent = roccaText('reload');
@@ -580,7 +616,12 @@
           // A download cut halfway (seen on CIMA's host) is tried again.
           const wasmUrl = gpu ? './game_gpu_bg.wasm' : './game_bg.wasm';
           const zipped = typeof DecompressionStream === 'function';
-          const compile = () => download(zipped ? wasmUrl.replace('.wasm', '.wasm.gz') : wasmUrl, gpu ? 'rocca-wasm-gpu' : 'rocca-wasm', true).then(r =>
+          const wasmFile = zipped ? wasmUrl.replace('.wasm', '.wasm.gz') : wasmUrl;
+          for (const [url, bytes] of [[wasmFile, gpu ? wasmSize.webgpu : wasmSize.webgl2], ...(await wantedFiles()).map(f => [f.url, f.bytes])]) {
+            expected.set(url, bytes);
+            totalBytes += bytes;
+          }
+          const compile = () => download(wasmFile, gpu ? 'rocca-wasm-gpu' : 'rocca-wasm', true).then(r =>
             zipped
               ? WebAssembly.compileStreaming(new Response(r.body.pipeThrough(new DecompressionStream('gzip')), { headers: { 'Content-Type': 'application/wasm' } }))
               : (r.headers.get('Content-Type') || '').startsWith('application/wasm')
@@ -594,6 +635,9 @@
         })()
           .then(([module]) => {
             status.textContent = roccaText('starting');
+            percent.textContent = '';
+            fill.style.width = '';
+            bar.classList.add('wait');
             // Until the game has drawn (`page_ready`): building the island holds
             // the page's thread for seconds, and without this it is a black screen.
             window.roccaGameDrawn = () => { loading.remove(); focusCanvas(); };

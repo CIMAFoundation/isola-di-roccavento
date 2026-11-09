@@ -24,8 +24,8 @@ use scenario::{Pos, Scenario};
 /// memory (a coarser terrain, `quality::Graphics::RISPARMIO`): the simulation
 /// and road network retain their full data. Each doubling takes a quarter of
 /// the texels (native 2 m: 85 MB with the mipmaps).
-fn resolution(gfx: &crate::quality::Graphics) -> f32 {
-    match (crate::quality::WEBGL2, gfx.terrain_stride) {
+fn resolution(stride: usize) -> f32 {
+    match (crate::quality::WEBGL2, stride) {
         (false, 1) => 2.0,
         (_, s) if s >= 4 => 8.0,
         _ => 4.0,
@@ -57,15 +57,17 @@ impl SeaGrid {
     }
 }
 
-pub struct RoadMask {
-    pub image: Image,
-    pub sea: SeaGrid,
-    /// `(1 / width, 1 / height, 0, 0)`: world metres to texture coordinates.
-    pub rect: Vec4,
+/// The mask's first level (`texels`), as computed or read from the bake.
+pub struct MaskTexels {
+    pub nx: usize,
+    pub ny: usize,
+    /// Roads, tracks, paved share, shore: four bytes a texel.
+    pub data: Vec<u8>,
 }
 
-pub fn build(scn: &Scenario, gfx: &crate::quality::Graphics) -> RoadMask {
-    let res_m = resolution(gfx);
+/// The mask's texels at this stride, and where the sea is.
+pub fn texels(scn: &Scenario, stride: usize) -> (MaskTexels, SeaGrid) {
+    let res_m = resolution(stride);
     let (w_m, h_m) = (scn.world.width_m, scn.world.height_m);
     let (nx, ny) = ((w_m / res_m).ceil() as usize, (h_m / res_m).ceil() as usize);
     let mut field = [vec![RANGE_M; nx * ny], vec![RANGE_M; nx * ny]];
@@ -105,6 +107,14 @@ pub fn build(scn: &Scenario, gfx: &crate::quality::Graphics) -> RoadMask {
         pixel[3] = shore;
     }
 
+    (MaskTexels { nx, ny, data }, SeaGrid { nx, ny, res: res_m, sea })
+}
+
+/// The mask's image with its mips, and `(1 / width, 1 / height, grass, 0)`:
+/// world metres to texture coordinates.
+pub fn image(scn: &Scenario, texels: MaskTexels) -> (Image, Vec4) {
+    let MaskTexels { nx, ny, mut data } = texels;
+    let (w_m, h_m) = (scn.world.width_m, scn.world.height_m);
     // Read the preceding level directly from the chain: no separate copy of
     // the full-resolution image, or intermediate mip buffers.
     let (mut lw, mut lh, mut levels, mut offset) = (nx, ny, 1, 0);
@@ -141,8 +151,8 @@ pub fn build(scn: &Scenario, gfx: &crate::quality::Graphics) -> RoadMask {
         anisotropy_clamp: 8,
         ..default()
     });
-    info!("road mask: {nx}x{ny} at {res_m} m, {levels} levels");
-    RoadMask { image, rect: Vec4::new(1.0 / w_m, 1.0 / h_m, if shader_grass() { 1.0 } else { 0.0 }, 0.0), sea: SeaGrid { nx, ny, res: res_m, sea } }
+    info!("road mask: {nx}x{ny}, {levels} levels");
+    (image, Vec4::new(1.0 / w_m, 1.0 / h_m, if shader_grass() { 1.0 } else { 0.0 }, 0.0))
 }
 
 /// Share of paved ground (roads, buildings and yards of the cover raster) at
@@ -360,8 +370,9 @@ mod tests {
     fn scenario_mask_pixels_are_unchanged() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
         let scn = Scenario::load_by_id(&dir, scenario::ID).unwrap();
-        let mask = build(&scn, &crate::quality::Graphics::ALTA);
-        let data = mask.image.data.as_ref().unwrap();
+        let (mask, _) = texels(&scn, crate::quality::Graphics::ALTA.terrain_stride);
+        let (image, _) = image(&scn, mask);
+        let data = image.data.as_ref().unwrap();
         let hash = data.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3));
         assert_eq!(data.len(), 85_332_856);
         // The waterline reads the graded ground (`scenario::grade`): with

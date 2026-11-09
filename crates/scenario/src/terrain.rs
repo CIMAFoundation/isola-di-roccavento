@@ -65,6 +65,10 @@ impl Terrain {
     /// Grade the roads into the ground ([`crate::grade`]).
     pub fn grade_roads(&mut self, roads: &[crate::Road]) {
         let grade = crate::grade::RoadGrade::build(roads, self.width_m, self.height_m, |p| self.height_at(Pos { x: p[0], y: p[1] }));
+        if self.read_baked_grade() {
+            self.grade = Some(grade);
+            return;
+        }
         let mut changed = Vec::new();
         for r in 0..self.rows {
             let y = self.height_m - r as f32 * self.posting;
@@ -84,6 +88,72 @@ impl Terrain {
         }
         self.raw_changed = changed;
         self.grade = Some(grade);
+    }
+
+    /// The graded samples as a file (`assets/terrain/graded.bin`, baked by the
+    /// game's `bake_web_terrain`): gaps between their indices, then their heights.
+    pub fn graded_bytes(&self) -> Vec<u8> {
+        let mut out = (self.raw_changed.len() as u32).to_le_bytes().to_vec();
+        let mut last = 0;
+        for (i, _) in &self.raw_changed {
+            let mut gap = i - last;
+            last = *i;
+            while gap >= 0x80 {
+                out.push(gap as u8 | 0x80);
+                gap >>= 7;
+            }
+            out.push(gap as u8);
+        }
+        for (i, _) in &self.raw_changed {
+            out.extend_from_slice(&self.elev[*i as usize].to_le_bytes());
+        }
+        out
+    }
+
+    /// In the browser, where the loop of `grade_roads` holds the page's only
+    /// thread: the samples it would change, from the bake.
+    #[cfg(target_arch = "wasm32")]
+    fn read_baked_grade(&mut self) -> bool {
+        let Ok(bytes) = datafs::take("assets/terrain/graded.bin") else { return false };
+        let Some(changed) = self.decode_grade(&bytes) else { return false };
+        for (i, _, z) in &changed {
+            self.elev[*i as usize] = *z;
+        }
+        self.raw_changed = changed.into_iter().map(|(i, raw, _)| (i, raw)).collect();
+        true
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_baked_grade(&mut self) -> bool {
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn decode_grade(&self, bytes: &[u8]) -> Option<Vec<(u32, f32, f32)>> {
+        let n = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        let mut at = 4;
+        let mut index = 0u32;
+        let mut indices = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (mut gap, mut shift) = (0u32, 0);
+            loop {
+                let b = *bytes.get(at)?;
+                at += 1;
+                gap |= ((b & 0x7f) as u32) << shift;
+                shift += 7;
+                if b < 0x80 {
+                    break;
+                }
+            }
+            index = index.checked_add(gap)?;
+            indices.push(index);
+        }
+        let heights = bytes.get(at..at + n * 4)?;
+        indices
+            .into_iter()
+            .zip(heights.chunks_exact(4))
+            .map(|(i, z)| Some((i, *self.elev.get(i as usize)?, f32::from_le_bytes(z.try_into().ok()?))))
+            .collect()
     }
 
     /// The published height of sample `i`, before grading.
