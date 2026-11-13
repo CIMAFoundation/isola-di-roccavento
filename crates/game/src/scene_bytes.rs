@@ -34,14 +34,14 @@ fn listed() -> bool {
 }
 
 /// Bytes of a mesh as the card takes it: its vertices and its indices.
-fn mesh_bytes(mesh: &Mesh) -> Option<(usize, usize, usize)> {
+pub(crate) fn mesh_bytes(mesh: &Mesh) -> Option<(usize, usize, usize)> {
     let vertex: usize = mesh.try_attributes().ok()?.map(|(a, _)| a.format.size() as usize).sum();
     let count = mesh.count_vertices();
     let indices = mesh.try_indices_option().ok()?.map_or(0, |i| i.len() * if matches!(i, bevy::mesh::Indices::U16(_)) { 2 } else { 4 });
     Some((vertex * count + indices, vertex, count))
 }
 
-fn report(meshes: Res<Assets<Mesh>>, images: Res<Assets<Image>>, users: Query<(&Mesh3d, &GlobalTransform)>, mut done: Local<bool>) {
+pub(crate) fn report(meshes: Res<Assets<Mesh>>, images: Res<Assets<Image>>, users: Query<(&Mesh3d, &GlobalTransform)>, mut done: Local<bool>) {
     const MB: f32 = 1_048_576.0;
     if std::mem::replace(&mut *done, true) {
         return;

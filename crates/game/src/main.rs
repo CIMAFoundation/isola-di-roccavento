@@ -66,6 +66,7 @@ mod sim;
 mod sound;
 mod streamed_mesh;
 mod scene_bytes;
+mod scene_feed;
 mod terrain_bake;
 mod terrain_mesh;
 mod terrain_tin;
@@ -254,6 +255,7 @@ fn main() -> anyhow::Result<()> {
     }
     app.add_plugins(streamed_mesh::StreamedMeshPlugin);
     app.add_plugins(scene_bytes::SceneBytesPlugin);
+    app.add_plugins(scene_feed::SceneFeedPlugin);
     #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
     app.add_plugins(web_gpu::WebGpuPlugin);
     #[cfg(feature = "webgpu")]
@@ -387,13 +389,19 @@ fn teardown_scene(
 /// Tells the page the game has drawn, so it takes its loading screen away
 /// (`window.roccaGameDrawn`, `web/index.html`): on the second frame in the
 /// game, the first one that follows a drawn one. Until then the scene is being
-/// built, the page's thread is busy and the canvas is black.
+/// built, the page's thread is busy and the canvas is black. Where the scene
+/// goes to the graphics card a little a frame (`scene_feed`), two frames
+/// after the last of it has.
 #[cfg(target_arch = "wasm32")]
-fn page_ready(mut frames: Local<u32>) {
+fn page_ready(mut frames: Local<u32>, mut told: Local<bool>) {
+    if *told || !scene_feed::arrived() {
+        return;
+    }
     *frames += 1;
     if *frames != 2 {
         return;
     }
+    *told = true;
     use wasm_bindgen::JsCast;
     let global = js_sys::global();
     if let Ok(f) = js_sys::Reflect::get(&global, &"roccaGameDrawn".into()) {
