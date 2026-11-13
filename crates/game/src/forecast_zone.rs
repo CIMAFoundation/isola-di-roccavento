@@ -204,7 +204,8 @@ pub fn grid_mesh(scn: &Scenario, lines: &[Vec<Vec<Pos>>; HORIZONS], eta_s: &[f32
             }
         }
     }
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // drawn only (`forecast_view`): for the card alone
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, dists);

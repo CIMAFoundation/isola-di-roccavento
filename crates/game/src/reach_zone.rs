@@ -134,7 +134,9 @@ pub fn band_mesh(scn: &Scenario, segments: &[[Pos; 2]], reach_m: f32) -> Option<
         return None;
     }
     let uvs: Vec<[f32; 2]> = dist.iter().map(|&d| [d, 0.0]).collect();
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // drawn only (`kiosk::marks`): for the card alone, not kept nor copied for
+    // the renderer (the road network's mark is 7 MB)
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; positions.len()]);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -295,7 +297,9 @@ pub fn sparse_mesh(scn: &Scenario, segments: &[([Pos; 2], f32)], reach_m: f32, g
         let (a, b, c, d) = (vertex(i, j, &best), vertex(i + 1, j, &best), vertex(i + 1, j + 1, &best), vertex(i, j + 1, &best));
         indices.extend([a, c, b, a, d, c]);
     }
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // drawn only (`kiosk::marks`): for the card alone, not kept nor copied for
+    // the renderer (the road network's mark is 7 MB)
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; positions.len()]);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
