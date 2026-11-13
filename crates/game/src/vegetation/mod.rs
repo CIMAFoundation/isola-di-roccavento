@@ -353,8 +353,10 @@ pub fn spawn(mut commands: Commands, sim: Res<Sim>, gfx: Res<crate::quality::Gra
     let scn = &sim.scn;
     let w = scn.world;
     let (rows, cols) = (w.fire_rows, w.fire_cols);
-    // the browser: the whole island one tile of proxies, never far from the camera
-    let tile_cells = if crate::quality::WEBGL2 { rows.max(cols) } else { TILE_CELLS };
+    // the browser: the whole island one tile of proxies, never far from the
+    // camera; but with the scanned plants (`?scans=1` on WebGL2, in trial),
+    // which have their models by distance as everywhere else
+    let tile_cells = if crate::quality::WEBGL2 && crate::models::scans().is_none() { rows.max(cols) } else { TILE_CELLS };
     let full = gfx.lod_m > 0.0;
     let far = tile_cells < rows.max(cols);
     let remains = !crate::quality::WEBGL2;

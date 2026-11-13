@@ -53,10 +53,10 @@ pub struct TerrainMaterial {
     pub ground_normal: Handle<Image>,
     /// The realistic ground's photo layers (2026-11-06,
     /// `textures::ground_detail_image`), read only with the scanned plants
-    /// (`REAL_GROUND`); a stand-in otherwise. In the browser only in the
-    /// WebGPU build: on WebGL2 every texture of the layout takes one of its
-    /// 16 units, and there are no scanned plants.
-    #[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+    /// (`REAL_GROUND`); a stand-in otherwise. On WebGL2 too since
+    /// 2026-11-13: every texture of a layout takes one of its 16 units
+    /// there, and the terrain's has 11 with this one (5 of the view's, 6
+    /// its own; the fullest, the near grass, 15).
     #[texture(9, dimension = "2d_array")]
     #[sampler(10)]
     pub ground_detail: Handle<Image>,
@@ -78,7 +78,7 @@ impl TerrainMaterial {
         grass_map: Handle<Image>,
         ground_colour: Handle<Image>,
         ground_normal: Handle<Image>,
-        #[cfg_attr(all(target_arch = "wasm32", not(feature = "webgpu")), allow(unused_variables))] ground_detail: Handle<Image>,
+        ground_detail: Handle<Image>,
     ) -> Self {
         TerrainMaterial {
             uniform: TerrainUniform {
@@ -91,7 +91,6 @@ impl TerrainMaterial {
             grass_map,
             ground_colour,
             ground_normal,
-            #[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
             ground_detail,
             front_map: crate::fire_ahead::FRONT_MAP,
         }
@@ -152,7 +151,7 @@ impl Material for TerrainMaterial {
         _: &bevy::mesh::MeshVertexBufferLayoutRef,
         _: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
-        if !crate::quality::WEBGL2 && crate::textures::ground_detail().is_some() {
+        if crate::textures::ground_detail().is_some() {
             if let Some(fragment) = descriptor.fragment.as_mut() {
                 fragment.shader_defs.push("REAL_GROUND".into());
             }

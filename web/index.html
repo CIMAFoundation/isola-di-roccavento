@@ -466,14 +466,17 @@
         return listed.json();
       });
       // what not every browser reads is downloaded when the address or the
-      // page's choice asks for it: the realistic style (the WebGPU build only)
+      // page's choice asks for it: the realistic style (by itself in the
+      // WebGPU build; on WebGL2 with `?scans=1`, in trial)
       async function wantedFiles() {
         const manifest = await readManifest();
         const asked = new URLSearchParams(location.search);
         const gpuBuild = await webgpu;
         // the terrain baked for the grid this build draws (`Graphics::terrain_stride`)
-        const stride = gpuBuild ? 1 : window.roccaProfile === 'bassa' ? 4 : 2;
-        return manifest.filter(f => (!f.stride || f.stride === stride) && (!f.only || (gpuBuild && (asked.get(f.only) ?? window.roccaAuto?.[f.only]) === '1')));
+        // (the realistic style has its ground at every sample, on either build)
+        const scansOn = (asked.get('scans') ?? window.roccaAuto?.scans) === '1';
+        const stride = gpuBuild || scansOn ? 1 : window.roccaProfile === 'bassa' ? 4 : 2;
+        return manifest.filter(f => (!f.stride || f.stride === stride) && (!f.only || (asked.get(f.only) ?? window.roccaAuto?.[f.only]) === '1'));
       }
       async function loadData() {
         const manifest = await readManifest();

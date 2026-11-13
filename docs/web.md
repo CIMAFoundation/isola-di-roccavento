@@ -213,10 +213,18 @@ Prova (Chromium headless, Mac M4 Pro, ANGLE su Metal, «WebGL 2.0 (OpenGL ES 3.0
 
 Un test (`fire_volumetric::tests::the_volumes_translate_for_webgl2`) traduce i tre shader in GLSL ES 3.00 con naga: avrebbe trovato il primo errore in pochi secondi invece che a una build web.
 
+**Lo stile realistico su WebGL2** (utente, stesso giorno: «come possiamo far girare gli scan anche in webgl2?»). Provato togliendo i blocchi, non dedotto: **con `?scans=1` gira anche su WebGL2**, spento senza il parametro.
+
+- Il limite delle 16 unità di texture non era l'ostacolo: contano le texture del layout di ogni pipeline, e la vista di Bevy su WebGL2 ne ha 5 (due ombre, la LUT del tone mapping, le due cubemap del cielo). Con le foto: terreno 11, murature 13, case 14, erba vicina 15.
+- Tre cose lo tenevano spento: `models::scans` rispondeva «no» su WebGL2; il binding delle foto del terreno era escluso alla compilazione; la scena delle piante su WebGL2 era sempre un'unica tessera di sostituti e i livelli del browser chiedono zero modelli (`lod_m` 0). Ora, con `?scans=1` su WebGL2, il gioco prende il livello che un telefono ha nella build WebGPU (`Graphics::BASSA`: modelli scansionati per distanza, con le soglie corte del profilo leggero) e la pagina scarica i file delle scansioni e il terreno a passo 1.
+- Prova (Chromium headless, Mac M4 Pro, WebGL 2.0, partita al minuto 70): nessun errore; profilo computer 120, 111 e 72 fotogrammi al secondo (fuoco a 2,5 km, fronte a 900 e 300 m), profilo telefono 120, 120 e 76; senza `scans` 120 ovunque come prima. A schermo: terreno fotografico, case scaricate, piante scansionate.
+- **Da scaricare**: 59,6 MB compressi con le scansioni, contro i 13,6 di un telefono oggi (18,0 un computer su WebGL2), più 9 MB di wasm.
+- **Non misurato**: la memoria della pagina (l'iPhone 13 si chiudeva a 1,2 GB prima dei tagli del 2026-11-01) e i fotogrammi su un telefono vero. Il terreno realistico a passo 1 è il file più grosso (95 MB in memoria): per i telefoni andrebbe cotto anche a passo 2 e 4 (`ground_s2_real.bin`, `ground_s4_real.bin`), oggi non ci sono. Senza multisampling i cartoncini delle foglie hanno bordi netti.
+
 **Che cosa manca perché sia l'unica versione su WebGL2:**
 
 - **telefoni non provati.** La marcia scrive cinque bersagli in mezzi float e float (serve `EXT_color_buffer_float` e almeno 5 draw buffer: WebGL2 ne garantisce 4) e gira a un quarto della risoluzione su ogni profilo: su un telefono vero va misurata, memoria compresa (cinque bersagli più le due storie);
-- **lo stile realistico (`scans`) su WebGL2 non c'è**: il terreno fotografico vuole più delle 16 unità di texture. Non toccato;
+- **lo stile realistico su WebGL2 c'è solo con `?scans=1`**: prima di accenderlo da solo vanno misurati memoria e fotogrammi su un telefono, e alleggerito lo scaricamento (sopra);
 - niente bloom né HDR: le fiamme non hanno alone;
 - provato solo Chromium su un Mac; non Safari, non Firefox, non il sito pubblicato.
 

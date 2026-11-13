@@ -197,7 +197,13 @@ impl Graphics {
     /// In the browser the page decides (`window.roccaProfile`, see `web/index.html`).
     pub fn from_env() -> Graphics {
         if cfg!(target_arch = "wasm32") {
+            // the realistic style asked for on WebGL2 (`?scans=1`, in trial):
+            // the level a phone has in the WebGPU build, where the scanned
+            // plants have their models and their own short distances; the
+            // browser's own levels are all stand-ins (`lod_m` 0)
+            let scans_on_webgl2 = WEBGL2 && web_param("scans").as_deref() == Some("1");
             let mut g = match web_profile().as_deref() {
+                _ if scans_on_webgl2 => Graphics::BASSA,
                 // WebGPU: the desktop's levels, `adaptive` from the top
                 Some("bassa") if !WEBGL2 => Graphics::BASSA,
                 Some("media") if !WEBGL2 && !Graphics::auto_wanted() => Graphics::MEDIA,

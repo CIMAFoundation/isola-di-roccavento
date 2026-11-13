@@ -280,7 +280,7 @@ pub fn scans() -> Option<&'static Scans> {
     SCANS
         .get_or_init(|| {
             let asked = if cfg!(target_arch = "wasm32") { crate::quality::web_param("scans") } else { std::env::var("KIOSK_SCANS").ok() };
-            if crate::quality::WEBGL2 || asked.as_deref() != Some("1") {
+            if asked.as_deref() != Some("1") {
                 return None;
             }
             let read = |name: &str| scan_file(name).map_err(|e| warn!("scanned plants: {name}: {e}")).ok();
