@@ -216,15 +216,42 @@ Un test (`fire_volumetric::tests::the_volumes_translate_for_webgl2`) traduce i t
 **Lo stile realistico su WebGL2** (utente, stesso giorno: «come possiamo far girare gli scan anche in webgl2?»). Provato togliendo i blocchi, non dedotto: **con `?scans=1` gira anche su WebGL2**, spento senza il parametro.
 
 - Il limite delle 16 unità di texture non era l'ostacolo: contano le texture del layout di ogni pipeline, e la vista di Bevy su WebGL2 ne ha 5 (due ombre, la LUT del tone mapping, le due cubemap del cielo). Con le foto: terreno 11, murature 13, case 14, erba vicina 15.
-- Tre cose lo tenevano spento: `models::scans` rispondeva «no» su WebGL2; il binding delle foto del terreno era escluso alla compilazione; la scena delle piante su WebGL2 era sempre un'unica tessera di sostituti e i livelli del browser chiedono zero modelli (`lod_m` 0). Ora, con `?scans=1` su WebGL2, il gioco prende il livello che un telefono ha nella build WebGPU (`Graphics::BASSA`: modelli scansionati per distanza, con le soglie corte del profilo leggero) e la pagina scarica i file delle scansioni e il terreno a passo 1.
-- Prova (Chromium headless, Mac M4 Pro, WebGL 2.0, partita al minuto 70): nessun errore; profilo computer 120, 111 e 72 fotogrammi al secondo (fuoco a 2,5 km, fronte a 900 e 300 m), profilo telefono 120, 120 e 76; senza `scans` 120 ovunque come prima. A schermo: terreno fotografico, case scaricate, piante scansionate.
-- **Da scaricare**: 59,6 MB compressi con le scansioni, contro i 13,6 di un telefono oggi (18,0 un computer su WebGL2), più 9 MB di wasm.
-- **Non misurato**: la memoria della pagina (l'iPhone 13 si chiudeva a 1,2 GB prima dei tagli del 2026-11-01) e i fotogrammi su un telefono vero. Il terreno realistico a passo 1 è il file più grosso (95 MB in memoria): per i telefoni andrebbe cotto anche a passo 2 e 4 (`ground_s2_real.bin`, `ground_s4_real.bin`), oggi non ci sono. Senza multisampling i cartoncini delle foglie hanno bordi netti.
+- Tre cose lo tenevano spento: `models::scans` rispondeva «no» su WebGL2; il binding delle foto del terreno era escluso alla compilazione; la scena delle piante su WebGL2 era sempre un'unica tessera di sostituti e i livelli del browser chiedono zero modelli (`lod_m` 0).
+- Prova (Chromium headless, Mac M4 Pro, WebGL 2.0, partita al minuto 70): nessun errore; profilo computer 124, 105 e 119 fotogrammi al secondo (fuoco a 2,5 km, fronte a 900 e 300 m), profilo telefono 120 ovunque; senza `scans` 120 ovunque come prima. A schermo: terreno fotografico, case scaricate, piante scansionate.
+- Senza multisampling i cartoncini delle foglie hanno bordi netti.
+
+### Sul telefono: quanta memoria, e il livello leggero (2026-11-13)
+
+Prova dell'utente sul telefono, sito pubblicato: «scans rompe il telefono mentre volumes funziona». Poi: «come possiamo fare a stimare quale sarà la capacità del telefono e caricare comunque gli scans magari a risoluzione più bassa?». La prima versione dava a WebGL2 il livello leggero del desktop intero (terreno a ogni campione, texture dei computer).
+
+**Come si misura.** `scripts/web_budget.py <sito> '<parametri>' [phone] [top]` (nuovo): Chromium headless, una partita ferma al minuto 40; stampa le texture e i buffer che la pagina ha chiesto (le chiamate WebGL2 contate nella pagina), la memoria del wasm, il processo della pagina, il processo grafico e, di questo, la memoria presa dalla scheda. Con `top`: le texture più grosse, i buffer per tipo di vertice, le categorie del processo grafico. La capacità di un telefono non si può leggere (`navigator.deviceMemory` non c'è su Safari): si tiene il conto di ciò che la pagina chiede e lo si confronta con ciò che su quel telefono gira già.
+
+**Che cosa si è trovato** (profilo telefono, 390×844 a densità 3; MB):
+
+| | texture chieste | buffer chiesti | wasm | pagina | processo grafico (dalla scheda) |
+|---|---:|---:|---:|---:|---:|
+| senza scan, com'era | 102 | 48 | 320 | 552 | 663 (189) |
+| senza scan, ora | 58 | 48 | 320 | 540 | 554 (118) |
+| con scan, com'era | 280 | 164 | non misurato | 1203 | 1882 |
+| con scan, ora | 75 | 94 | 448 | 707 | 642 (184) |
+
+1. **Il vertice provocante** (il pezzo grosso, e vale per tutte le pagine WebGL2). La memoria presa dalla scheda era più volte quella chiesta: 845 MB per 197. Compariva ai primi fotogrammi disegnati, non al caricamento. Lasciando disegnare un programma di shader alla volta: una sola mesh da 500 mila indici ne prendeva 153, la rocca 29, le piante niente. WebGL, per i valori `flat` di uno shader, prende l'ultimo vertice del triangolo e Metal il primo: il browser, che su Mac e iPhone disegna con Metal, riscrive gli indici di ogni disegno per ogni shader che ha un valore `flat`, e gli shader delle mesh di Bevy ne hanno uno (l'indice dell'istanza; lo shader delle piante no). La pagina ora chiede il primo vertice appena il contesto esiste (`WEBGL_provoking_vertex`, `web/index.html`; `?provoking=last` per il confronto): con lo stile realistico **845 → 212 MB**, senza **189 → 117**. L'immagine non cambia: quei valori sono uguali ai tre vertici. `window.roccaProvoking` dice che cosa ha ottenuto la pagina (`first`, `last`, `no extension`); `web_check.py` lo stampa.
+2. **Due sprechi**, in ogni build: la cubemap d'ombra delle luci puntiformi, che il gioco non ha (sei facce da 1024, 24 MB: ora da 16), e la pellicola delle fiamme a 2048 di lato (21 MB) che con i volumi accesi serve solo alle case che bruciano (ora a metà lato, a un quarto su WebGL2).
+3. **Il livello.** Con `?scans=1` su WebGL2 il gioco tiene il livello del browser (passo del terreno, ombre) e prende dal livello leggero solo i modelli delle piante per distanza. Il terreno realistico è cotto anche a passo 2 e 4 (`ground_s2_real.bin`, `ground_s4_real.bin`): la pagina prende quello del suo passo al posto di quello semplice (`unless` nel manifest). A passo 1 il terreno da solo chiedeva 110 MB di texture (maschera delle strade 4000², normali in mezzi float).
+4. **Il set leggero per i telefoni** (`lite` nel manifest, `scripts/build_web.sh`): foto del terreno e degli edifici e cartoncini delle foglie a un quarto del lato (i computer a metà); le case con il solo modello lontano (quelli vicini sono 422 mila vertici); niente rocca né mezzi scansionati (il gioco disegna i suoi). Da scaricare con gli scan: telefono **22,4 MB** compressi (13,6 senza), computer su WebGL2 48,0, WebGPU 59,6.
+5. **Il wasm al primo fotogramma.** La scena passa alla scheda tutta insieme: ciò che è tenuto da entrambi i lati viene copiato per il renderer, e tutto aspetta la fine del fotogramma nel buffer da cui parte. Lì il wasm supera i 320 MiB con cui nasce. I modelli vicini delle case ora sono solo per la scheda (Mario cammina su quelli lontani). Il limite per fotogramma di Bevy (`RenderAssetBytesPerFrame`) è stato provato e tolto: 572 MB contro 539, perché l'allocatore delle mesh le copia comunque tutte subito. La riga `scene:` del log dice quanti MB sono dei due tipi (`?scene_bytes=1` li elenca, `scene_bytes.rs`): con gli scan 39 MB di mesh tenute e 35 solo per la scheda, 12 e 25 di texture.
+
+**Non risolto.**
+
+- **Non provato su un telefono.** Le misure sono di Chromium su un Mac, che disegna con Metal come Safari su iPhone; quanto l'iPhone tolleri non è noto.
+- Con gli scan il wasm cresce di 128 MB oltre i 320 iniziali (448). La crescita è ciò di cui una pagina su iPhone è già morta (`.cargo/config.toml`). Due strade, non prese: alzare la memoria iniziale, o far arrivare la scena alla scheda in più fotogrammi trattenendo gli eventi degli asset del primo.
+- Su un telefono lo stile realistico è sfocato da vicino (terreno a 20 m, foto a 256 px, case nel modello lontano) e gli alberi vicini sono radi. Da lontano, dove si gioca, tiene.
+- Sul profilo computer di WebGL2 con gli scan: texture 153, buffer 136, wasm 663, pagina 963, processo grafico 726 (302 dalla scheda).
 
 **Che cosa manca perché sia l'unica versione su WebGL2:**
 
 - **telefoni non provati.** La marcia scrive cinque bersagli in mezzi float e float (serve `EXT_color_buffer_float` e almeno 5 draw buffer: WebGL2 ne garantisce 4) e gira a un quarto della risoluzione su ogni profilo: su un telefono vero va misurata, memoria compresa (cinque bersagli più le due storie);
-- **lo stile realistico su WebGL2 c'è solo con `?scans=1`**: prima di accenderlo da solo vanno misurati memoria e fotogrammi su un telefono, e alleggerito lo scaricamento (sopra);
+- **lo stile realistico su WebGL2 c'è solo con `?scans=1`**: prima di accenderlo da solo va provato su un telefono (sopra);
 - niente bloom né HDR: le fiamme non hanno alone;
 - provato solo Chromium su un Mac; non Safari, non Firefox, non il sito pubblicato.
 

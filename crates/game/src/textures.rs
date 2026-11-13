@@ -442,7 +442,11 @@ pub const GROUND_ENCODE: f32 = 0.33;
 /// 16 x 8 frames. Red is how hot, alpha how much flame; the shader colours
 /// it (`flame.wesl`). Linear, with box-filtered mips: a tongue far off is a
 /// few pixels of a 128 x 256 frame, and without them it shimmers.
-pub fn flame_flipbook() -> Image {
+///
+/// `skip`: without its first levels. The sheet is 2048 a side, 21 MB with
+/// its mips; where the volumes draw the front's flames only the burning
+/// houses play it, small on the screen (`fire_view::setup`).
+pub fn flame_flipbook(skip: u32) -> Image {
     use bevy::image::{CompressedImageFormats, ImageFilterMode, ImageSampler, ImageSamplerDescriptor, ImageType};
     #[cfg(not(target_arch = "wasm32"))]
     let png: std::borrow::Cow<'static, [u8]> = include_bytes!("../../../assets/models/flame_flipbook.png").as_slice().into();
@@ -472,9 +476,18 @@ pub fn flame_flipbook() -> Image {
         (lw, lh) = (nw, nh);
         levels += 1;
     }
+    // the levels skipped: their bytes come first
+    let skip = skip.min(levels - 1);
+    let (mut w, mut h) = (w, h);
+    let mut first = 0;
+    for _ in 0..skip {
+        first += w * h * 4;
+        (w, h) = (w / 2, h / 2);
+    }
+    data.drain(..first);
     let mut image = Image::new(Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 }, TextureDimension::D2, Vec::new(), TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
     image.data = Some(data);
-    image.texture_descriptor.mip_level_count = levels;
+    image.texture_descriptor.mip_level_count = levels - skip;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,

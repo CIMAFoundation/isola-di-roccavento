@@ -197,13 +197,7 @@ impl Graphics {
     /// In the browser the page decides (`window.roccaProfile`, see `web/index.html`).
     pub fn from_env() -> Graphics {
         if cfg!(target_arch = "wasm32") {
-            // the realistic style asked for on WebGL2 (`?scans=1`, in trial):
-            // the level a phone has in the WebGPU build, where the scanned
-            // plants have their models and their own short distances; the
-            // browser's own levels are all stand-ins (`lod_m` 0)
-            let scans_on_webgl2 = WEBGL2 && web_param("scans").as_deref() == Some("1");
             let mut g = match web_profile().as_deref() {
-                _ if scans_on_webgl2 => Graphics::BASSA,
                 // WebGPU: the desktop's levels, `adaptive` from the top
                 Some("bassa") if !WEBGL2 => Graphics::BASSA,
                 Some("media") if !WEBGL2 && !Graphics::auto_wanted() => Graphics::MEDIA,
@@ -212,6 +206,17 @@ impl Graphics {
                 Some("media") => Graphics::WEB_MEDIA,
                 _ => Graphics::WEB,
             };
+            // The realistic style asked for on WebGL2 (`?scans=1`, in trial):
+            // the browser's level as it is (its terrain stride, its shadows),
+            // but the scanned plants as models by distance, with the light
+            // level's short thresholds ([`Graphics::light`]); the browser's
+            // own levels draw stand-ins only (`lod_m` 0). The desktop's
+            // light level whole, tried first, took the ground at every
+            // sample: 300 MB more of textures and buffers, and the phone
+            // closed the page (user, 2026-11-13).
+            if WEBGL2 && web_param("scans").as_deref() == Some("1") {
+                g = Graphics { lod_m: Graphics::BASSA.lod_m, lobes: false, vegetation: g.vegetation.max(Graphics::BASSA.vegetation), ..g };
+            }
             // `?gfx=` as `KIOSK_GFX`, e.g. `veg=0,terrain_stride=8`
             if let Some(spec) = web_param("gfx") {
                 g.apply(&spec);

@@ -118,8 +118,13 @@ impl Library {
             }
             let mut handles = Vec::new();
             let mut tris = Vec::new();
-            for l in e.lods.iter().take(2) {
-                let mesh = decode(&blob, l).or_else(|| {
+            for (k, l) in e.lods.iter().take(2).enumerate() {
+                // The near model is only drawn: for the card alone, so it is
+                // not kept, nor copied for the renderer (19 MB of vertices
+                // for the sixteen). The light one is what Mario walks on
+                // (`spawn`): it stays on both sides.
+                let usage = if k == 0 { RenderAssetUsages::RENDER_WORLD } else { RenderAssetUsages::default() };
+                let mesh = decode(&blob, l, usage).or_else(|| {
                     warn!("house models: {} is cut short", e.name);
                     None
                 })?;
@@ -145,7 +150,7 @@ impl Library {
 
 /// One level of a model from the bake: 13 bytes a vertex (`i16` position in
 /// millimetres, `i8` normal, sRGB or tint grey and the role), `u16` indices.
-fn decode(blob: &[u8], l: &LodEntry) -> Option<Mesh> {
+fn decode(blob: &[u8], l: &LodEntry, usage: RenderAssetUsages) -> Option<Mesh> {
     let vb = blob.get(l.vertex_offset..l.vertex_offset + l.vertices * 13)?;
     let ib = blob.get(l.index_offset..l.index_offset + l.indices * 2)?;
     let mut positions = Vec::with_capacity(l.vertices);
@@ -171,7 +176,7 @@ fn decode(blob: &[u8], l: &LodEntry) -> Option<Mesh> {
         return None;
     }
     let n = positions.len();
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usage);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -379,7 +384,7 @@ mod tests {
             assert!(e.lods[0].indices / 3 <= 20_000, "{}: {} triangles", e.name, e.lods[0].indices / 3);
             assert!(e.lods[1].indices < e.lods[0].indices / 5, "{}", e.name);
             for l in &e.lods {
-                let mesh = decode(&blob, l).unwrap_or_else(|| panic!("{}", e.name));
+                let mesh = decode(&blob, l, RenderAssetUsages::default()).unwrap_or_else(|| panic!("{}", e.name));
                 let Some(bevy::mesh::VertexAttributeValues::Float32x4(c)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR) else { panic!() };
                 let glass: Vec<bool> = c.iter().map(|c| (c[3] * 255.0).round() as u32 == 43).collect();
                 let first = glass.iter().position(|&g| g).unwrap_or(glass.len());

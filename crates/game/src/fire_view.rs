@@ -261,7 +261,10 @@ pub fn setup(
     let smoke_mesh = Streamed::new(&mut meshes, BILLBOARD, true);
     let sparks = Streamed::new(&mut meshes, BILLBOARD, false);
 
-    let flame_tex = images.add(textures::flame_flipbook());
+    // with the volumes on only the burning houses play the film: at half
+    // its side (a quarter on WebGL2, the phones'), 5 MB or 1 instead of 21
+    let skip = if !crate::fire_volumetric::on() { 0 } else if crate::quality::WEBGL2 { 2 } else { 1 };
+    let flame_tex = images.add(textures::flame_flipbook(skip));
     let puff_tex = images.add(textures::puff());
     let spark_tex = images.add(textures::spark());
 
@@ -1370,7 +1373,7 @@ fn lab_torches_setup(
     mut images: ResMut<Assets<Image>>,
 ) {
     let flames = Streamed::new(&mut meshes, TONGUE, false);
-    let mat = fire_materials.add(FireMaterial { texture: images.add(textures::flame_flipbook()), mode: Vec4::X });
+    let mat = fire_materials.add(FireMaterial { texture: images.add(textures::flame_flipbook(0)), mode: Vec4::X });
     commands.spawn((
         (Mesh3d(flames.handle.clone()), MeshMaterial3d(mat)),
         bevy::camera::visibility::NoFrustumCulling,

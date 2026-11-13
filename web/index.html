@@ -340,6 +340,36 @@
         location.replace(url);
       };
 
+      // On WebGL2 the first vertex of a triangle gives the `flat` values, as
+      // on WebGPU and on the desktop (WEBGL_provoking_vertex). WebGL's own
+      // convention is the last one, and a browser that draws through Metal
+      // (every browser on Apple's devices) keeps it by writing the indices of
+      // each draw again in another order, for every shader that has a `flat`
+      // value: Bevy's mesh shaders all have one (the instance's index, the
+      // same at the three vertices, so the picture does not change).
+      // Measured 2026-11-13, a phone's page in headless Chromium on a Mac:
+      // graphics memory 189 -> 117 MB, and 845 -> 212 with the realistic
+      // style, where one mesh of 500 thousand indices alone took 153 MB.
+      // `?provoking=last` leaves WebGL's convention, to compare.
+      window.roccaProvoking = 'last';
+      if (new URLSearchParams(location.search).get('provoking') !== 'last') {
+        for (const C of [window.HTMLCanvasElement, window.OffscreenCanvas].filter(Boolean)) {
+          const getContext = C.prototype.getContext;
+          C.prototype.getContext = function (kind, ...rest) {
+            const gl = getContext.call(this, kind, ...rest);
+            if (gl && kind === 'webgl2' && !gl.roccaProvoking) {
+              gl.roccaProvoking = true;
+              try {
+                const ext = gl.getExtension('WEBGL_provoking_vertex');
+                if (ext) ext.provokingVertexWEBGL(ext.FIRST_VERTEX_CONVENTION_WEBGL);
+                window.roccaProvoking = ext ? 'first' : 'no extension';
+              } catch (e) { window.roccaProvoking = 'no extension'; }
+            }
+            return gl;
+          };
+        }
+      }
+
       // The WebGPU build draws as the desktop does (HDR, MSAA, bloom, depth of
       // field, the authored plants); it is loaded on computers whose browser
       // gives a WebGPU adapter, the WebGL2 one everywhere else. `?gpu=0` keeps
@@ -473,10 +503,13 @@
         const asked = new URLSearchParams(location.search);
         const gpuBuild = await webgpu;
         // the terrain baked for the grid this build draws (`Graphics::terrain_stride`)
-        // (the realistic style has its ground at every sample, on either build)
-        const scansOn = (asked.get('scans') ?? window.roccaAuto?.scans) === '1';
-        const stride = gpuBuild || scansOn ? 1 : window.roccaProfile === 'bassa' ? 4 : 2;
-        return manifest.filter(f => (!f.stride || f.stride === stride) && (!f.only || (asked.get(f.only) ?? window.roccaAuto?.[f.only]) === '1'));
+        const light = window.roccaProfile === 'bassa';
+        const stride = gpuBuild ? 1 : light ? 4 : 2;
+        const on = name => (asked.get(name) ?? window.roccaAuto?.[name]) === '1';
+        // `only`: for a style that is on; `unless`: what that style replaces
+        // (the plain ground); `lite`: the phones' set of the style's pictures
+        // (a quarter of their side) or the computers' (half)
+        return manifest.filter(f => (!f.stride || f.stride === stride) && (!f.only || on(f.only)) && (!f.unless || !on(f.unless)) && (!('lite' in f) || f.lite === light));
       }
       async function loadData() {
         const manifest = await readManifest();

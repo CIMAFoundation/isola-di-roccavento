@@ -1174,14 +1174,17 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../assets/terrain/tin_s{stride}.bin"))
     }
 
-    /// The ground bakes this run can make: the realistic palette is the WebGPU
-    /// build's (`KIOSK_SCANS=1`), the plain one the WebGL2 builds'.
+    /// The ground bakes this run can make: the realistic palette
+    /// (`KIOSK_SCANS=1`) at every stride (1 the WebGPU build's; 2 and 4
+    /// since 2026-11-13, for the realistic style on WebGL2: a phone that
+    /// took the ground at every sample asked 110 MB of textures for it),
+    /// the plain one at the WebGL2 builds' strides.
     fn web_ground() -> Vec<(std::path::PathBuf, Vec<u8>)> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
         let Ok(scn) = Scenario::load(&dir) else { return Vec::new() };
         let shore = ShoreField::new(&scn);
         let real = real_palette().is_some();
-        let strides: &[usize] = if real { &[1] } else { &[2, 4] };
+        let strides: &[usize] = if real { &[1, 2, 4] } else { &[2, 4] };
         strides.iter().map(|&stride| {
             let grid = shaped_grid(&scn, &shore, stride);
             let name = crate::terrain_bake::ground_file(stride, real);

@@ -65,6 +65,7 @@ mod sky_light;
 mod sim;
 mod sound;
 mod streamed_mesh;
+mod scene_bytes;
 mod terrain_bake;
 mod terrain_mesh;
 mod terrain_tin;
@@ -181,6 +182,11 @@ fn main() -> anyhow::Result<()> {
     .insert_resource(bevy::audio::GlobalVolume::new(bevy::audio::Volume::Linear(if std::env::var("KIOSK_SNAP").is_ok() { 0.0 } else { 1.0 })))
     .insert_resource(gfx)
     .insert_resource(bevy::light::DirectionalLightShadowMap { size: gfx.shadow_map })
+    // The island has no point light, and Bevy keeps a shadow cube for them
+    // all the same: six faces of 1024, 24 MB of every build's graphics
+    // memory (counted in the browser, 2026-11-13, a quarter of a phone's
+    // textures). Sixteen texels a face.
+    .insert_resource(bevy::light::PointLightShadowMap { size: 16 })
     .add_plugins(EguiPlugin::default())
     .add_plugins(fonts::FontsPlugin)
     .add_plugins(shader_lib::ShaderLibPlugin)
@@ -247,6 +253,7 @@ fn main() -> anyhow::Result<()> {
         app.add_plugins(bench::BenchPlugin);
     }
     app.add_plugins(streamed_mesh::StreamedMeshPlugin);
+    app.add_plugins(scene_bytes::SceneBytesPlugin);
     #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
     app.add_plugins(web_gpu::WebGpuPlugin);
     #[cfg(feature = "webgpu")]

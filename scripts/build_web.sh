@@ -78,10 +78,14 @@ for sub in ("data/scenarios/rocca_ventosa", "data/behaviours", "data/i18n", "dat
 files.append("data/fuels_eu12.json")
 manifest = []
 
-def scans_for_the_web():
-    """The scanned plants for the browser (`?scans=1`, WebGPU): without the
-    nearest level (lod0, three quarters of the bytes) and with the cards at
-    half size. Downloaded only when asked for (`only` in the manifest, see
+def scans_for_the_web(shrink):
+    """The scanned plants for the browser (`?scans=1`): without the nearest
+    level (lod0, three quarters of the bytes) and with the cards at one
+    `shrink`-th of their side (2 on computers, 4 on phones: the light set).
+    With them the realistic rocca, vehicles and house models; in the light
+    set no rocca nor vehicles (the game draws its own) and the houses with
+    their far model only.
+    Downloaded only when asked for (`only` in the manifest, see
     web/index.html). Needs Pillow for the cards: without it, no scans."""
     src = os.path.join(root, "assets/models")
     try:
@@ -102,7 +106,7 @@ def scans_for_the_web():
             chunk = data[level["offset"]:level["offset"] + n]
             level["offset"] = len(kept)
             kept += chunk
-    half = cards.resize((cards.width // 2, cards.height // 2), Image.LANCZOS)
+    half = cards.resize((cards.width // shrink, cards.height // shrink), Image.LANCZOS)
     index["atlas"] = {"width": half.width, "height": half.height}
     png = io.BytesIO()
     half.save(png, "PNG", optimize=True)
@@ -112,15 +116,42 @@ def scans_for_the_web():
     # the realistic rocca (scripts/build_rocca_real.py, landmarks::rocca_scans),
     # vehicles (tools/units/build_real_vehicles.py, units.rs) and house models
     # (tools/buildings/build_real_houses.py, buildings::house_models): as they are
+    light = shrink > 2
     for n in ("rocca_scans.json", "vehicles_real.json", "houses_real.json", "houses_real.bin"):
-        if os.path.exists(os.path.join(src, n)):
+        if os.path.exists(os.path.join(src, n)) and not (light and n in ("rocca_scans.json", "vehicles_real.json")):
             found.append(("assets/models/" + n, open(os.path.join(src, n), "rb").read()))
+    if light:
+        found = far_houses_only(found)
     return found
 
-def photographs_for_the_web():
-    """What else the realistic style reads (`?scans=1`, WebGPU): the ground's
-    and the buildings' photographs (`assets/ground`, `assets/buildings`) at
-    half their side, and their indexes as they are. Needs Pillow."""
+def far_houses_only(found):
+    """The house models with their far level in place of the near one too
+    (422 thousand vertices of the near ones, 19 MB on the graphics card and
+    as many in the page while they go there: 2026-11-13). The game reads two
+    levels of each house: both are the far one."""
+    files = dict(found)
+    index, blob = files.get("assets/models/houses_real.json"), files.get("assets/models/houses_real.bin")
+    if index is None or blob is None:
+        return found
+    index, kept = json.loads(index), bytearray()
+    for house in index["houses"]:
+        far = house["lods"][1]
+        vertices = blob[far["vertex_offset"]:far["vertex_offset"] + far["vertices"] * 13]
+        indices = blob[far["index_offset"]:far["index_offset"] + far["indices"] * 2]
+        far = dict(far, vertex_offset=len(kept))
+        kept += vertices
+        kept += b"\0" * (len(kept) % 2)
+        far["index_offset"] = len(kept)
+        kept += indices
+        house["lods"] = [far, far]
+    files["assets/models/houses_real.json"] = json.dumps(index).encode()
+    files["assets/models/houses_real.bin"] = bytes(kept)
+    return list(files.items())
+
+def photographs_for_the_web(shrink):
+    """What else the realistic style reads (`?scans=1`): the ground's and the
+    buildings' photographs (`assets/ground`, `assets/buildings`) at one
+    `shrink`-th of their side, and their indexes as they are. Needs Pillow."""
     try:
         from PIL import Image
     except Exception as e:
@@ -135,20 +166,33 @@ def photographs_for_the_web():
                 found.append((rel, open(full, "rb").read()))
             elif n.endswith(".png"):
                 picture = Image.open(full)
-                half = picture.resize((max(picture.width // 2, 1), max(picture.height // 2, 1)), Image.LANCZOS)
+                half = picture.resize((max(picture.width // shrink, 1), max(picture.height // shrink, 1)), Image.LANCZOS)
                 png = io.BytesIO()
                 half.save(png, "PNG", optimize=True)
                 found.append((rel, png.getvalue()))
     return found
 
-for path, raw in scans_for_the_web() + photographs_for_the_web():
-    gz = gzip.compress(raw, 6, mtime=0)
-    dest = os.path.join(out, path + ".gz")
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    open(dest, "wb").write(gz)
-    h = hashlib.sha256(gz).hexdigest()[:12]
-    manifest.append({"path": path, "url": f"./{path}.gz?v={h}", "bytes": len(gz), "only": "scans"})
-    print("for `?scans=1`: %s, %.1f MB gzipped (of %.1f MB)" % (path, len(gz) / 1e6, len(raw) / 1e6))
+# Two sets of the realistic style's pictures: at half their side for computers,
+# at a quarter for phones (the page's light profile; `lite` in the manifest:
+# a phone that took the computers' set asked the GPU for three times its
+# textures, 2026-11-13). What is the same in both is listed once.
+full = dict(scans_for_the_web(2) + photographs_for_the_web(2))
+light = dict(scans_for_the_web(4) + photographs_for_the_web(4))
+for path, raw in full.items():
+    both = light.get(path) == raw
+    # the same in both sets: once; only in the computers' set: `lite` false
+    for lite, raw in ((None, raw),) if both else ((False, raw), (True, light[path])) if path in light else ((False, raw),):
+        gz = gzip.compress(raw, 6, mtime=0)
+        name = path + (".lite.gz" if lite else ".gz")
+        dest = os.path.join(out, name)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        open(dest, "wb").write(gz)
+        h = hashlib.sha256(gz).hexdigest()[:12]
+        entry = {"path": path, "url": f"./{name}?v={h}", "bytes": len(gz), "only": "scans"}
+        if lite is not None:
+            entry["lite"] = lite
+        manifest.append(entry)
+        print("for `?scans=1`%s: %s, %.1f MB gzipped (of %.1f MB)" % (" (phones)" if lite else "", path, len(gz) / 1e6, len(raw) / 1e6))
 for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys.json", "CREDITS.txt"))):
     raw = open(os.path.join(root, path), "rb").read()
     gz = gzip.compress(raw, 9, mtime=0)
@@ -163,6 +207,9 @@ for path in sorted(f for f in files if not f.endswith(("params.json", "i18n/keys
         entry["stride"] = int(baked.group(1))
         if baked.group(2):
             entry["only"] = "scans"
+        elif "/ground_" in path and os.path.exists(os.path.join(root, path.replace(".bin", "_real.bin"))):
+            # the plain ground gives way to the realistic one of its stride
+            entry["unless"] = "scans"
     manifest.append(entry)
 json.dump(manifest, open(os.path.join(out, "data", "manifest.json"), "w"), indent=0)
 always = [m for m in manifest if "only" not in m and "stride" not in m]

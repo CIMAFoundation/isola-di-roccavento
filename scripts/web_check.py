@@ -33,7 +33,7 @@ with sync_playwright() as p:
         page.goto(f'http://127.0.0.1:{server.server_port}/?playtest=1&{query}')
         page.wait_for_function('window.roccaPlaytest?.state && !document.querySelector("#loading")', timeout=180000)
         page.wait_for_timeout(4000)
-        print('webgpu build:', page.evaluate('window.roccaWebGpu'), ' profile:', page.evaluate('window.roccaProfile'), ' auto:', page.evaluate('JSON.stringify(window.roccaAuto || {})'), ' address:', page.evaluate('location.search'))
+        print('webgpu build:', page.evaluate('window.roccaWebGpu'), ' profile:', page.evaluate('window.roccaProfile'), ' auto:', page.evaluate('JSON.stringify(window.roccaAuto || {})'), ' provoking vertex:', page.evaluate('window.roccaProvoking'), ' address:', page.evaluate('location.search'))
         page.evaluate('delete window.roccaPlaytest.camera')
         pw.start_game(page, phone)
         page.evaluate(f'window.roccaPlaytest.advance_s = {minutes * 60}')
