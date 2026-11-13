@@ -257,7 +257,7 @@ fn connected_sea(water: &[bool], nx: usize, ny: usize) -> Vec<bool> {
 
 /// Distance in texels to the nearest `seed` texel (0 on it), by the two-pass
 /// chamfer: within a few percent of Euclidean, and linear in the texel count.
-fn chamfer(seed: &[bool], nx: usize, ny: usize) -> Vec<f32> {
+pub(crate) fn chamfer(seed: &[bool], nx: usize, ny: usize) -> Vec<f32> {
     const D: f32 = std::f32::consts::SQRT_2;
     let mut d: Vec<f32> = seed.iter().map(|&s| if s { 0.0 } else { 1.0e6 }).collect();
     for j in 0..ny {

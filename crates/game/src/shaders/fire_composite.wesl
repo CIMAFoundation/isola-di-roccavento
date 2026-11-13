@@ -52,13 +52,15 @@ struct Params {
     front: vec4<f32>,
     fluid: vec4<f32>,
     fluid2: vec4<f32>,
+    field: vec4<f32>,
+    flame2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
 @if(MULTISAMPLED)
-@group(0) @binding(1) var depth_tex: texture_depth_multisampled_2d;
+@group(0) @binding(1) var depth_tex: texture_multisampled_2d<f32>;
 @else
-@group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(1) var depth_tex: texture_2d<f32>;
 @group(0) @binding(2) var vol_tex: texture_2d<f32>;
 // the scene's depth the march stopped at (m), then the flames' share of
 // the opacity, their distance (m) and how high up their tongues
@@ -102,8 +104,10 @@ fn carve(col: vec4<f32>, fl: vec3<f32>, pix: vec2<f32>) -> vec4<f32> {
     let size_m = max(p.more.z, foot * 4.0);
     let lod = log2(max(foot * 48.0 / size_m, 1.0));
     let t = p.more.w;
-    // tall and narrow, rising
-    let q = vec3<f32>(pos.x / size_m, pos.y / (size_m * 4.0) - t * 1.3, pos.z / size_m);
+    // tall and narrow, rising; the noise repeats every unit of this, and
+    // read along its own axes the licks stood in a lattice, a weave over
+    // the flames: read turned, a level cut never falls on itself again
+    let q = NOISE_TURN * vec3<f32>(pos.x / size_m, pos.y / (size_m * 4.0) - t * 1.3, pos.z / size_m);
     let w = noise_tex_at(q * 0.43 + vec3<f32>(0.0, -t * 0.4, 0.0), lod).gb - 0.5;
     var n = 0.75 * noise_tex_at(q + vec3<f32>(w.x, 0.0, w.y) * 0.8, lod).r;
     n += 0.25 * noise_tex_at(q * vec3<f32>(2.3, 1.9, 2.3) + vec3<f32>(w.y, -t * 1.1, w.x), lod + 1.2).g;
@@ -123,6 +127,14 @@ fn carve(col: vec4<f32>, fl: vec3<f32>, pix: vec2<f32>) -> vec4<f32> {
     let a = clamp(col.a + fa * (clamp(carved / fa, 0.0, 2.2) - 1.0), 0.0, 1.0);
     return vec4<f32>(rgb, a);
 }
+
+// A rotation of the noise's space (about 37° round (1, 2, 1.5); as
+// `fire_march.wesl`).
+const NOISE_TURN = mat3x3<f32>(
+    vec3<f32>(0.8303, 0.4210, -0.3654),
+    vec3<f32>(-0.3058, 0.8885, 0.3420),
+    vec3<f32>(0.4686, -0.1824, 0.8644),
+);
 
 // The sky's depth, and the farthest the march writes (m): its depths are
 // half floats (`fire_march.wesl`).
@@ -151,6 +163,51 @@ fn out(colour: vec4<f32>, mask: u32) -> Out {
 @else
 fn out(colour: vec4<f32>, mask: u32) -> Out {
     return Out(colour);
+}
+
+// On a target that is not HDR (WebGL2) the scene is tone mapped as it is
+// drawn, and nothing after this pass does it for the volumes: their light
+// is tone mapped here, by the scene's own curve (`Tonemapping::AcesFitted`,
+// Hill's fit, as Bevy has it). Written as it is, anything over 1 clipped:
+// the flames were flat yellow, the lit smoke white (seen in the browser,
+// 2026-11-13).
+//
+// The smoke's light is the volume's own (the colour over its opacity),
+// tone mapped and weighed by the opacity again: mapped as it comes, already
+// weighed, a thin veil of smoke fell in the curve's toe and was dark. The
+// flames' is mapped as it comes: weighed after, a flame half see-through
+// was half its brightness over ground as bright as itself, a pale peach
+// (an HDR target adds a flame several times brighter than the ground
+// before anything is mapped). Which of the two, by how bright it comes.
+@if(LDR)
+fn aces(colour: vec3<f32>) -> vec3<f32> {
+    let rgb_to_rrt = mat3x3<f32>(
+        vec3<f32>(0.59719, 0.35458, 0.04823),
+        vec3<f32>(0.07600, 0.90834, 0.01566),
+        vec3<f32>(0.02840, 0.13383, 0.83777),
+    );
+    let odt_to_rgb = mat3x3<f32>(
+        vec3<f32>(1.60475, -0.53108, -0.07367),
+        vec3<f32>(-0.10208, 1.10813, -0.00605),
+        vec3<f32>(-0.00327, -0.07276, 1.07602),
+    );
+    let v = colour * rgb_to_rrt;
+    let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081);
+    return clamp(fit * odt_to_rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+@if(LDR)
+fn to_screen(c: vec4<f32>) -> vec4<f32> {
+    if c.a <= 1.0e-4 {
+        return c;
+    }
+    let veil = aces(c.rgb / c.a) * c.a;
+    let bright = smoothstep(0.4, 1.5, max(c.r, max(c.g, c.b)));
+    return vec4<f32>(mix(veil, aces(c.rgb), bright), c.a);
+}
+@else
+fn to_screen(c: vec4<f32>) -> vec4<f32> {
+    return c;
 }
 
 // The second draw: the nearer surface of the pixels that hold two.
@@ -188,7 +245,7 @@ fn surface(pix: vec2<i32>) -> Surface {
     var lo = FAR_M;
     var hi = 0.0;
     for (var s = 0; s < n; s++) {
-        let z = metres(textureLoad(depth_tex, pix, s));
+        let z = metres(textureLoad(depth_tex, pix, s).x);
         zs[s] = z;
         lo = min(lo, z);
         hi = max(hi, z);
@@ -214,7 +271,7 @@ fn surface(pix: vec2<i32>) -> Surface {
 }
 @else
 fn surface(pix: vec2<i32>) -> Surface {
-    return Surface(metres(textureLoad(depth_tex, pix, 0)), 1u);
+    return Surface(metres(textureLoad(depth_tex, pix, 0).x), 1u);
 }
 
 @fragment
@@ -320,5 +377,5 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     if col.a < 0.002 {
         discard;
     }
-    return out(col, on.mask);
+    return out(to_screen(col), on.mask);
 }

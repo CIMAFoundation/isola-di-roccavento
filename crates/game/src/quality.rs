@@ -38,7 +38,7 @@ pub const WEBGL2: bool = cfg!(all(target_arch = "wasm32", not(feature = "webgpu"
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct Graphics {
-    /// Depth of field (and the depth prepass that only it needs).
+    /// Depth of field (it reads the main pass's depth: no prepass, `main.rs`).
     pub dof: bool,
     pub bloom: bool,
     /// MSAA samples: 4 or 1 (off).

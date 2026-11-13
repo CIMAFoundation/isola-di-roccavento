@@ -178,7 +178,7 @@ A 2× il costo sono i pixel (con `gfx=scale=0.5` 8,5 ms): è il caso della risol
 
 Richieste dell'utente: «anche su web dovremmo avere scansioni ed effetti volumetrici se possibile», poi «porta le modifiche su web». È possibile nella build WebGPU; restano **spenti finché non li chiede l'indirizzo**, come sul desktop le variabili `KIOSK_SCANS` e `KIOSK_VOLUMI`:
 
-- `?volumi=1`: fiamme e fumo volumetrici (`fire_volumetric::on`). Gli shader passano il compilatore del browser senza modifiche, compresa la ricomposizione nei campioni (`sample_mask`) con l'antialiasing a 4 campioni.
+- `?volumi=1`: fiamme e fumo volumetrici (`fire_volumetric::on`); dal 2026-11-13 accesi da soli, anche su WebGL2 (`?volumi=0` li spegne: vedi «Volumi su WebGL2»). Gli shader passano il compilatore del browser senza modifiche, compresa la ricomposizione nei campioni (`sample_mask`) con l'antialiasing a 4 campioni.
 - `?fluido=1` (con `?volumi=1`): le fiamme vicine alla camera da un fluido 3D in compute shader (`fire_fluid.rs`, 2026-11-07, in prova). Storage texture `rgba16float` e `r32float` in sola scrittura, che WebGPU ha di base. Provato in Chromium headless (1440×900 a 2×, `?q=media`, minuto 90): nessun errore né ritorno a WebGL2, +1,6 ms a 250 m dal fronte e +2,0 ms a 120 m (13,5 → 15,1 e 18,5 → 20,4 ms per fotogramma); il fronte anticipato costa ≤ 0,4 ms. In WebGL2 non c'è (niente compute shader). Guardato (stessa build, 1440×900, partita alle 12:30 in pausa, cinque viste dal fronte a 45–300 m, con e senza): fiamme come sul desktop, lingue più mosse e più larghe alla base con il fluido; da 300 m quasi nessuna differenza. Per le foto, `roccaPlaytest.hide = 1` toglie zone della previsione, segni e interfaccia, come `ui=0,marks=0,iso=0` di `KIOSK_SNAP`; `roccaPlaytest.state.front` dà una cella che brucia.
 - `?anticipo=0`: il bordo del fuoco senza il fronte anticipato (`fire_ahead.rs`, acceso in entrambe le build; nel browser il fork del nucleo gira nel fotogramma, ogni 60 s simulati invece di 12).
 - **Lo stile realistico è acceso da solo nella build WebGPU, su ogni profilo** (2026-11-09: «altrimenti lo stile grafico è troppo diverso»): la pagina mette `window.roccaAuto = { scans: '1' }` quando carica WebGPU e `quality::web_param` lo legge se l'indirizzo non dice niente; `?scans=0` lo spegne. Sul profilo leggero (`Graphics::light`, `?q=bassa`) si accorciano i LOD: piante a `20, 90, 600, 1500` m (`LIGHT_SCAN_LOD`; `?scan_lod=` per le prove) e modelli delle case a 220 m invece di 420. Con `340, 750` come soglie lontane, nella vista di gioco gli alberi erano cubi verdi: il modello vero deve arrivare al LOD delle piante del profilo. Su WebGL2 lo stile realistico non c'è, e oggi i telefoni usano WebGL2: vedi la riga «Su WebGL2» qui sotto.
@@ -186,7 +186,7 @@ Richieste dell'utente: «anche su web dovremmo avere scansioni ed effetti volume
   - piante: **senza il livello più fine** (`lod0`, tre quarti dei byte: da vicino si vede `lod1`) e con i cartoncini a metà lato (2048 px): 8,3 MB compressi;
   - terreno (`assets/ground/`: nove strati, `ground.json`, i ciuffi) ed edifici (`assets/buildings/`: intonaco, coppi, pietra, roccia, colore e normali): ogni PNG **a metà lato** (512 px; il codice legge le dimensioni dai file): 5,7 e 4,4 MB compressi.
   - In tutto **18,4 MB compressi in 22 file**, con `"only": "scans"` nel manifest: la pagina li scarica solo nella build WebGPU, se `scans` è acceso (con case, rocca e mezzi sono ora **30 MB compressi in 37 file**, 2026-11-09); senza, il sito scarica gli 11,8 MB di prima. Le riduzioni usano Pillow: dove manca (la CI di `pages.yml` oggi non lo installa) lo script lo dice e il sito esce senza stile realistico.
-- Su WebGL2 (telefoni) niente di tutto questo: lì i binding in più non esistono (16 unità di texture) e l'erba vicina resta quella di prima.
+- Su WebGL2 (telefoni) niente stile realistico: lì i binding in più non esistono (16 unità di texture) e l'erba vicina resta quella di prima. I volumi invece si possono chiedere dal 2026-11-13 (`?volumi=1`): vedi «Volumi su WebGL2».
 
 Prova (Chromium headless, Mac M4 Pro, 1440×900, partita a 120 minuti):
 
@@ -195,6 +195,30 @@ Prova (Chromium headless, Mac M4 Pro, 1440×900, partita a 120 minuti):
 - Immagini guardate: vista di gioco, fronte a 900 e 300 m, rocca, torre, pineta, chiesa, borgo.
 
 **Non provato:** su un computer più lento, su Safari e Firefox, a 2×; la memoria della pagina con lo stile realistico; il sito pubblicato (serve Pillow nella CI, oppure i file ridotti nel repository); una vista bassa con le foglie contro il fumo nel browser (la correzione del contorno è stata guardata sul desktop: lo shader è lo stesso).
+
+## Volumi su WebGL2, in prova (2026-11-13)
+
+Richiesta dell'utente: «the goal is to make it the only version (also on webgl2)», poi «controlla se esegue in modalità webgl2». Fino a oggi `fire_volumetric::on` escludeva WebGL2 a monte, quindi non si sapeva.
+
+**Esito: non girava; con due correzioni gira.** Provato con `?gpu=0&volumi=1`:
+
+1. **La pipeline della marcia veniva rifiutata**: «WGSL `textureLoad` from depth textures is not supported in GLSL» (il traduttore di shader di wgpu per WebGL2), e il renderer si fermava. Ora marcia e ricomposizione leggono la profondità della scena come texture float non filtrata (wgpu accetta una texture di profondità per quel tipo di binding, su ogni backend), non come texture di profondità. Sul desktop l'immagine del laboratorio è identica pixel per pixel prima e dopo.
+2. **Fiamme giallo piatto e fumo bianco**: su WebGL2 il bersaglio non è HDR, la scena è già passata dal tone mapping quando viene disegnata, e la luce dei volumi veniva scritta com'era (tutto sopra 1 tagliato). Ora la ricomposizione, su un bersaglio non HDR, applica lei la curva della scena (`to_screen` in `fire_composite.wesl`, ACES).
+
+Il fluido delle fiamme (`?fluido=1`) è escluso su WebGL2: usa compute shader.
+
+**Accesi da soli nel browser** (utente, stesso giorno: «pubblica su cimafoundation.github.io la versione che accende scansioni e volumi di default così la provo su telefono»). La pagina mette `window.roccaAuto = { volumi: '1' }` su entrambe le build, e `scans: '1'` dove carica WebGPU (com'era dal 2026-11-09); `?volumi=0` e `?scans=0` li spengono. Quindi un telefono, che carica WebGL2, ha i volumi ma non lo stile realistico; per provare anche quello su un telefono con WebGPU: `?gpu=1`. Se su WebGL2 il renderer si ferma con i volumi accesi, il gioco chiama `roccaVolumesFailed` e la pagina si ricarica con `?volumi=0` ed entra da sola nel gioco (`fire_volumetric.rs`, `web/index.html`): **se dopo il caricamento l'indirizzo mostra `volumi=0`, i volumi su quel dispositivo non sono partiti.** Il desktop non cambia: lì restano `KIOSK_SCANS=1 KIOSK_VOLUMI=1`.
+
+Prova (Chromium headless, Mac M4 Pro, ANGLE su Metal, «WebGL 2.0 (OpenGL ES 3.0 Chromium)», 1440×900, `q=media`, partita al minuto 90, tre viste: fuoco a 2,5 km, fronte a 900 e 300 m): nessun errore in console, 120 fotogrammi al secondo (il passo dello schermo) con e senza volumi. Si vedono il pennacchio, diradato sopra l'isola come sul desktop, e le fiamme a lingue. Comando: `.venv/bin/python scripts/web_check.py <sito> <cartella> 'q=media&gpu=0&volumi=1'` (nuovo: avvia una partita, scatta le viste, stampa backend, fotogrammi al secondo e ogni errore o avviso della console).
+
+Un test (`fire_volumetric::tests::the_volumes_translate_for_webgl2`) traduce i tre shader in GLSL ES 3.00 con naga: avrebbe trovato il primo errore in pochi secondi invece che a una build web.
+
+**Che cosa manca perché sia l'unica versione su WebGL2:**
+
+- **telefoni non provati.** La marcia scrive cinque bersagli in mezzi float e float (serve `EXT_color_buffer_float` e almeno 5 draw buffer: WebGL2 ne garantisce 4) e gira a un quarto della risoluzione su ogni profilo: su un telefono vero va misurata, memoria compresa (cinque bersagli più le due storie);
+- **lo stile realistico (`scans`) su WebGL2 non c'è**: il terreno fotografico vuole più delle 16 unità di texture. Non toccato;
+- niente bloom né HDR: le fiamme non hanno alone;
+- provato solo Chromium su un Mac; non Safari, non Firefox, non il sito pubblicato.
 
 ## Vegetazione più fitta, a lobi (2026-11-02)
 

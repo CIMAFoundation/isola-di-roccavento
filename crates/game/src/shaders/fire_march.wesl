@@ -32,13 +32,17 @@ struct Params {
     front: vec4<f32>,
     fluid: vec4<f32>,
     fluid2: vec4<f32>,
+    field: vec4<f32>,
+    flame2: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> p: Params;
+// the scene's depth, as a float texture read texel by texel (not a depth
+// texture: WebGL2's translator has no `textureLoad` from those)
 @if(MULTISAMPLED)
-@group(1) @binding(1) var depth_tex: texture_depth_multisampled_2d;
+@group(1) @binding(1) var depth_tex: texture_multisampled_2d<f32>;
 @else
-@group(1) @binding(1) var depth_tex: texture_depth_2d;
+@group(1) @binding(1) var depth_tex: texture_2d<f32>;
 @group(1) @binding(2) var plume_tex: texture_2d<f32>;
 @group(1) @binding(3) var plume_samp: sampler;
 @group(1) @binding(4) var noise_tex: texture_3d<f32>;
@@ -91,11 +95,11 @@ struct Foot {
 
 @if(MULTISAMPLED)
 fn depth_at(at: vec2<i32>, s: i32) -> f32 {
-    return metres(textureLoad(depth_tex, at, s));
+    return metres(textureLoad(depth_tex, at, s).x);
 }
 @else
 fn depth_at(at: vec2<i32>, s: i32) -> f32 {
-    return metres(textureLoad(depth_tex, at, 0));
+    return metres(textureLoad(depth_tex, at, 0).x);
 }
 
 @if(MULTISAMPLED)
@@ -169,6 +173,17 @@ fn plume(xz: vec2<f32>, lod: f32) -> vec4<f32> {
     return textureSampleLevel(plume_tex, plume_samp, uv, min(lod, p.map.w));
 }
 
+// How much of the game field a point of the ground is (Bevy x, z): 1 the
+// land, fading out over the water round it, 0 the open sea and whatever is
+// off the map (`fire_volumetric::PlumeState::field`, the plume map's alpha).
+fn field_at(xz: vec2<f32>) -> f32 {
+    let uv = vec2<f32>(xz.x, -xz.y) * p.map.xy;
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
+        return 0.0;
+    }
+    return textureSampleLevel(plume_tex, plume_samp, uv, 0.0).a;
+}
+
 // The height of the ground the scene draws at a point (Bevy x, z; m): its
 // heightfield (`fire_volumetric::GROUND_MAP`), samples from the world's
 // west edge to its east and from its north edge, row 0, to its south. Not
@@ -181,18 +196,38 @@ fn ground(xz: vec2<f32>) -> f32 {
     return textureSampleLevel(ground_tex, plume_samp, (at + 0.5) / n, 0.0).r;
 }
 
-// Emission of the flame by its temperature (as `fire_volume.wesl`).
+// Emission of the flame by its temperature: a dull red where it thins out
+// into the air, red, orange, then the yellow of its body and the pale
+// yellow of its core. (2026-11-13: the ramp stopped at orange-yellow and
+// the temperature hardly changed across a flame, so a front was one flat
+// orange; now the core is several times brighter than the edge.)
 fn flame_ramp(h: f32) -> vec3<f32> {
-    let c0 = vec3<f32>(0.30, 0.05, 0.01);
-    let c1 = vec3<f32>(1.4, 0.18, 0.02);
-    let c2 = vec3<f32>(2.8, 0.75, 0.06);
-    let c3 = vec3<f32>(3.6, 1.7, 0.25);
-    let c4 = vec3<f32>(4.2, 3.0, 1.1);
-    let a = smoothstep(0.0, 0.3, h);
-    let b = smoothstep(0.3, 0.55, h);
-    let c = smoothstep(0.55, 0.8, h);
-    let d = smoothstep(0.8, 1.0, h);
+    let c0 = vec3<f32>(0.20, 0.018, 0.002);
+    let c1 = vec3<f32>(1.5, 0.15, 0.012);
+    let c2 = vec3<f32>(3.2, 0.82, 0.05);
+    let c3 = vec3<f32>(4.6, 2.1, 0.22);
+    let c4 = vec3<f32>(6.0, 4.0, 0.9);
+    let a = smoothstep(0.0, 0.25, h);
+    let b = smoothstep(0.25, 0.5, h);
+    let c = smoothstep(0.5, 0.75, h);
+    let d = smoothstep(0.75, 1.0, h);
     return mix(mix(mix(mix(c0, c1, a), c2, b), c3, c), c4, d);
+}
+
+// The flame's temperature (0 to 1, for `flame_ramp`) where the pattern is
+// `over` its edge, `yr` up the flame: hottest deep inside it and low,
+// orange at its rim, red only at its tips (falling faster, the upper half
+// of a flame was a dull red that read as smoke against a daylit slope).
+fn flame_temp(over: f32, yr: f32) -> f32 {
+    return clamp((1.0 - 0.4 * yr * yr) * (0.34 + 1.4 * max(over, 0.0)) * p.look2.z, 0.0, 1.0);
+}
+
+// The soot a flame gives off at its upper edge (0 to 1): just outside it,
+// from half its height up. Dark smoke that stands in front of what burns
+// behind: a flame's tips end in it, not in clear air. (Over the flame's
+// own rim and lower down it veiled the flames brown.)
+fn flame_soot(over: f32, yr: f32) -> f32 {
+    return smoothstep(-0.16, -0.04, over) * (1.0 - smoothstep(-0.03, 0.03, over)) * smoothstep(0.5, 0.9, yr);
 }
 
 // The noise, at the mip its footprint asks for (`textures::noise_volume`
@@ -319,8 +354,13 @@ fn billows(pos: vec3<f32>, h: f32, lod: f32) -> f32 {
 
 // The flames' pattern: `base` is the place in the noise (x and z in tongue
 // widths, y up the flame), `tq` how far it has risen.
+//
+// The noise repeats every unit of `base` (a tongue's width across, two
+// thirds of a flame up), and read along its own axes the flames stood in a
+// lattice, one like the next: it is read turned (`NOISE_TURN`), so a
+// level cut through it never falls on itself again.
 fn tongues(base: vec3<f32>, tq: f32, flod: f32, near_w: f32) -> f32 {
-    let q = base - vec3<f32>(0.0, tq, 0.0);
+    let q = NOISE_TURN * (base - vec3<f32>(0.0, tq, 0.0));
     let w = noise(q * 0.37 + vec3<f32>(0.0, -tq * 0.3, 0.0), max(flod - 1.4, 0.0)).gb - 0.5;
     var n = noise(q + vec3<f32>(w.x, 0.0, w.y) * 0.9, flod).r;
     // a finer flicker, where it is more than a pixel
@@ -343,7 +383,10 @@ fn tongues_at(pos: vec3<f32>, yr: f32, wide: f32, foot: f32, small: f32, t: f32)
     // together each 0.9 s (user, 2026-11-05: «sembra muoversi su e giù»)
     let qx = pos.x / wide;
     let qz = pos.z / wide;
-    let base = vec3<f32>(qx, yr * 0.9 + 0.41 * qx + 0.29 * qz, qz);
+    // (under a period of the pattern up a flame, three across it: tongues
+    // four times as tall as wide; with a period and a half up they were
+    // lumps, a marbled mass from near)
+    let base = vec3<f32>(qx, yr * 0.8 + 0.41 * qx + 0.29 * qz, qz);
     let near_w = 1.0 - smoothstep(0.12, 0.35, foot / wide);
     // rising a flame's height in about a second. A flame a few march
     // pixels tall shows no rising: its pattern is a few dots, each going
@@ -363,29 +406,87 @@ fn tongues_at(pos: vec3<f32>, yr: f32, wide: f32, foot: f32, small: f32, t: f32)
     return n;
 }
 
-// How alight the ground is at a point (Bevy x, z), from the front map on
-// this frame's clock (`fire_ahead`): each corner's share burnt and how long
-// it has flamed, as `fire_volumetric::rebuild` makes the band, bilinear.
-// The plume map's own band moves on only as often as it is rewritten.
+// The flames' band at a point of the ground (Bevy x, z), from the front map
+// on this frame's clock (`fire_ahead`): as `fire_volumetric::rebuild`
+// writes it in the plume map, which moves on only as often as it is
+// rewritten. Up to `WALL_BAND`, the low flames left behind the front while
+// the ground still flames; over it, the front's wall.
+//
+// The wall stands on the front's own contour: where the share burnt (each
+// corner's, bilinear) is between little and most, a strip some ten metres
+// deep whatever the front's speed (the share rises across about a cell);
+// behind it for as long as the ground flames whole (`WALL_FULL_S` to
+// `WALL_END_S` after the front: a fast front's wall is deep, a slow one's
+// a line). It moves with the contour, a frame at a time, and goes out
+// where the front stops (the corners that burn were crossed long ago).
+// Drawn over all of a cell for as long as the front took to cross it, a
+// slow fire's wall was a sheet of low flame tens of metres across (user,
+// 2026-11-13: «le chiazze di fuoco basso sono piuttosto brutte»).
 fn front_band(xz: vec2<f32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(front_tex));
     let at = vec2<f32>(xz.x, -xz.y) * p.map.xy * vec2<f32>(dims) - 0.5;
     let c0 = vec2<i32>(floor(at));
     let fr = at - floor(at);
     let clock = p.front.x;
-    var band = 0.0;
+    var share = 0.0;
+    var lately = 0.0;
+    var moving = 0.0;
+    var low = 0.0;
+    var gaps = 0.0;
     for (var k = 0; k < 4; k++) {
         let o = vec2<i32>(k & 1, k >> 1);
         let wk = mix(1.0 - fr.x, fr.x, f32(o.x)) * mix(1.0 - fr.y, fr.y, f32(o.y));
         let l = textureLoad(front_tex, clamp(c0 + o, vec2<i32>(0), dims - 1), 0);
         let v = l.g + l.b * clock;
         let s = select(clamp(v, l.a, 1.0), clamp(v, 0.0, l.a), l.b >= 0.0);
-        let flaming = clamp(1.0 - max(clock - l.r, 0.0) / FLAMING_S, 0.0, 1.0);
-        let edge = flaming * flaming * flaming;
-        band += wk * s * smoothstep(0.05, 0.3, flaming) * (0.45 + 0.55 * edge);
+        let since = clock - l.r;
+        let flaming = clamp(1.0 - max(since, 0.0) / FLAMING_S, 0.0, 1.0);
+        // the seconds the front took to cross the cell: its share's slope
+        let gap = clamp(1.0 / max(abs(l.b), 1.0e-4), 12.0, 600.0);
+        share += wk * s;
+        // still flaming whole behind the front
+        lately += wk * s * (1.0 - smoothstep(WALL_FULL_S, WALL_END_S, since));
+        // the front still crossing it, or just gone by (counted whole
+        // from the first of it that burns: weighed by its share, the
+        // corner long burnt beside it said the front had stopped, and a
+        // slow front's wall stood only round each cell's centre, a row
+        // of patches)
+        moving += wk * smoothstep(0.0, 0.05, s) * (1.0 - smoothstep(0.5 * gap + 30.0, 0.5 * gap + 90.0, since));
+        low += wk * s * smoothstep(0.05, 0.3, flaming);
+        gaps += wk * s * gap;
     }
-    return band;
+    if share <= 1.0e-3 {
+        return 0.0;
+    }
+    let lead = smoothstep(0.10, 0.32, share);
+    // where the strip ends behind the front: the share that burns in the
+    // seconds the ground flames whole, of the time the front takes to
+    // cross a cell. A slow front's strip is a few metres deep (a creeping
+    // fire is a line of small flames, not a patch of them).
+    let back = clamp(0.32 + WALL_FULL_S / (gaps / share), 0.36, 0.72);
+    let behind = smoothstep(back, back + 0.25, share);
+    let wall = lead * clamp(moving * 3.0, 0.0, 1.0) * mix(1.0, lately / share, behind);
+    return low / share * (WALL_BAND * smoothstep(0.03, 0.3, share) + (1.0 - WALL_BAND) * wall);
 }
+
+// As `fire_volumetric::WALL_BAND`: the band over this is the front's wall.
+const WALL_BAND = 0.35;
+// Seconds after the front for which the ground flames whole, and by which
+// only the low flames are left: how deep the wall is behind the front.
+const WALL_FULL_S = 15.0;
+const WALL_END_S = 45.0;
+// The share of the wall's height the flames left behind it have.
+const LOW_FLAMES = 0.25;
+// Where a flame's edge falls in its pattern (which is 0.53 give or take
+// 0.11): at its foot (nearly all of the pattern is inside: one sheet), at
+// its tip (its peaks only: points, and flames come loose), and how much
+// higher where little of the ground flames (the patches left behind the
+// wall). Between foot and tip it rises fastest low down: two thirds of the
+// pattern at a third of the height, a third at two thirds (rising evenly,
+// the wall was a slab with a fringe on top).
+const FOOT_EDGE = 0.30;
+const TIP_EDGE = 0.72;
+const GAP_EDGE = 0.42;
 
 // As `fire_view::FLAMING_S`.
 const FLAMING_S = 540.0;
@@ -421,13 +522,23 @@ fn fluid_at(pos: vec3<f32>, h: f32) -> vec4<f32> {
 // The flames at `pos`, `h` over the ground, where a march pixel spans
 // `foot` metres: x how far the noise is over the flame's edge there (the
 // flame is where it is over 0, soft over `look2.x`), y how high up the
-// flame (0 to 1), z 1 where there is a flame to speak of, else 0.
+// flame (0 to 1), z how much of a flame there is (0 none; under 1 where it
+// is drawn taller than it is, and as much fainter).
 fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
-    // the band read through a wobble of a cell or so: no squares
-    let wob = noise(vec3<f32>(pos.xz / 90.0, 0.71), 0.0).rg - 0.5;
-    var fire = plume(pos.xz + wob * p.map.z * 2.2, 0.0);
+    // The flames lean with the wind (`flame2.xy`, metres downwind a metre
+    // up): what burns at a height stands on a foot upwind of it, and the
+    // band, the height and the pattern are that foot's.
+    // Not all alike: by half to nearly one and a half times, from place to
+    // place (leaning as one, the flames of a front were a row of flags).
+    let hh = max(h, 0.0);
+    let vary = noise(vec3<f32>(pos.xz / 90.0, 0.71), 0.0).rgb;
+    let foot_xz = pos.xz - p.flame2.xy * (0.5 + 0.9 * vary.b) * hh;
+    // the band read through a wobble of half a cell: no straight edges
+    // (of a cell or more, it tore the front's strip into patches)
+    let map_xz = foot_xz + (vary.rg - 0.5) * p.map.z * 1.0;
+    var fire = plume(map_xz, 0.0);
     if p.front.y > 0.5 {
-        fire.g = front_band(pos.xz + wob * p.map.z * 2.2);
+        fire.g = front_band(map_xz);
     }
     // the fluid: its heat is a flame, the tongues' noise its grain; it adds
     // to the tongues below, where the stronger of the two is drawn
@@ -450,20 +561,42 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     if fire.g <= 0.02 {
         return fl * wf;
     }
-    let clumps = noise(vec3<f32>(pos.xz * 0.028, 0.37), 0.0).b;
+    // the front's wall, and how alight what it left behind is
+    // (whole from well under 1: between a cell alight and one not yet the
+    // plume map's band is their mean)
+    let wall = smoothstep(WALL_BAND, WALL_BAND + 0.45, fire.g);
+    let left = min(fire.g / WALL_BAND, 1.0);
+    // the fire surges and dies down along the front: patches some tens of
+    // metres across, changing slowly
+    let clumps = noise(vec3<f32>(foot_xz * 0.028, 0.37 + t * 0.03), 0.0).b;
     let clump = smoothstep(0.3, 0.75, clumps);
-    let band = fire.g * (0.25 + 0.75 * clump);
-    let hf = max(fire.b * grow * p.look2.y * (0.45 + 0.35 * clump), max(0.5, foot * 3.0));
+    // how much of the ground flames: all of it under the wall, patches of
+    // what it left behind
+    // (few of them: separate small flames on the burnt ground, not a
+    // sheet of low fire)
+    let cover = max(wall, left * clump * 0.45);
+    // The flame's height: the wall's whole, a share of it behind. A flame
+    // lower than a few march pixels is drawn that tall and as much fainter:
+    // held at full strength, the low flames behind a far front were a
+    // carpet of dots as bright as its wall.
+    let nat = fire.b * grow * p.look2.y * (LOW_FLAMES + (1.0 - LOW_FLAMES) * wall) * (0.6 + 0.7 * clump);
+    let hf = max(nat, max(0.5, foot * 3.0));
+    let faint = clamp(nat / hf, 0.0, 1.0);
     // under the ground (the scene's mesh is not its heightfield to the
     // metre): the depth stops the ray there
-    let yr = max(h, 0.0) / hf;
-    if yr >= 1.0 || h <= -8.0 {
+    let yr = hh / hf;
+    if yr >= 1.0 || h <= -8.0 || faint <= 0.0 {
         return fl * wf;
     }
-    // a tongue as tall as the flame and a third as wide (`lingue` scales
-    // the width), never under a few march pixels: a fixed size cut the
-    // flame into slabs where it was lower than the pattern
-    let wide = max(hf * 0.32 * p.look.w / 14.0, foot * 3.0);
+    // The pattern's period: a third of the flame's height (`lingue` scales
+    // it), four tongues to a period; never under ten march pixels, so a
+    // tongue is never under two or three (a fixed size cut the flame into
+    // slabs where it was lower than the pattern). With the floor at three
+    // pixels a period, which is under one a tongue, any flame less than
+    // forty march pixels tall was read from the noise's last mips, its
+    // mean: a smooth mound, and from a few hundred metres the front was a
+    // row of pale balls (2026-11-13).
+    let wide = max(hf * 0.32 * p.look.w / 14.0, foot * 10.0);
     // The pattern is read at the place in the world over a width, and the
     // width changes from place to place (the flame's height, the distance
     // from the eye): over the width itself, kilometres from the origin, a
@@ -479,14 +612,15 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
     let up = smoothstep(0.6, 1.0, fract(octave));
     // a flame a few march pixels tall shows no rising, see `tongues_at`
     let small = 1.0 - smoothstep(6.0, 24.0, hf / foot);
+    // the pattern is the foot's: the tongues lean whole
+    var at = vec3<f32>(foot_xz.x, pos.y, foot_xz.y);
     // the fluid bends the tongues: the pattern is read where the air at
     // this height came from, so they lean and sway with the gusts and the
     // swirls (a lean of at most the flame's height)
-    var at = pos;
     if wf > 0.0 {
-        let lean = air.xz / max(air.y, 2.5) * max(h, 0.0) * p.fluid2.w;
+        let lean = air.xz / max(air.y, 2.5) * hh * p.fluid2.w;
         let room = hf;
-        at = pos - vec3<f32>(clamp(lean.x, -room, room), 0.0, clamp(lean.y, -room, room)) * wf;
+        at -= vec3<f32>(clamp(lean.x, -room, room), 0.0, clamp(lean.y, -room, room)) * wf;
     }
     var n = tongues_at(at, yr, under, foot, small, t);
     if up > 0.0 {
@@ -494,7 +628,10 @@ fn flame_at(pos: vec3<f32>, h: f32, foot: f32, grow: f32, t: f32) -> vec3<f32> {
         // two patterns mixed are flatter than either
         n = 0.5 + (mix(n, above, up) - 0.5) / sqrt(up * up + (1.0 - up) * (1.0 - up));
     }
-    var noise_fl = vec3<f32>(n - (0.33 + 0.26 * yr + 0.20 * (1.0 - band)), yr, 1.0);
+    // one sheet at the foot, tongues up it, points and loose flames at the
+    // tip; fewer where little of the ground flames
+    let edge = FOOT_EDGE + (TIP_EDGE - FOOT_EDGE) * pow(yr, 0.75) + GAP_EDGE * (1.0 - cover);
+    var noise_fl = vec3<f32>(n - edge, yr, faint);
     if wf > 0.0 {
         // the fluid's heat swells the tongues where a puff rises: flames
         // that pulse and climb in gusts (taking away where it is cold
@@ -525,6 +662,9 @@ fn edge_sum(f: f32, w: f32) -> f32 {
     let x = clamp(f / w, 0.0, 1.0);
     return w * x * x * x * (1.0 - 0.5 * x) + max(f - w, 0.0);
 }
+
+// The soot's extinction per metre where it is thickest.
+const SOOT_SIGMA = 0.22;
 
 // Flame heights a second the pattern rises where the flame is a few march
 // pixels tall (1.1 where it is tall).
@@ -573,6 +713,32 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
     // the nearest surface, where the footprint has two
     let split = foot_z.split;
     let t_near = select(1.0e7, foot_z.near * length(ray), foot_z.near < FAR_M);
+    // While the game is played the smoke is thinner in front of the game
+    // field (`field.x`, the share of its density kept there; user,
+    // 2026-11-13: «reduce smoke opacity when overlapping the game field»):
+    // what the ray ends on says how much, the island and the water close to
+    // it (the plume map's alpha) or the open sea and the sky. Thinner all
+    // along the ray, not paler once drawn: the flames under the plume show
+    // through it.
+    //
+    // And only as far as the ray looks down at the field: a level ray that
+    // grazes a far slope keeps the smoke whole, as the sky just over the
+    // ridge does, so no seam runs along the skyline or the horizon (seen
+    // with all of the field thinned alike: the column changed tone where
+    // the hill behind it gave way to the sky).
+    var thin = 1.0;
+    var thin_near = 1.0;
+    // (`field.y`: only in the right half of the picture, to see both)
+    if p.field.x < 1.0 && (p.field.y < 0.5 || in.position.x > 0.5 * p.size.x) {
+        let down = smoothstep(0.02, 0.30, -dir.y);
+        if scene_z < FAR_M {
+            thin = mix(1.0, p.field.x, field_at(hit.xz) * down);
+        }
+        thin_near = thin;
+        if split && foot_z.near < FAR_M {
+            thin_near = mix(1.0, p.field.x, field_at((eye + dir * t_near).xz) * down);
+        }
+    }
     // what the ray held when it reached it
     var snapped = !split;
     var n_col = vec3<f32>(0.0);
@@ -636,6 +802,9 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
         let brown = vec3<f32>(0.17, 0.14, 0.11);
         let grey = vec3<f32>(0.52, 0.52, 0.53);
         let glow_col = vec3<f32>(1.4, 0.48, 0.10);
+        // the soot at the flames' tips: nearly black, lit a little by the
+        // sky and the sun, and by the fire under it
+        let soot_lit = vec3<f32>(0.035, 0.03, 0.028) * (ambient + sun_col) + vec3<f32>(0.10, 0.02, 0.0);
         let sigma = p.smoke.x;
         let zone = p.hi.w;
         let t = globals.time;
@@ -673,7 +842,11 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
             // the flames grow toward the toy scale with distance, as the
             // tongues and the houses do: a true flame from the play camera
             // is a few pixels (`VolumeSettings::flame_toy`)
-            let grow = 1.0 + (p.more.x - 1.0) * smoothstep(p.flame.z, p.flame.w, s);
+            // (in two halves: by the end of the first span, then from a
+            // little past it to four times as far: the whole scale is for
+            // the play camera, kilometres off; from under a kilometre it
+            // drew flames as tall as a hill)
+            let grow = 1.0 + (p.more.x - 1.0) * 0.5 * (smoothstep(p.flame.z, p.flame.w, s) + smoothstep(p.flame.w * 1.6, p.flame.w * 4.0, s));
             let fine = clamp(s * 0.005, 0.8, 6.0) * (0.5 + 0.5 * grow);
             var ds = coarse;
             var in_flames = false;
@@ -685,7 +858,11 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                 // the ground beside it)
                 let here = plume(pos.xz, 0.0);
                 let round = plume(pos.xz, 2.0);
-                cap = max(here.b, round.b * 3.0) * grow * p.look2.y + 2.0;
+                // (a wall's height where the band says one is near, a
+                // share of it over what the front left behind; a flame
+                // reaches 1.3 times its cell's height, `flame_at`)
+                let near_wall = smoothstep(WALL_BAND * 0.6, WALL_BAND * 1.6, max(here.g, round.g * 3.0));
+                cap = max(here.b, round.b * 3.0) * grow * p.look2.y * 1.3 * (LOW_FLAMES + (1.0 - LOW_FLAMES) * near_wall) + 2.0;
                 if h < cap && round.g > 0.0005 {
                     in_flames = true;
                     // fine steps only over a cell alight (and its edge),
@@ -741,17 +918,25 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                 n_band += a.z;
                 if parts == 1 {
                     if a.z > 0.0 {
-                        let dens = smoothstep(0.0, sharp, a.x) * (1.0 - a.y * a.y * a.y);
+                        let dens = smoothstep(0.0, sharp, a.x) * (1.0 - a.y * a.y * a.y) * a.z;
                         if dens > 0.002 {
                             n_hit += 1.0;
-                            let temp = clamp((1.0 - 0.75 * a.y) * (0.25 + 0.55 * dens) * p.look2.z, 0.0, 1.0);
                             let absorbed = 1.0 - exp(-dens * run * p.flame.y);
-                            col += flame_ramp(temp) * p.flame.x * absorbed * trans;
+                            col += flame_ramp(flame_temp(a.x, a.y)) * p.flame.x * absorbed * trans;
                             fog_at += pos * absorbed * trans;
                             fog_w += absorbed * trans;
                             fl_w += absorbed * trans;
                             fl_s += s * absorbed * trans;
                             fl_yr += a.y * absorbed * trans;
+                            trans *= 1.0 - absorbed;
+                        }
+                        // the soot over the flame's edge: smoke, not flame
+                        let soot = flame_soot(a.x, a.y) * a.z * p.flame2.z;
+                        if soot > 0.01 {
+                            let absorbed = 1.0 - exp(-soot * run * SOOT_SIGMA);
+                            col += soot_lit * absorbed * trans;
+                            fog_at += pos * absorbed * trans;
+                            fog_w += absorbed * trans;
                             trans *= 1.0 - absorbed;
                         }
                     }
@@ -765,18 +950,28 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                             let fa = select(-sharp, a.x, a.z > 0.0);
                             let fb = select(-sharp, b.x, b.z > 0.0);
                             let yr = (a.y * a.z + b.y * b.z) / (a.z + b.z);
-                            let dens = edge_mean(fa, fb, sharp) * (1.0 - yr * yr * yr);
+                            let much = max(a.z, b.z);
+                            let over = 0.5 * (fa + fb);
+                            let dens = edge_mean(fa, fb, sharp) * (1.0 - yr * yr * yr) * much;
+                            let sm = sk - dpart * 0.5;
                             if dens > 0.002 {
                                 n_hit += 1.0;
-                                let temp = clamp((1.0 - 0.75 * yr) * (0.25 + 0.55 * dens) * p.look2.z, 0.0, 1.0);
                                 let absorbed = 1.0 - exp(-dens * dpart * p.flame.y);
-                                let sm = sk - dpart * 0.5;
-                                col += flame_ramp(temp) * p.flame.x * absorbed * trans;
+                                col += flame_ramp(flame_temp(over, yr)) * p.flame.x * absorbed * trans;
                                 fog_at += (eye + dir * sm) * absorbed * trans;
                                 fog_w += absorbed * trans;
                                 fl_w += absorbed * trans;
                                 fl_s += sm * absorbed * trans;
                                 fl_yr += yr * absorbed * trans;
+                                trans *= 1.0 - absorbed;
+                            }
+                            // the soot over the flame's edge: smoke, not flame
+                            let soot = flame_soot(over, yr) * much * p.flame2.z;
+                            if soot > 0.01 {
+                                let absorbed = 1.0 - exp(-soot * dpart * SOOT_SIGMA);
+                                col += soot_lit * absorbed * trans;
+                                fog_at += (eye + dir * sm) * absorbed * trans;
+                                fog_w += absorbed * trans;
                                 trans *= 1.0 - absorbed;
                             }
                         }
@@ -849,7 +1044,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                     // the eye's notice (2026-11-05: inside the plume three
                     // steps in four shaded a haze)
                     if free && p.stride.z > 0.0 {
-                        ds = min(ds * clamp(p.stride.z / max(body.dens * sigma * ds, 1.0e-5), 1.0, p.stride.w), reach);
+                        ds = min(ds * clamp(p.stride.z / max(body.dens * sigma * thin * ds, 1.0e-5), 1.0, p.stride.w), reach);
                     }
                     // the billows averaged over what one sample stands for:
                     // the pixel's width and part of the stride (the jitter
@@ -869,7 +1064,10 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                         if p.look.z > 0.0 {
                             let d1 = max(smoke_body(pos + sun_dir * 35.0, h + sun_dir.y * 35.0, false).dens, 0.0);
                             let d2 = max(smoke_body(pos + sun_dir * 110.0, h + sun_dir.y * 110.0, false).dens, 0.0);
-                            shade = exp(-sigma * (d1 * 48.0 + d2 * 78.0) * p.look.z);
+                            // (thinned over the game field, it shades itself as
+                            // much less: what is left there is the same smoke,
+                            // paler, not its dark core)
+                            shade = exp(-sigma * thin * (d1 * 48.0 + d2 * 78.0) * p.look.z);
                         }
                         let albedo = mix(brown, grey, smoothstep(0.0, 0.5, k));
                         let lit = albedo * (ambient * (0.45 + 0.4 * k) * (0.5 + 0.5 * shade) + sun_col * shade * phase * 0.9);
@@ -882,7 +1080,7 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
                         let fire_lit = glow_col * glow * 0.9;
                         // no farther than the scene: a long stride of thin
                         // smoke ends in the ground
-                        let absorbed = 1.0 - exp(-dens * near_k * min(ds, t_end - s) * sigma);
+                        let absorbed = 1.0 - exp(-dens * near_k * thin * min(ds, t_end - s) * sigma);
                         col += (lit + fire_lit) * p.smoke.w * absorbed * trans;
                         fog_at += pos * absorbed * trans;
                         fog_w += absorbed * trans;
@@ -900,6 +1098,17 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
         n_fog_at = fog_at;
         n_fog_w = fog_w;
         n_fl_w = fl_w;
+    }
+    if split && abs(thin_near - thin) > 0.01 {
+        // the nearer surface is the game field and the farther is not (a
+        // ridge against the sea), or the other way: the smoke up to it was
+        // counted as thin as the farther's. Its part of the opacity, as if
+        // it alone were in the way, at the nearer's own share.
+        let a_n = 1.0 - n_trans;
+        let a_s = clamp(a_n - n_fl_w, 0.0, 0.999);
+        let a_n2 = min(n_fl_w + 1.0 - pow(1.0 - a_s, thin_near / thin), 1.0);
+        n_col *= a_n2 / max(a_n, 1.0e-4);
+        n_trans = 1.0 - a_n2;
     }
     let alpha = 1.0 - trans;
     var now = vec4<f32>(0.0);

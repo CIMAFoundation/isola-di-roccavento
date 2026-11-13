@@ -549,7 +549,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr.frag_coord = in.position;
     pbr.world_position = in.world_position;
     // the fire's scar into the ground, before the light (`fire_ground`)
-    let fire = fire_ground(p, fire_s, (mask_s.rg * 2.0 - 1.0) * RANGE_M, mpp);
+    let fire = fire_ground(p, fire_s, (mask_s.rg * 2.0 - 1.0) * RANGE_M, mpp, terrain.fire_front.z);
     pbr.world_normal = g_nrm;
     pbr.N = normalize(g_nrm + rock_bump(p, g_nrm) + fire.bump);
     // the plane's and the rock face's coordinates with their gradients, for

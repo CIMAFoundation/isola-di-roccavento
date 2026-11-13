@@ -118,6 +118,15 @@ struct Lab {
     /// The wind turns to a bearing at a clock (sim s).
     turn: Option<(f32, f32)>,
     show_ui: bool,
+    /// As while the game is played, 0 to 1: the smoke thinner over the
+    /// ground (`PlumeState::play`; `gioco=1`).
+    in_game: f32,
+    /// The front is drawn from a front map, as the game's lookahead writes
+    /// it (`fire_ahead`; `anticipo=0`: from the plume map alone, as the game
+    /// with `KIOSK_ANTICIPO=0`), and what the map was last written for:
+    /// the fire, and the clock its lines count from.
+    front: bool,
+    front_for: Option<(Shape, [f32; 7], f32)>,
 }
 
 impl Lab {
@@ -348,6 +357,9 @@ fn setup(
         turn_deg: 0.0,
         turn: None,
         show_ui: true,
+        in_game: 0.0,
+        front: true,
+        front_for: None,
     };
     if let Ok(spec) = std::env::var("KIOSK_FUOCO_SET") {
         apply_spec(&spec, &mut lab, &mut settings);
@@ -388,6 +400,8 @@ fn apply_spec(spec: &str, lab: &mut Lab, s: &mut VolumeSettings) {
                 }
             }
             "ui" => lab.show_ui = x != 0.0,
+            "gioco" => lab.in_game = x,
+            "anticipo" => lab.front = x != 0.0,
             "spread" => lab.spread_m_min = x,
             "fli" => lab.fli = x,
             "raggio" => lab.radius_m = x,
@@ -434,6 +448,7 @@ fn tick(
         }
     }
     lab.since_rebuild += dt;
+    state.play = lab.in_game;
 }
 
 /// The plume map and the ground's colours, from the lab's fire.
@@ -450,9 +465,20 @@ fn fire(mut lab: ResMut<Lab>, settings: Res<VolumeSettings>, mut state: ResMut<P
     let dt = std::mem::replace(&mut lab.since_rebuild, 0.0);
     let dt = if snapping && lab.play_step > 0.0 { 1.0 / 60.0 } else { dt };
     lab.drawn = Some(now);
+    // the front map: the lab's arrivals do not change with the clock (but
+    // the patch's, which burns on and on), so it is written for a fire and
+    // again when the clock has left its base behind (half floats)
+    let mapped = lab.front && lab.shape != Shape::Patch;
+    if mapped && lab.front_for.is_none_or(|(shape, key, base)| shape != lab.shape || key != lab.key() || (lab.clock - base).abs() > 300.0) {
+        let base = lab.clock.floor();
+        write_front(&lab, base, &mut images);
+        lab.front_for = Some((lab.shape, lab.key(), base));
+    }
+    state.front_clock = lab.front_for.filter(|_| mapped).map(|(_, _, base)| lab.clock - base);
     let world = scenario::World { width_m: SIDE_M, height_m: SIDE_M, fire_rows: CELLS, fire_cols: CELLS, cellsize: CELL_M };
     let burns: Vec<Option<(f32, f32)>> = (0..CELLS * CELLS).map(|i| lab.burn(i).filter(|(t, _)| *t <= lab.clock)).collect();
-    rebuild(&mut state, &mut images, &world, lab.clock, dt, lab.plume_wind(), 60.0, &settings, |i| burns[i], |_| 0.0);
+    // all of the lab's ground is the game field, thinned over only with `gioco=1`
+    rebuild(&mut state, &mut images, &world, lab.clock, dt, lab.plume_wind(), 60.0, &settings, |i| burns[i].map(|(t, fli)| (t, fli, 0.0)), |_| 0.0, f32::NEG_INFINITY);
     // the ground: dry grass, black where burnt, glowing in the band
     let (color, glow) = (lab.ground_color.clone(), lab.ground_glow.clone());
     if let Some(mut img) = images.get_mut(&color) {
@@ -480,6 +506,43 @@ fn fire(mut lab: ResMut<Lab>, settings: Res<VolumeSettings>, mut state: ResMut<P
             }
         }
     }
+}
+
+/// The front map (`fire_ahead::FRONT_MAP`) from the lab's fire, as the
+/// game's lookahead writes it: each cell's share burnt as a line, from its
+/// arrival and the time the front took to cross into it (the latest
+/// neighbour lit before it), counted from `base`.
+fn write_front(lab: &Lab, base: f32, images: &mut Assets<Image>) {
+    let arrive: Vec<f32> = (0..CELLS * CELLS).map(|i| lab.burn(i).map_or(f32::INFINITY, |(t, _)| t)).collect();
+    let mut image = crate::fire_ahead::front_image(CELLS, CELLS);
+    let Some(data) = image.data.as_mut() else { return };
+    for (i, &t) in arrive.iter().enumerate() {
+        if !t.is_finite() {
+            continue;
+        }
+        let (r, c) = (i / CELLS, i % CELLS);
+        let mut gap = f32::INFINITY;
+        for dr in -1i32..=1 {
+            for dc in -1i32..=1 {
+                let (rr, cc) = (r as i32 + dr, c as i32 + dc);
+                if (dr, dc) == (0, 0) || rr < 0 || cc < 0 || rr as usize >= CELLS || cc as usize >= CELLS {
+                    continue;
+                }
+                let tn = arrive[rr as usize * CELLS + cc as usize];
+                if tn < t {
+                    let d = if dr != 0 && dc != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
+                    gap = gap.min((t - tn) / d);
+                }
+            }
+        }
+        let gap = if gap.is_finite() { gap.clamp(12.0, 600.0) } else { 90.0 };
+        let at = ((CELLS - 1 - r) * CELLS + c) * 8;
+        let rel = t - base;
+        for (k, v) in [rel.clamp(-60_000.0, crate::fire_ahead::NEVER_REL), 0.5 - rel / gap, 1.0 / gap, 1.0].into_iter().enumerate() {
+            data[at + 2 * k..at + 2 * k + 2].copy_from_slice(&crate::terrain_mesh::f16_bits(v).to_le_bytes());
+        }
+    }
+    let _ = images.insert(&crate::fire_ahead::FRONT_MAP, image);
 }
 
 fn sun(lab: Res<Lab>, mut suns: Query<&mut Transform, With<Sun>>) {

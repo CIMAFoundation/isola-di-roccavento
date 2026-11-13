@@ -58,6 +58,7 @@ mod rings;
 mod ground_mask;
 mod roads;
 mod shader_lib;
+mod shadow_turns;
 mod sea;
 mod sky;
 mod sky_light;
@@ -259,6 +260,7 @@ fn main() -> anyhow::Result<()> {
     app.add_plugins(fire_fluid::FireFluidPlugin);
     app.add_plugins(render_scale::RenderScalePlugin);
     app.add_plugins(vegetation::PlantRenderPlugin);
+    app.add_plugins(shadow_turns::ShadowTurnsPlugin);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(hi_trees::HiTreesPlugin);
     kiosk_systems(&mut app);
@@ -339,20 +341,25 @@ fn setup_scene(
     if gfx.bloom {
         camera.insert(Bloom { intensity: 0.20, ..Bloom::NATURAL });
     }
-    // The depth prepass is there for the depth of field only, which reads the
-    // depth at screen resolution: off while the scene is scaled (`render_scale`).
+    // The depth of field reads the depth at screen resolution: off while the
+    // scene is scaled (`render_scale`). It reads the main pass's own depth
+    // (Bevy adds the texture binding to it): no depth prepass with it. There
+    // was one until 2026-11-13, «for the depth of field only», which never
+    // read it: terrain, houses and rocks were drawn twice, at four samples,
+    // for nothing (only Mario's outline reads a prepass, and asks for its
+    // own). `KIOSK_PREPASS=1` puts it back, to measure it.
     if gfx.dof && render_scale::whole(gfx.render_scale) {
-        camera.insert((
-            bevy::core_pipeline::prepass::DepthPrepass,
-            bevy::post_process::dof::DepthOfField {
-                mode: bevy::post_process::dof::DepthOfFieldMode::Gaussian,
-                focal_distance: distance,
-                sensor_height: 0.01866,
-                aperture_f_stops: 0.012,
-                max_circle_of_confusion_diameter: 48.0,
-                max_depth: 12_000.0,
-            },
-        ));
+        camera.insert(bevy::post_process::dof::DepthOfField {
+            mode: bevy::post_process::dof::DepthOfFieldMode::Gaussian,
+            focal_distance: distance,
+            sensor_height: 0.01866,
+            aperture_f_stops: 0.012,
+            max_circle_of_confusion_diameter: 48.0,
+            max_depth: 12_000.0,
+        });
+        if std::env::var_os("KIOSK_PREPASS").is_some() {
+            camera.insert(bevy::core_pipeline::prepass::DepthPrepass);
+        }
     }
 }
 

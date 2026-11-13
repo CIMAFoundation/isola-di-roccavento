@@ -22,7 +22,7 @@ pub fn apply_live(
     veg: Option<ResMut<crate::vegetation::Vegetation>>,
     terrain: Query<(Entity, Has<bevy::light::NotShadowCaster>), With<crate::terrain_mesh::TerrainChunk>>,
 ) {
-    use bevy::{post_process::{bloom::Bloom, dof::*}, core_pipeline::prepass::DepthPrepass};
+    use bevy::post_process::{bloom::Bloom, dof::*};
     for mut m in &mut msaa {
         *m = gfx.msaa();
     }
@@ -46,22 +46,20 @@ pub fn apply_live(
             _ => {}
         }
         // the depth of field reads the depth at screen resolution: not while
-        // the scene is drawn smaller (`render_scale`)
+        // the scene is drawn smaller (`render_scale`); with no depth prepass
+        // (it reads the main pass's depth: `main.rs`, where the camera is made)
         match (gfx.dof && crate::render_scale::whole(gfx.render_scale), has_dof) {
             (true, false) => {
-                cam.insert((
-                    DepthPrepass,
-                    DepthOfField {
-                        mode: DepthOfFieldMode::Gaussian,
-                        focal_distance: orbit.distance,
-                        sensor_height: 0.01866,
-                        aperture_f_stops: 0.012,
-                        max_circle_of_confusion_diameter: 48.0,
-                        max_depth: 12_000.0,
-                    },
-                ));
+                cam.insert(DepthOfField {
+                    mode: DepthOfFieldMode::Gaussian,
+                    focal_distance: orbit.distance,
+                    sensor_height: 0.01866,
+                    aperture_f_stops: 0.012,
+                    max_circle_of_confusion_diameter: 48.0,
+                    max_depth: 12_000.0,
+                });
             }
-            (false, true) => { cam.remove::<(DepthPrepass, DepthOfField)>(); }
+            (false, true) => { cam.remove::<DepthOfField>(); }
             _ => {}
         }
     }

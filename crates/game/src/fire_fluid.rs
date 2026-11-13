@@ -69,7 +69,8 @@ pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         let asked = if cfg!(target_arch = "wasm32") { crate::quality::web_param("fluido") } else { std::env::var("KIOSK_FLUIDO").ok() };
-        crate::fire_volumetric::on() && asked.as_deref() == Some("1")
+        // compute shaders: never on WebGL2, where the volumes may now be asked for
+        !crate::quality::WEBGL2 && crate::fire_volumetric::on() && asked.as_deref() == Some("1")
     })
 }
 

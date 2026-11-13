@@ -22,7 +22,9 @@ struct TerrainUniform {
     canopy_broadleaf: Vec4,
     canopy_macchia: Vec4,
     /// x: the drawing clock less the front map's base (s,
-    /// `fire_ahead::FireAhead::base`); y: 1 when the front map is read.
+    /// `fire_ahead::FireAhead::base`); y: 1 when the front map is read; z: 1
+    /// when the flames are the volumes' (`fire_volumetric`): the ground
+    /// under them is char and embers, not the fire itself.
     fire_front: Vec4,
 }
 
@@ -79,7 +81,12 @@ impl TerrainMaterial {
         #[cfg_attr(all(target_arch = "wasm32", not(feature = "webgpu")), allow(unused_variables))] ground_detail: Handle<Image>,
     ) -> Self {
         TerrainMaterial {
-            uniform: TerrainUniform { mask_rect, ground_rect, ..Default::default() },
+            uniform: TerrainUniform {
+                mask_rect,
+                ground_rect,
+                fire_front: Vec4::new(0.0, 0.0, f32::from(crate::fire_volumetric::on()), 0.0),
+                ..Default::default()
+            },
             road_mask,
             grass_map,
             ground_colour,

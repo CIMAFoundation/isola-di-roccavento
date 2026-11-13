@@ -1051,7 +1051,9 @@ fn queue_plants(
             let begins = config.map_or(0.0, |c| cascade_begins(c, cascade_index));
             // and what reads it is on the screen, this side of its far bound
             if let Some(ends) = config.and_then(|c| c.bounds.get(cascade_index)) {
-                let filter = 6.0 * 2.0 / light_view.viewport.z.max(1) as f32;
+                // (the shadow's filter, and what the view may move by while
+                // a far cascade stands as drawn: `shadow_turns`)
+                let filter = (6.0 + crate::shadow_turns::slack_texels(cascade_index)) * 2.0 / light_view.viewport.z.max(1) as f32;
                 cascade.outline = slice_outline(view.world_from_view.to_matrix(), view.clip_from_view, &cascade.clip, begins, *ends, filter);
             }
             let beyond = begins - shadow_reach_m(light_view.world_from_view.back().y);

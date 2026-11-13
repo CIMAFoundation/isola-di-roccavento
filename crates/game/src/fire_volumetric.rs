@@ -83,7 +83,7 @@ use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::binding_types::{
-    sampler, texture_2d, texture_3d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer,
+    sampler, texture_2d, texture_2d_multisampled, texture_3d, uniform_buffer,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
@@ -114,13 +114,17 @@ pub const GROUND_MAP: Handle<Image> = uuid_handle!("3f9b6a12-7c54-4e0d-a1b8-92d5
 /// Seconds between rewrites of the plume map.
 const PLUME_INTERVAL_S: f32 = 0.1;
 
-/// Whether the game draws the volumes: `KIOSK_VOLUMI=1`, in the browser
-/// `?volumi=1`; not on WebGL2.
+/// Whether the game draws the volumes: `KIOSK_VOLUMI=1` on the desktop; in
+/// the browser unless `?volumi=0` (the page turns them on by itself,
+/// `window.roccaAuto`, since 2026-11-13: user, «pubblica … la versione che
+/// accende scansioni e volumi di default così la provo su telefono»). On
+/// WebGL2 too, in trial (user: «the goal is to make it the only version
+/// (also on webgl2)»): see `docs/web.md` for what was seen.
 pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         let asked = if cfg!(target_arch = "wasm32") { crate::quality::web_param("volumi") } else { std::env::var("KIOSK_VOLUMI").ok() };
-        !crate::quality::WEBGL2 && asked.as_deref() == Some("1")
+        asked.as_deref() == Some("1")
     })
 }
 
@@ -158,9 +162,12 @@ pub struct VolumeSettings {
     pub flame_gain: f32,
     pub flame_absorb: f32,
     /// The flames grow from their true height near the eye to `flame_toy`
-    /// times it far off, between these distances (m), as the tongues and
-    /// the houses do (toy scale: from the play camera a true flame is a
-    /// few pixels). The volumes draw every flame (2026-11-05).
+    /// times it far off, as the tongues and the houses do (toy scale: from
+    /// the play camera a true flame is a few pixels): half of the way
+    /// between these distances (m), the rest from 1.6 to 4 times the
+    /// second (2026-11-13; all of it by the second, the front's wall, now
+    /// at its whole height, was as tall as a hill from under a kilometre).
+    /// The volumes draw every flame (2026-11-05).
     pub flame_full_m: f32,
     pub flame_end_m: f32,
     pub flame_toy: f32,
@@ -174,6 +181,12 @@ pub struct VolumeSettings {
     pub flame_sharp: f32,
     pub flame_height: f32,
     pub flame_temp: f32,
+    /// How far the flames lean with the wind: metres downwind a metre up,
+    /// per m/s of wind (never more than [`LEAN_MAX`]).
+    pub flame_lean: f32,
+    /// How much soot the flames' tips give off: dark smoke over their
+    /// upper edge, in front of what burns behind (0: none).
+    pub soot: f32,
     /// Seconds of the smoke's own clock a real second (while the sim
     /// runs): the plume rises and drifts on it. On the sim's clock, at
     /// x300, the whole column was new every half second and a wind shift
@@ -189,6 +202,19 @@ pub struct VolumeSettings {
     /// The smoke thins out nearer the eye than this (m): from inside the
     /// plume the player would see nothing but brown.
     pub clear_m: f32,
+    /// The share of the smoke's density kept in front of the game field
+    /// while the game is played (1: as everywhere; user, 2026-11-13:
+    /// «during the game, reduce smoke opacity when overlapping the game
+    /// field»): a ray that ends on the island, or on the water close to
+    /// it, goes through smoke this much thinner, so the front, the towns
+    /// and the teams show under the plume; against the open sea and the
+    /// sky the smoke keeps its body ([`PlumeState::play`], `thin` in
+    /// `fire_march.wesl`).
+    pub field: f32,
+    /// Only the right half of the picture thins the smoke over the field
+    /// (`campo_meta`): the same plume with and without, side by side (two
+    /// runs never draw the same one: its clock is the real one).
+    pub field_half: bool,
     /// The march's strides (2026-11-05). The shortest coarse step (m): the
     /// step is the ray's length shared among `steps`, and a short ray took
     /// as many as a long one.
@@ -250,7 +276,13 @@ impl Default for VolumeSettings {
             lift_m: 300.0,
             edge: 0.44,
             shadow: 1.0,
-            flame_gain: 0.7,
+            // 2026-11-13, from 0.7 (user: «perché il fuoco tende ad essere
+            // così poco luminoso negli screenshot?»): at 0.7 the flames'
+            // light was in the range of the ground in the sun, an orange
+            // no brighter than the dry grass beside it. At 2 the body is
+            // the screen's brightest orange, the core goes yellow and the
+            // bloom has something to spread; at 2.6 they pale to cream.
+            flame_gain: 2.0,
             flame_absorb: 0.45,
             // as `fire_view::TRUE_SCALE_NEAR_M`, `TOY_SCALE_FAR_M`
             flame_full_m: 220.0,
@@ -262,7 +294,11 @@ impl Default for VolumeSettings {
             flame_sharp: 0.14,
             flame_height: 1.2,
             flame_temp: 1.0,
+            flame_lean: 0.06,
+            soot: 0.6,
             clear_m: 600.0,
+            field: 0.3,
+            field_half: false,
             pace: 5.0,
             smooth_s: 1.5,
             shear: 0.4,
@@ -297,6 +333,8 @@ impl VolumeSettings {
             "volute" => self.period_m = x,
             "fumo_luce" => self.smoke_gain = x,
             "dirada" => self.clear_m = x,
+            "campo" => self.field = x,
+            "campo_meta" => self.field_half = x != 0.0,
             "ritmo" => self.pace = x,
             "morbidezza_s" => self.smooth_s = x,
             "taglio" => self.shear = x,
@@ -314,6 +352,8 @@ impl VolumeSettings {
             "morbido" => self.flame_sharp = x,
             "altezza" => self.flame_height = x,
             "temp" => self.flame_temp = x,
+            "piega_vento" => self.flame_lean = x,
+            "fuliggine" => self.soot = x,
             "fiamme" => self.show_flames = x != 0.0,
             "fumo" => self.show_smoke = x != 0.0,
             "conta" => self.count = x as u32,
@@ -356,6 +396,25 @@ impl Plugin for FireVolumetricPlugin {
         let lab = crate::fire_lab::wanted();
         if !on() && !lab {
             return;
+        }
+        // On WebGL2 the volumes are in trial (2026-11-13: they run in Chromium
+        // on a Mac; no phone has drawn them yet, and the march writes five
+        // float targets where WebGL2 promises four). A rendering error stops
+        // Bevy's renderer for good: the page is asked to load again without
+        // them (`roccaVolumesFailed`, `web/index.html`), as the WebGPU build
+        // asks for WebGL2 (`webgpu_shaders`).
+        #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+        if on() {
+            use bevy::render::error_handler::{RenderErrorHandler, RenderErrorPolicy};
+            app.insert_resource(RenderErrorHandler(|error, _, _| {
+                error!("WebGL2: {:?} {}; again without the volumes", error.ty, error.description);
+                if let Ok(f) = js_sys::Reflect::get(&js_sys::global(), &"roccaVolumesFailed".into()) {
+                    if let Some(f) = wasm_bindgen::JsCast::dyn_ref::<js_sys::Function>(&f) {
+                        let _ = f.call0(&wasm_bindgen::JsValue::NULL);
+                    }
+                }
+                RenderErrorPolicy::StopRendering
+            }));
         }
         crate::load_wesl!(app, MARCH_SHADER, "shaders/fire_march.wesl");
         crate::load_wesl!(app, COMPOSITE_SHADER, "shaders/fire_composite.wesl");
@@ -454,6 +513,12 @@ struct Params {
     /// voxel (m), 1 on; then voxels a side, up, the voxel's height (m).
     fluid: Vec4,
     fluid2: Vec4,
+    /// The share of the smoke's density kept in front of the game field
+    /// now (1: all of it; [`VolumeSettings::field`]); 1 where only the
+    /// picture's right half thins it.
+    field: Vec4,
+    /// The flames' lean (m downwind a metre up; Bevy x, z), their soot.
+    flame2: Vec4,
 }
 
 /// The wind of the last few minutes of sim time: smoke aloft drifted with
@@ -522,7 +587,23 @@ pub struct PlumeState {
     settled: bool,
     /// The ground under each fire cell (m), asked once ([`rebuild`]).
     ground: Vec<f32>,
+    /// The game field, per texel of level 0 (the map's alpha): 1 over the
+    /// land, fading to 0 over [`FIELD_SHORE_M`] of water round it.
+    field: Vec<f32>,
+    /// How much the game is being played, 0 to 1 (eased): the smoke thins
+    /// over the game field by as much ([`VolumeSettings::field`]). The
+    /// title, the menus and the end card keep the whole plume.
+    pub play: f32,
+    /// The front map's clock (s since its base) where no game writes it
+    /// (`fire_ahead`): the lab's, which draws its front as the game does.
+    pub front_clock: Option<f32>,
 }
+
+/// Metres of water round the land over which the game field fades out
+/// ([`PlumeState::field`]): the smoke does not thicken at the shoreline.
+const FIELD_SHORE_M: f32 = 300.0;
+/// Real seconds the smoke takes to thin when the game starts.
+const FIELD_EASE_S: f32 = 0.8;
 
 impl PlumeState {
     /// `ground`: what the volumes stand on ([`ground_image`]).
@@ -560,14 +641,56 @@ pub fn ground_image(cols: usize, elev: &[f32]) -> Image {
     )
 }
 
-/// A fire cell for the plume map: when the front reached it (sim s) and
-/// its fireline intensity (kW/m); `None` unburnt.
-pub type CellBurn = Option<(f32, f32)>;
+/// The game field for the plume map's alpha ([`PlumeState::field`]), laid
+/// out as the map (its row 0 the grid's last): 1 where the ground of a cell
+/// (`ground`, by the grid's rows) is over `sea_m`, fading to 0 over
+/// [`FIELD_SHORE_M`] of water round it.
+fn game_field(ground: &[f32], cols: usize, rows: usize, sea_m: f32, cell_m: f32) -> Vec<f32> {
+    let land: Vec<bool> = (0..cols * rows).map(|at| ground[(rows - 1 - at / cols) * cols + at % cols] > sea_m).collect();
+    let offshore = crate::ground_mask::chamfer(&land, cols, rows);
+    offshore.iter().map(|d| 1.0 - smoothstep(0.0, FIELD_SHORE_M, d * cell_m)).collect()
+}
+
+/// A fire cell for the plume map: when the front reached it (sim s), its
+/// fireline intensity (kW/m), and the metres its flames stand over what
+/// the intensity gives ([`crown_m`]); `None` unburnt.
+pub type CellBurn = Option<(f32, f32, f32)>;
+
+/// The flames' band (the plume map's green, `front_band` in
+/// `fire_march.wesl`) holds two things: up to this, the low flames left
+/// behind the front while the ground still flames; over it, the front's
+/// wall. A cell burns for nine minutes ([`FLAMING_S`]) and the front
+/// crosses it in one or two: drawn alike over all of that ground the
+/// flames were a carpet a hundred metres deep and a few metres tall (user,
+/// 2026-11-13: «improve flame rendering by making them more realistic»). A
+/// front is a wall of flame as deep as it is tall, with what it left
+/// behind burning low in patches.
+const WALL_BAND: f32 = 0.35;
+/// Seconds after the front the wall stands whole, and is gone (where the
+/// lookahead is off; with it the wall is on the front's own contour).
+const WALL_FULL_S: f32 = 30.0;
+const WALL_END_S: f32 = 110.0;
+/// The most the flames lean (m downwind a metre up).
+const LEAN_MAX: f32 = 0.5;
+
+/// Metres the flames of a wood stand over the flame length of its
+/// intensity (`fuel`: the scenario's class): a crown fire's flames stand on
+/// the canopy, and those of the surface fire under it are hidden in it.
+/// Only where the fire is strong enough to climb.
+pub fn crown_m(fuel: i32, fli: f32) -> f32 {
+    let crown = match fuel {
+        10..=12 => 8.0,
+        4..=6 => 5.0,
+        _ => 0.0,
+    };
+    crown * smoothstep(600.0, 2500.0, fli)
+}
 
 /// Rewrites the plume map from cells and sizes the plume's box; `wind` is
 /// the wind now (Bevy x, z, m/s) and `margin` metres of sway round it;
 /// `ground` is the height of the ground at a cell's centre, for the box
-/// (asked once for each cell).
+/// (asked once for each cell); ground at `sea_m` or under is water, not the
+/// game field ([`PlumeState::field`]).
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild(
     state: &mut PlumeState,
@@ -580,12 +703,14 @@ pub fn rebuild(
     s: &VolumeSettings,
     cell: impl Fn(usize) -> CellBurn,
     ground: impl Fn(usize) -> f32,
+    sea_m: f32,
 ) {
     let (cols, rows) = (world.fire_cols, world.fire_rows);
     if state.dims != (cols, rows) || images.get(&PLUME_MAP).is_none() {
         state.dims = (cols, rows);
         let _ = images.insert(&PLUME_MAP, plume_image(cols, rows));
         state.ground = (0..cols * rows).map(&ground).collect();
+        state.field = game_field(&state.ground, cols, rows, sea_m, world.cellsize);
     }
     let age = s.top_m / s.rise_ms;
     let clock = state.clock;
@@ -603,14 +728,16 @@ pub fn rebuild(
     let mut level0 = vec![[0.0f32; 4]; cols * rows];
     let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
     let mut any_flame = false;
+    let mut tallest = 0.0f32;
     for r in 0..rows {
         for c in 0..cols {
             let i = r * cols + c;
             let g = state.ground[i];
             let at = (rows - 1 - r) * cols + c;
+            level0[at][3] = state.field[at];
             let mut target = 0.0;
-            let burn = cell(i).map(|(arrival, fli)| ((now - arrival).max(0.0), fli)).filter(|(since, _)| *since < s.smoke_s);
-            if let Some((since, fli)) = burn {
+            let burn = cell(i).map(|(arrival, fli, crown)| ((now - arrival).max(0.0), fli, crown)).filter(|(since, ..)| *since < s.smoke_s);
+            if let Some((since, fli, _)) = burn {
                 let flaming = (1.0 - since / FLAMING_S).clamp(0.0, 1.0);
                 // the hot fire smokes most; a share of it as it smoulders out
                 let strength = (fli / 2500.0).clamp(0.35, 1.0);
@@ -628,15 +755,16 @@ pub fn rebuild(
                 lo = lo.min(p);
                 hi = hi.max(p);
             }
-            let Some((since, fli)) = burn else { continue };
+            let Some((since, fli, crown)) = burn else { continue };
             let flaming = (1.0 - since / FLAMING_S).clamp(0.0, 1.0);
-            // tall at the front's edge, low flames and embers behind it
-            // the tall flames stand on the front's edge, the band behind it
-            // burns low (all of it at full height drew a wall, 2026-11-05)
-            let edge = flaming * flaming * flaming;
-            let band = smoothstep(0.05, 0.3, flaming) * (0.45 + 0.55 * edge);
+            // the front's wall, then the low flames left behind it
+            // ([`WALL_BAND`]); the height is the wall's, the march lowers
+            // what stands behind it
+            let wall = 1.0 - smoothstep(WALL_FULL_S, WALL_END_S, since);
+            let band = smoothstep(0.05, 0.3, flaming) * (WALL_BAND + (1.0 - WALL_BAND) * wall);
             level0[at][1] = band;
-            level0[at][2] = if band > 0.0 { vol_flame_m(fli) * (0.15 + 0.85 * edge) } else { 0.0 };
+            level0[at][2] = if band > 0.0 { vol_flame_m(fli) + crown } else { 0.0 };
+            tallest = tallest.max(level0[at][2]);
             any_flame |= band > 0.0;
             if band > 0.0 {
                 lo = lo.min(p);
@@ -645,6 +773,7 @@ pub fn rebuild(
         }
     }
     state.settled = settled;
+    spread_heights(&mut level0, cols, rows);
     write_mips(data, &level0, cols, rows);
     drop(image);
     if !lo.x.is_finite() {
@@ -678,7 +807,11 @@ pub fn rebuild(
     let lo_xz = Vec2::new(lo.x, lo.z) + dlo - grow;
     let hi_xz = Vec2::new(hi.x, hi.z) + dhi + grow;
     let levels = mip_count(cols, rows);
-    let zone = if any_flame { 45.0 * s.flame_height.max(0.3) } else { 0.0 };
+    // the tallest flame there is (`flame_at` in `fire_march.wesl`: up to
+    // 1.3 times the cell's height), and a little
+    let zone = if any_flame { tallest * s.flame_height.max(0.3) * 1.35 + 2.0 } else { 0.0 };
+    let speed = wind.length();
+    let lean = if speed > 0.1 { wind / speed * (s.flame_lean * speed).min(LEAN_MAX) } else { Vec2::ZERO };
     state.params = Some(Params {
         map: Vec4::new(1.0 / world.width_m, 1.0 / world.height_m, world.cellsize, (levels - 1) as f32),
         lo: Vec4::new(lo_xz.x, lo.y - 15.0, lo_xz.y, s.steps),
@@ -692,6 +825,7 @@ pub fn rebuild(
         shear,
         more: Vec4::new(s.flame_toy, s.detail, s.detail_m, 0.0),
         stride: Vec4::new(s.step_min_m.max(0.5), s.step_empty, s.step_thin, s.step_thin_max.max(1.0)),
+        flame2: Vec4::new(lean.x, lean.y, s.soot.max(0.0), 0.0),
         ..default()
     });
 }
@@ -705,6 +839,7 @@ fn update_from_sim(
     state: Option<ResMut<PlumeState>>,
     mut images: ResMut<Assets<Image>>,
     ahead: Option<Res<crate::fire_ahead::FireAhead>>,
+    kiosk: Option<Res<crate::kiosk::Kiosk>>,
 ) {
     let Some(mut state) = state else {
         let t = &sim.scn.terrain;
@@ -712,6 +847,13 @@ fn update_from_sim(
         return;
     };
     let dt_real = time.delta_secs();
+    // while the game is played the smoke thins over the game field
+    // (`VolumeSettings::field`): where the player reads the front and gives
+    // the orders. Not on the title, in the menus or on the end card.
+    let playing = kiosk.is_some_and(|k| !k.title && matches!(k.phase, crate::kiosk::Phase::Tutorial | crate::kiosk::Phase::Gioco));
+    // a picture of a state has no time to ease in
+    let step = if std::env::var_os("KIOSK_SNAP").is_some() { 1.0 } else { dt_real / FIELD_EASE_S };
+    state.play = if playing { (state.play + step).min(1.0) } else { (state.play - step).max(0.0) };
     state.since += dt_real;
     if !sim.paused() {
         state.clock += dt_real * settings.pace;
@@ -731,6 +873,8 @@ fn update_from_sim(
     let (fire_state, arrival, intensity) = (sim.fire.state(), sim.fire.arrival_times(), sim.fire.intensity());
     let soon = 2.0 * PLUME_INTERVAL_S * sim.speed.max(60.0);
     let wind = smoke_wind(&sim);
+    let scn = &sim.scn;
+    let burning = |t: f32, fli: f32, i: usize| (t, fli, crown_m(scn.fuel_at(scenario::Cell { row: i / w.fire_cols, col: i % w.fire_cols }), fli));
     rebuild(
         &mut state,
         &mut images,
@@ -742,10 +886,11 @@ fn update_from_sim(
         &settings,
         |i| match ahead.as_ref() {
             // a cell only foreseen has no intensity yet: its neighbours'
-            Some(a) => a.drawn_arrival(&sim.game, i, soon).map(|t| (t, if fire_state[i] == CellFire::Unburnt { near_intensity(intensity, w.fire_cols, i) } else { intensity[i] })),
-            None => (fire_state[i] != CellFire::Unburnt && arrival[i] != i32::MIN).then(|| (arrival[i] as f32, intensity[i])),
+            Some(a) => a.drawn_arrival(&sim.game, i, soon).map(|t| burning(t, if fire_state[i] == CellFire::Unburnt { near_intensity(intensity, w.fire_cols, i) } else { intensity[i] }, i)),
+            None => (fire_state[i] != CellFire::Unburnt && arrival[i] != i32::MIN).then(|| burning(arrival[i] as f32, intensity[i], i)),
         },
         |i| drawn_ground(&sim.scn, i),
+        crate::sea::WATER_ELEV_MAX,
     );
 }
 
@@ -777,6 +922,32 @@ fn drawn_ground(scn: &scenario::Scenario, i: usize) -> f32 {
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// The flames' heights (level 0's blue) carried one cell out into the
+/// ground that has none: the map is read between cells, and the front's
+/// wall stands between a cell alight and one not yet, where the height
+/// would be half the wall's.
+fn spread_heights(level0: &mut [[f32; 4]], cols: usize, rows: usize) {
+    let lit: Vec<usize> = (0..cols * rows).filter(|&i| level0[i][2] > 0.0).collect();
+    let mut out: Vec<(usize, f32)> = Vec::new();
+    for &i in &lit {
+        let (r, c) = ((i / cols) as i64, (i % cols) as i64);
+        for (dr, dc) in [(-1i64, -1i64), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)] {
+            let (rr, cc) = (r + dr, c + dc);
+            if rr < 0 || cc < 0 || rr >= rows as i64 || cc >= cols as i64 {
+                continue;
+            }
+            let j = rr as usize * cols + cc as usize;
+            if level0[j][2] <= 0.0 {
+                out.push((j, level0[i][2]));
+            }
+        }
+    }
+    // after the scan: a height carried is not carried on
+    for (j, h) in out {
+        level0[j][2] = level0[j][2].max(h);
+    }
 }
 
 fn mip_count(cols: usize, rows: usize) -> u32 {
@@ -893,9 +1064,13 @@ fn extract(
     let clear = settings.as_ref().map_or(600.0, |s| s.clear_m);
     let show = settings.as_ref().map_or(3.0, |s| f32::from(s.show_flames) + 2.0 * f32::from(s.show_smoke) + 4.0 * s.count.min(3) as f32 + 16.0 * f32::from(s.solo) + 32.0 * s.mark.min(3) as f32 + 128.0 * f32::from(s.offset));
     match (params, state.as_ref()) {
-        (Some(params), Some(s)) => {
-            let front = match ahead.as_ref() {
-                Some(a) if crate::fire_ahead::on() => Vec4::new((a.clock - a.base) as f32, 1.0, 0.0, 0.0),
+        (Some(mut params), Some(s)) => {
+            let keep = settings.as_ref().map_or(1.0, |v| v.field.clamp(0.02, 1.0));
+            let half = settings.as_ref().is_some_and(|v| v.field_half);
+            params.field = Vec4::new(1.0 + (keep - 1.0) * s.play.clamp(0.0, 1.0), f32::from(half), 0.0, 0.0);
+            let front = match (ahead.as_ref(), s.front_clock) {
+                (Some(a), _) if crate::fire_ahead::on() => Vec4::new((a.clock - a.base) as f32, 1.0, 0.0, 0.0),
+                (None, Some(clock)) => Vec4::new(clock, 1.0, 0.0, 0.0),
                 _ => Vec4::ZERO,
             };
             commands.insert_resource(Extracted { params, front, noise: s.noise.id(), near, div, show, clear })
@@ -935,7 +1110,13 @@ fn init_pipelines(
     device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
 ) {
-    let depth = |ms: bool| if ms { texture_depth_2d_multisampled() } else { texture_depth_2d() };
+    // The scene's depth, bound as a float texture that is not filtered
+    // (wgpu takes a depth texture for one), not as a depth texture: read
+    // texel by texel either way, but the shader translator for WebGL2 has
+    // no `textureLoad` from depth textures («not supported in GLSL»: the
+    // march's pipeline was refused there, 2026-11-13).
+    let unfiltered = TextureSampleType::Float { filterable: false };
+    let depth = |ms: bool| if ms { texture_2d_multisampled(unfiltered) } else { texture_2d(unfiltered) };
     let march_layout = [false, true].map(|ms| {
         BindGroupLayoutDescriptor::new(
             "fire_march_layout",
@@ -1246,6 +1427,12 @@ fn prepare(
                 if near {
                     defs.push("NEAR".into());
                 }
+                // not an HDR target (WebGL2): the volumes' light is tone
+                // mapped by the pass itself (`to_screen`)
+                // (Bevy's HDR targets are half floats)
+                if view.target_format != TextureFormat::Rgba16Float {
+                    defs.push("LDR".into());
+                }
                 pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(if near { "fire_composite_near".into() } else { "fire_composite".into() }),
                     layout: vec![composite_layout[ms as usize].clone()],
@@ -1519,29 +1706,50 @@ mod tests {
     /// stubbed (the few fields of Bevy's bindings it reads), each `@if(X)`
     /// item dropped and the `@else` one kept (the variant without `X`).
     fn without_wesl(src: &str, stubs: &str) -> String {
+        with_defs(src, stubs, &[])
+    }
+
+    /// The same with the defs of `on` set: their `@if(X)` items kept, and
+    /// the `@else` ones after them dropped.
+    fn with_defs(src: &str, stubs: &str, on: &[&str]) -> String {
         let mut out = String::from(stubs);
         let mut lines = src.lines().peekable();
+        // the next item (a line, or a block to its closing brace), kept or not
+        let item = |lines: &mut std::iter::Peekable<std::str::Lines>, out: &mut String, keep: bool| {
+            let mut depth = 0i32;
+            let mut opened = false;
+            for l in lines.by_ref() {
+                if keep {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+                depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+                opened |= l.contains('{');
+                if (opened && depth <= 0) || (!opened && l.trim_end().ends_with(';')) {
+                    break;
+                }
+            }
+        };
+        let mut taken = false;
         while let Some(line) = lines.next() {
             let t = line.trim_start();
             if t.starts_with("import ") {
                 continue;
             }
             if t == "@else" {
-                continue;
-            }
-            if t.starts_with("@if(") {
-                // skip the next item: a line, or a block to its closing brace
-                let mut depth = 0i32;
-                let mut opened = false;
-                for l in lines.by_ref() {
-                    depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
-                    opened |= l.contains('{');
-                    if (opened && depth <= 0) || (!opened && l.trim_end().ends_with(';')) {
-                        break;
-                    }
+                // the other variant of the item before
+                if taken {
+                    item(&mut lines, &mut out, false);
                 }
+                taken = false;
                 continue;
             }
+            if let Some(def) = t.strip_prefix("@if(").and_then(|r| r.strip_suffix(')')) {
+                taken = on.contains(&def);
+                item(&mut lines, &mut out, taken);
+                continue;
+            }
+            taken = false;
             out.push_str(line);
             out.push('\n');
         }
@@ -1569,6 +1777,116 @@ fn apply_scene_fog(c: vec4<f32>, p: vec3<f32>) -> vec4<f32> { return c; }
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+    }
+
+    /// What the composite and the resolve read of Bevy: the fullscreen
+    /// triangle only.
+    const SCREEN_STUBS: &str = "
+struct FullscreenVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
+";
+
+    fn validates(src: &str) {
+        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+    }
+
+    /// The composite and the resolve are valid WGSL too (without
+    /// multisampling, the variant WebGL2 would draw).
+    #[test]
+    fn the_composite_and_the_resolve_validate() {
+        validates(&without_wesl(include_str!("shaders/fire_composite.wesl"), SCREEN_STUBS));
+        validates(&without_wesl(include_str!("shaders/fire_resolve.wesl"), SCREEN_STUBS));
+    }
+
+    /// The three shaders translate to GLSL ES 3.00, WebGL2's (the variant
+    /// without multisampling: WebGL2 has none here). The browser's own
+    /// compiler and the device's limits come after this: `docs/web.md`.
+    #[test]
+    fn the_volumes_translate_for_webgl2() {
+        use naga::back::glsl;
+        for (name, src) in [
+            ("march", without_wesl(include_str!("shaders/fire_march.wesl"), MARCH_STUBS)),
+            // WebGL2's target is not HDR: the composite tone maps
+            ("composite", with_defs(include_str!("shaders/fire_composite.wesl"), SCREEN_STUBS, &["LDR"])),
+            ("resolve", without_wesl(include_str!("shaders/fire_resolve.wesl"), SCREEN_STUBS)),
+        ] {
+            let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&src)));
+            let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&src)));
+            let options = glsl::Options { version: glsl::Version::Embedded { version: 300, is_webgl: true }, ..Default::default() };
+            let pipeline = glsl::PipelineOptions { shader_stage: naga::ShaderStage::Fragment, entry_point: "fragment".into(), multiview: None };
+            let mut out = String::new();
+            let mut writer = glsl::Writer::new(&mut out, &module, &info, &options, &pipeline, naga::proc::BoundsCheckPolicies::default())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            writer.write().unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(out.contains("void main()"), "{name}");
+        }
+    }
+
+    /// The three shaders declare the uniform the game writes: as many
+    /// fields, in its order (a field added to one and not to the others
+    /// shifts everything after it, and nothing says so).
+    #[test]
+    fn the_shaders_declare_the_same_uniform() {
+        let fields = |src: &str| -> Vec<String> {
+            let body = src.split("struct Params {").nth(1).unwrap().split('}').next().unwrap();
+            body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("//")).map(|l| l.trim_end_matches(',').to_string()).collect()
+        };
+        let march = fields(include_str!("shaders/fire_march.wesl"));
+        assert_eq!(march, fields(include_str!("shaders/fire_composite.wesl")));
+        assert_eq!(march, fields(include_str!("shaders/fire_resolve.wesl")));
+        // and as many bytes as the game's
+        let size: u64 = march.iter().map(|f| if f.contains("mat4x4") { 64 } else if f.contains("array<vec4<f32>, 4>") { 64 } else if f.contains("array<vec4<f32>, 2>") { 32 } else { 16 }).sum();
+        assert_eq!(size, Params::min_size().get());
+    }
+
+    /// The game field is the land and the water close to it: whole on the
+    /// land, half way out over [`FIELD_SHORE_M`] of water, none past it.
+    #[test]
+    fn the_game_field_is_the_land_and_the_water_round_it() {
+        // a row of cells 20 m wide: land to the west, sea to the east
+        let (cols, rows) = (40, 3);
+        let ground: Vec<f32> = (0..cols * rows).map(|i| if i % cols < 10 { 12.0 } else { 0.2 }).collect();
+        let field = game_field(&ground, cols, rows, 0.6, 20.0);
+        let at = |c: usize| field[cols + c];
+        assert_eq!(at(0), 1.0);
+        assert_eq!(at(9), 1.0);
+        // 150 m off the shore: half way
+        let half = at(9 + (FIELD_SHORE_M / 2.0 / 20.0) as usize);
+        assert!((half - 0.5).abs() < 0.1, "{half}");
+        assert_eq!(at(9 + (FIELD_SHORE_M / 20.0) as usize + 1), 0.0);
+        assert!((1..cols).all(|c| at(c) <= at(c - 1)), "it only fades going out");
+    }
+
+    /// A wood's flames stand over its crowns, where the fire is strong
+    /// enough to climb into them; grass has none to climb.
+    #[test]
+    fn the_flames_of_a_wood_stand_over_its_crowns() {
+        assert_eq!(crown_m(2, 9000.0), 0.0);
+        assert_eq!(crown_m(11, 300.0), 0.0);
+        assert!(crown_m(11, 9000.0) > crown_m(5, 9000.0) && crown_m(5, 9000.0) > 0.0);
+    }
+
+    /// A cell's flame height is carried into the unlit cells round it, one
+    /// cell and no further, and never lowers one that has its own.
+    #[test]
+    fn a_flame_height_is_carried_one_cell_out() {
+        let (cols, rows) = (7, 5);
+        let mut level0 = vec![[0.0f32; 4]; cols * rows];
+        level0[2 * cols + 3][2] = 12.0;
+        level0[2 * cols + 4][2] = 20.0;
+        spread_heights(&mut level0, cols, rows);
+        let h = |r: usize, c: usize| level0[r * cols + c][2];
+        assert_eq!((h(2, 3), h(2, 4)), (12.0, 20.0));
+        assert_eq!(h(2, 2), 12.0);
+        assert_eq!(h(1, 3), 20.0, "the taller of the two beside it");
+        assert_eq!(h(2, 5), 20.0);
+        assert_eq!(h(2, 1), 0.0);
+        assert_eq!(h(2, 6), 0.0);
+        assert_eq!(h(4, 3), 0.0);
     }
 
     #[test]

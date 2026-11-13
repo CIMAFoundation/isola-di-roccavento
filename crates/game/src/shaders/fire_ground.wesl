@@ -15,6 +15,12 @@ import game::shaders::noise::{hash21, value_noise};
 // 2026-11-04: from 1100 s, which painted a wide orange band; now the bright
 // line is the front's own, embers glint in the char behind it.
 const GLOWING_S: f32 = 600.0;
+// The same where the flames are drawn as volumes (`fire_volumetric`): they
+// stand on the front, and what glows behind them is embers in the char. As
+// a band of fire of its own, the ground under and behind the volumes'
+// flames was a flat patch of red (user, 2026-11-13: «le chiazze di fuoco
+// basso sono piuttosto brutte»).
+const EMBERS_S: f32 = 220.0;
 
 // Fractal Brownian motion, domain-warped: the warp is what turns blobby
 // noise into the tendrilled, branching texture of a real fire front.
@@ -69,7 +75,8 @@ fn fire_ramp(h: f32) -> vec3<f32> {
 
 // The colour the fire leaves at this point and how much it covers, before
 // the scene's light (the cold scar is lit here; the glow is light itself).
-fn fire_colour(p: vec3<f32>, fire: vec4<f32>) -> vec4<f32> {
+// (`volumes`: 1 where the flames are the volumes', see `EMBERS_S`.)
+fn fire_colour(p: vec3<f32>, fire: vec4<f32>, volumes: f32) -> vec4<f32> {
     let wp = vec2<f32>(p.x, -p.z);
     // Coverage feathered around the half-burnt contour.
     let cover = clamp((fire.g - 0.42) / 0.20, 0.0, 1.0);
@@ -83,7 +90,7 @@ fn fire_colour(p: vec3<f32>, fire: vec4<f32>) -> vec4<f32> {
     // the interpolated arrival, unburnt corners dragging it later (`field::arrival`)
     let age = max(-fire.b / max(fire.g, 1e-3) - (1.0 - fire.g) * 90.0, 0.0);
     // Incandescent only just behind the front, then straight to scar.
-    let glow = pow(clamp(1.0 - age / GLOWING_S, 0.0, 1.0), 3.0);
+    let glow = pow(clamp(1.0 - age / mix(GLOWING_S, EMBERS_S, volumes), 0.0, 1.0), 3.0);
     let embers = clamp(1.0 - age / (GLOWING_S * 4.0), 0.0, 1.0);
     // Char and ash at a scale the fire model has no opinion about.
     let ash = 0.72 + 0.85 * (0.6 * value_noise(wp / 23.0 + 7.0) + 0.4 * value_noise(wp / 8.0 + 13.0));
@@ -108,8 +115,10 @@ struct FireGround {
 };
 
 // `road_d`: distance to the drivable roads and the tracks (`ground_mask`);
-// `mpp` metres per pixel.
-fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32) -> FireGround {
+// `mpp` metres per pixel; `volumes`: 1 where the flames are drawn as
+// volumes (`fire_volumetric`), and the ground under them is char with
+// embers in it, fewer and dimmer than the band's own fire.
+fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32, volumes: f32) -> FireGround {
     var out: FireGround;
     out.scar = vec4<f32>(0.0);
     out.glow = vec4<f32>(0.0);
@@ -118,7 +127,7 @@ fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32) -> Fi
     if max(fire.g, fire.a) < 0.3 {
         return out;
     }
-    var col = fire_colour(p, fire);
+    var col = fire_colour(p, fire, volumes);
     if col.a <= 0.004 {
         return out;
     }
@@ -146,12 +155,12 @@ fn fire_ground(p: vec3<f32>, fire: vec4<f32>, road_d: vec2<f32>, mpp: f32) -> Fi
         // (2026-11-04: patchier, from heat * 1.75 - (1 - n) * 0.70: away
         // from the front itself the band is char with glowing patches,
         // not an orange carpet)
-        let local = heat * 1.5 - (1.0 - n) * 0.95 + (crackle - 0.5) * 0.40 + breath * 0.10;
+        let local = heat * 1.5 - (1.0 - n) * mix(0.95, 1.3, volumes) + (crackle - 0.5) * 0.40 + breath * 0.10;
         let hot = smoothstep(0.05, 0.25, local);
         // (2026-11-04: from 0.85 + 0.55: the hottest patches burnt out to white)
-        let flame = fire_ramp(clamp(local, 0.0, 1.0)) * (0.7 + 0.4 * crackle);
+        let flame = fire_ramp(clamp(local, 0.0, 1.0)) * (0.7 + 0.4 * crackle) * mix(1.0, 0.6, volumes);
         // The cooler gaps: dark char with a faint red glint.
-        let char_col = vec3<f32>(0.06, 0.03, 0.025) + vec3<f32>(0.9, 0.12, 0.0) * (1.0 - hot) * heat * n;
+        let char_col = vec3<f32>(0.06, 0.03, 0.025) + vec3<f32>(0.9, 0.12, 0.0) * (1.0 - hot) * heat * n * mix(1.0, 0.3, volumes);
         let rgb = mix(col.rgb, mix(char_col, flame, hot), w);
         // Ragged outer edge.
         let edge = smoothstep(0.12, 0.5, col.a + (n - 0.5) * 0.55);

@@ -43,7 +43,7 @@ const WATER_CHUNK: usize = 64;
 /// the elevation below which the ground layer paints "sea", so the water
 /// mesh has to cover exactly that footprint or a ring of one or the other
 /// colour would show at the coast.
-const WATER_ELEV_MAX: f32 = 0.6;
+pub(crate) const WATER_ELEV_MAX: f32 = 0.6;
 
 /// Flat base height for the (unwaved) lattice; the vertex shader adds the
 /// swell on top of this every frame. Has to clear both `WATER_ELEV_MAX`

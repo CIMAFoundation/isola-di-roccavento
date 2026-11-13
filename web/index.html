@@ -323,6 +323,23 @@
         return phone ? 'bassa' : 'media';
       })();
 
+      // What the page turns on when the address does not say: the game (and
+      // the download below) read `window.roccaAuto` after the address. The
+      // ray-marched flames and smoke on every build since 2026-11-13, WebGL2
+      // too (in trial there: `?volumi=0` for the flames and the puffs of
+      // before). If the renderer stops on them the game calls
+      // `roccaVolumesFailed`: the same page again without them.
+      window.roccaAuto = { volumi: '1' };
+      window.roccaVolumesFailed = () => {
+        const url = new URL(location.href);
+        if (url.searchParams.get('volumi') === '0') return;
+        url.searchParams.set('volumi', '0');
+        // straight into the game, as the player had already pressed «Gioca»
+        try { sessionStorage.setItem('roccaStart', '1'); } catch (e) {}
+        leaving = true;
+        location.replace(url);
+      };
+
       // The WebGPU build draws as the desktop does (HDR, MSAA, bloom, depth of
       // field, the authored plants); it is loaded on computers whose browser
       // gives a WebGPU adapter, the WebGL2 one everywhere else. `?gpu=0` keeps
@@ -337,7 +354,7 @@
           // The realistic style wherever the WebGPU build runs, on every profile
           // (the game shortens its LODs on the light one): the game and the
           // download below read this when the address does not say (`?scans=0`).
-          if (ok) window.roccaAuto = { scans: '1' };
+          if (ok) window.roccaAuto.scans = '1';
           return ok;
         } catch (e) { return false; }
       })();
