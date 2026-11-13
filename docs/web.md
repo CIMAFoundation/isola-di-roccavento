@@ -245,9 +245,11 @@ Prova dell'utente sul telefono, sito pubblicato: «scans rompe il telefono mentr
 
 6. **Il wasm nasce a 448 MiB** (`.cargo/config.toml`, erano 320; utente, visto il resoconto: «fai le altre ottimizzazioni se necessario»). Con la scena a rate la pagina con gli scan arrivava ancora a 376 MB, 56 oltre i 320 iniziali, in 8 passi (28 nella costruzione della scena, il resto nei primi due fotogrammi e nella decodifica dei suoni), e la crescita è ciò di cui una pagina su iPhone è già morta: a ogni passo Safari può copiare tutta la memoria. Con 448 non c'è nessun passo, con o senza scan; le pagine non toccate non costano (senza scan la pagina resta a 485 MB, erano 488). Da qui la colonna «wasm» di `web_budget.py` dice solo se è cresciuto: quanto ne usa lo dice la colonna della pagina. I segni stesi sul terreno (rete stradale 7 MB, previsione) sono solo per la scheda: nessuno li rilegge.
 
+**Nel motore di Safari** (WebKit headless di Playwright sul Mac, profilo telefono, stessa partita): l'estensione c'è e la pagina ottiene `first`; con gli scan nessun errore, 60 fotogrammi al secondo, immagine giusta. Processo grafico con gli scan: **883 MB (478 dalla scheda) con la convenzione di WebGL, 507 (183) con il primo vertice**; processo della pagina 700 MB con gli scan, 574 senza (processo grafico 406, 117 dalla scheda).
+
 **Non risolto.**
 
-- **Non provato su un telefono.** Le misure sono di Chromium su un Mac, che disegna con Metal come Safari su iPhone; quanto l'iPhone tolleri non è noto.
+- **Non provato su un telefono.** Le misure sono di Chromium e di WebKit su un Mac, che disegnano con Metal come Safari su iPhone; quanto l'iPhone tolleri non è noto.
 - Su un browser a 32 bit una riserva di 448 MiB contigui (punto 6) può fallire dove 320 riusciva: non provato.
 - Su un telefono lo stile realistico è sfocato da vicino (terreno a 20 m, foto a 256 px, case nel modello lontano) e gli alberi vicini sono radi. Da lontano, dove si gioca, tiene.
 - Sul profilo computer di WebGL2 con gli scan: texture 153, buffer 136, wasm 512, pagina 808, processo grafico 725 (302 dalla scheda).
