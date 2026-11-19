@@ -228,8 +228,7 @@ pub fn labels(
         // the first point on the map that is not on top of an earlier label
         let on_map = pts.iter().find_map(|&p| {
             let v = crate::frame::to_bevy(p, sim.scn.terrain.height_at(p) + LABEL_LIFT_M);
-            let s = cam.world_to_viewport(gt, v).ok().filter(|s| map.contains(egui::pos2(s.x, s.y)))?;
-            let s = egui::pos2(s.x, s.y);
+            let s = cam.world_to_viewport(gt, v).ok().map(crate::kiosk::display::to_points).filter(|&s| map.contains(s))?;
             placed.iter().all(|q| (s.x - q.x).abs() >= LABEL_APART_PX.x || (s.y - q.y).abs() >= LABEL_APART_PX.y).then_some(s)
         });
         let Some(s) = on_map else { continue };

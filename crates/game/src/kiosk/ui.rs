@@ -101,7 +101,7 @@ fn tutorial_pulse(ctx: &egui::Context, k: &Kiosk, sim: &Sim, cam: (&Camera, &Glo
 pub(super) fn screen(cam: (&Camera, &GlobalTransform), sim: &Sim, p: Pos, lift_m: f32) -> Option<egui::Pos2> {
     let v = crate::frame::to_bevy(p, sim.scn.terrain.height_at(p) + lift_m);
     let s = cam.0.world_to_viewport(cam.1, v).ok()?;
-    Some(egui::pos2(s.x, s.y))
+    Some(super::display::to_points(s))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,6 +125,7 @@ pub fn draw(
 ) {
     crate::playtest::begin();
     let Ok(ctx) = contexts.ctx_mut() else { return };
+    super::display::apply(ctx);
     // Mario has the screen: his own panel is all there is
     if mario.active {
         focus.pointer = ctx.is_pointer_over_egui();
@@ -160,6 +161,8 @@ pub fn draw(
             }
             let r = mute_button(ui, &mut audio);
             crate::playtest::control("Audio", &r, true);
+            let r = full_screen_button(ui);
+            crate::playtest::control("Schermo intero", &r, true);
         });
     });
     // On a phone the menu is a page of its own: nothing is drawn under it.
@@ -205,12 +208,17 @@ pub fn draw(
             let r = ctx.viewport_rect();
             k.side_w = if compact(ctx) && r.width() > r.height() && k.phase == Phase::Tutorial { (r.width() * 0.37).clamp(220.0, 316.0) } else { 0.0 };
             top_bar(ctx, k, &mut sim, cam);
-            // Esc takes back a choice first (and is then used up: in the tutorial it would also skip)
+            // Esc takes back a choice first (and is then used up: in the tutorial it would also skip);
+            // with nothing chosen in the pause it resumes, like the space bar (a player's
+            // feedback, 2026-11-19: the space bar is often less handy); running, it opens the menu
             if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 if k.selection != Selection::None && !k.menu {
                     k.clear_selection();
                 } else if k.operator {
                     k.operator = false;
+                } else if !k.menu && sim.paused() && k.allows(Expect::Resume) {
+                    sim.resume();
+                    k.done(Expect::Resume);
                 } else {
                     k.menu = !k.menu;
                 }
@@ -281,7 +289,9 @@ pub fn draw(
     focus.keyboard = ctx.egui_wants_keyboard_input();
     if k.fade > 0.0 && k.phase == Phase::Intro {
         let a = (k.fade.clamp(0.0, 1.0) * 255.0) as u8;
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("cut_fade")))
+        // the fade is the scene's, under every piece of interface: over them it
+        // darkened the settings now and then on the title (a player, 2026-11-19)
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("cut_fade")))
             .rect_filled(ctx.viewport_rect(), 0.0, Color32::from_black_alpha(a));
     }
     k.click = None;
@@ -768,9 +778,9 @@ fn snap_to_target(sim: &Sim, t: usize, g: Pos) -> Pos {
     near.map_or(g, |(_, p)| p)
 }
 
-/// The ground under a screen point (egui logical px).
+/// The ground under a screen point (egui points).
 fn ground_at(sim: &Sim, cam: (&Camera, &GlobalTransform), p: egui::Pos2) -> Option<Pos> {
-    let vp = crate::pick::window_to_viewport(cam.0, Vec2::new(p.x, p.y))?;
+    let vp = crate::pick::window_to_viewport(cam.0, super::display::to_logical(p))?;
     let ray = cam.0.viewport_to_world(cam.1, vp).ok()?;
     crate::pick::ray_ground(&sim.scn, ray.origin, *ray.direction)
 }
@@ -1109,6 +1119,7 @@ fn declutter(ctx: &egui::Context, k: &Kiosk, sim: &Sim, cam: (&Camera, &GlobalTr
         let Some((foot, sc)) = feet[t] else { continue };
         let lift = crate::rings::RING_LIFT_M + pins::LIFT_M * sc;
         let Ok(a) = cam.0.world_to_viewport(cam.1, crate::frame::to_bevy(foot, sim.scn.terrain.height_at(foot) + lift)) else { continue };
+        let a = super::display::to_points(a);
         let unit = &sim.crews.units[sim.teams[t].unit];
         let lost = unit.state == abm::suppression::UnitState::Lost;
         let alarm = !lost && sim.team_in_danger(t);
@@ -1245,8 +1256,8 @@ fn offscreen_alerts(ctx: &egui::Context, k: &mut Kiosk, sim: &Sim, cam: (&Camera
     items.sort_by(|a, b| b.4.total_cmp(&a.4));
     for (i, (icon, at, col, label, _)) in items.into_iter().enumerate() {
         let v = crate::frame::to_bevy(at, sim.scn.terrain.height_at(at) + 20.0);
-        let shown = cam.0.world_to_viewport(cam.1, v).ok();
-        if shown.is_some_and(|s| seen.contains(egui::pos2(s.x, s.y))) {
+        let shown = cam.0.world_to_viewport(cam.1, v).ok().map(|s| super::display::to_points(s).to_vec2());
+        if shown.is_some_and(|s| seen.contains(s.to_pos2())) {
             continue;
         }
         // the direction on the screen; behind the camera it is turned round
@@ -1300,7 +1311,7 @@ fn offscreen_alerts(ctx: &egui::Context, k: &mut Kiosk, sim: &Sim, cam: (&Camera
 }
 
 /// The evacuation being chosen, on its district: who, where to and how
-/// long (a dial: preparation, departures, the road), «Evacua» / «Annulla».
+/// long (a dial: preparation, departures, the road), «Evacua» / «Chiudi».
 /// In the same pause the choice can be changed: another district replaces
 /// it, and the district itself offers to take it back.
 fn confirm_bubble(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, cam: (&Camera, &GlobalTransform)) {
@@ -1370,8 +1381,10 @@ fn confirm_bubble(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, cam: (&Came
                         Err(e) => k.notify(e),
                     }
                 }
-                let r = ui.add(secondary(rocca::tr!("Annulla")));
-                crate::playtest::control("Annulla", &r, true);
+                // «Chiudi», not «Annulla»: the evacuation is not started yet, and
+                // «Annulla» read as if it could be called off (a player, 2026-11-19)
+                let r = ui.add(secondary(rocca::tr!("Chiudi")));
+                crate::playtest::control("Chiudi", &r, true);
                 close |= r.clicked();
             });
             if let (Some(e), false) = (other, this_pause) {
@@ -1488,6 +1501,20 @@ fn mute_button(ui: &mut egui::Ui, prefs: &mut crate::sound::AudioPrefs) -> egui:
     if r.clicked() {
         prefs.muted = !prefs.muted;
         prefs.save();
+    }
+    r
+}
+
+/// Full screen on and off (also F11; in the browser F11 reaches the game, not
+/// the browser).
+fn full_screen_button(ui: &mut egui::Ui) -> egui::Response {
+    use super::icons::{self, Icon};
+    let full = super::display::full();
+    let r = ui.add(secondary("   "))
+        .on_hover_text(if full { rocca::tr!("Esci dallo schermo intero (F11)") } else { rocca::tr!("Schermo intero (F11)") });
+    icons::draw(ui.painter(), egui::Rect::from_center_size(r.rect.center(), egui::vec2(20.0, 20.0)), if full { Icon::Shrink } else { Icon::Expand }, Color32::WHITE);
+    if r.clicked() {
+        super::display::toggle();
     }
     r
 }
@@ -1633,6 +1660,27 @@ fn operator_body(ui: &mut egui::Ui, k: &mut Kiosk, gfx: &mut crate::quality::Gra
     if ui.add_sized([ui.available_width(), h], secondary(rocca::tr!("Vista iniziale"))).clicked() {
         k.reset_view = true;
     }
+    // The interface's size and full screen (a player on a 1920×1080 laptop:
+    // labels, badges and roads on top of each other, 2026-11-19)
+    section(ui, rocca::tr!("Interfaccia:"));
+    choices(ui, 4, |ui, w| {
+        use super::display;
+        let z = display::zoom();
+        let r = ui.add_enabled(z > display::STEPS[0] + 1e-3, secondary("−").min_size(egui::vec2(w, h)))
+            .on_hover_text(rocca::tr!("Più piccola"));
+        crate::playtest::control("Interfaccia più piccola", &r, true);
+        if r.clicked() { display::step(-1); }
+        ui.add_sized([w, h], egui::Label::new(RichText::new(format!("{:.0}%", z * 100.0)).size(17.0).strong().color(Color32::WHITE)));
+        let r = ui.add_enabled(z < display::STEPS[display::STEPS.len() - 1] - 1e-3, secondary("+").min_size(egui::vec2(w, h)))
+            .on_hover_text(rocca::tr!("Più grande"));
+        crate::playtest::control("Interfaccia più grande", &r, true);
+        if r.clicked() { display::step(1); }
+        let full = display::full();
+        let r = ui.add(secondary("").min_size(egui::vec2(w, h)))
+            .on_hover_text(if full { rocca::tr!("Esci dallo schermo intero (F11)") } else { rocca::tr!("Schermo intero (F11)") });
+        super::icons::draw(ui.painter(), egui::Rect::from_center_size(r.rect.center(), egui::vec2(20.0, 20.0)), if full { super::icons::Icon::Shrink } else { super::icons::Icon::Expand }, Color32::WHITE);
+        if r.clicked() { display::toggle(); }
+    });
     section(ui, rocca::tr!("Audio:"));
     let before = *audio;
     choices(ui, 2, |ui, w| {

@@ -18,6 +18,10 @@ pub enum Icon {
     Check,
     Clock,
     Drop,
+    /// Four corners pointing out: full screen.
+    Expand,
+    /// Four corners pointing in: leave full screen.
+    Shrink,
 }
 
 fn poly(p: &Painter, r: Rect, pts: &[(f32, f32)], fill: Color32) {
@@ -94,6 +98,16 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, col: Color32) {
         Icon::Check => {
             p.line_segment([at(r, 0.15, 0.55), at(r, 0.4, 0.8)], st);
             p.line_segment([at(r, 0.4, 0.8), at(r, 0.88, 0.25)], st);
+        }
+        Icon::Expand | Icon::Shrink => {
+            // a corner bracket in each corner; for «Shrink» drawn at the middle's side
+            let (o, i) = if icon == Icon::Expand { (0.1, 0.38) } else { (0.38, 0.1) };
+            for (sx, sy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                let f = |v: f32, side: f32| if side == 0.0 { v } else { 1.0 - v };
+                let corner = at(r, f(o, sx), f(o, sy));
+                p.line_segment([corner, at(r, f(i, sx), f(o, sy))], st);
+                p.line_segment([corner, at(r, f(o, sx), f(i, sy))], st);
+            }
         }
     }
 }
