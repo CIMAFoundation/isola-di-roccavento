@@ -367,6 +367,9 @@ fn kiosk_systems(app: &mut App) {
     // (`EguiPrimaryContextPass`, in `PostUpdate`), no longer in `Update`
     // before `kiosk::step`: what is clicked there reaches `step` on the next frame.
     app.add_systems(bevy_egui::EguiPrimaryContextPass, kiosk::ui::draw.run_if(in_state(AppState::Playing)));
+    // full screen (F11, the button) and the interface's size saved at the last visit
+    app.add_systems(Startup, kiosk::display::load);
+    app.add_systems(Update, kiosk::display::toggle_system);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(bevy_egui::EguiPrimaryContextPass, kiosk::ui::fps.after(kiosk::ui::draw).run_if(in_state(AppState::Playing)));
     app.add_systems(Update, near_cover::update.run_if(in_state(AppState::Playing)));

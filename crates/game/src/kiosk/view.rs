@@ -213,7 +213,8 @@ pub fn camera(
     let Ok((mut orbit, mut tf, mut camera, gt, mut dof)) = query.single_mut() else { return };
     // The map is drawn left of the side bar, framed in what can be seen.
     if let Ok(w) = windows.single() {
-        let side = (kiosk.side_w * w.scale_factor()).round() as u32;
+        // the bar is in egui points: the interface's size (`display`) is between them and the window's pixels
+        let side = (kiosk.side_w * super::display::zoom() * w.scale_factor()).round() as u32;
         let full = UVec2::new(w.physical_width(), w.physical_height());
         let size = UVec2::new(full.x.saturating_sub(side).max(1), full.y.max(1));
         if refit.0 != Some(size) {
