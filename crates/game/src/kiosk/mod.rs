@@ -119,6 +119,10 @@ pub struct Kiosk {
     pub drag_pan: Vec2,
     /// The pad moved last, not the mouse: the aim is the centre of the screen.
     pub pad_aim: bool,
+    /// The tutorial is over and its closing card is on show, the world still
+    /// (`screens::tutorial_end`; before 2026-11-19 it cut straight to the
+    /// choice of the fire).
+    pub debrief: bool,
     /// `Sim::generation` the previews were computed at.
     plans_at: u64,
     /// A short message (refused order, event) and its age in real seconds.
@@ -211,6 +215,7 @@ impl Kiosk {
             dragging: None,
             drag_pan: Vec2::ZERO,
             pad_aim: false,
+            debrief: false,
             plans_at: 0,
             notice: None,
             log_seen: 0,
@@ -235,6 +240,7 @@ impl Kiosk {
         self.phase_t = 0.0;
         self.notice = None;
         self.menu = false;
+        self.debrief = false;
         self.clear_selection();
     }
 
@@ -556,7 +562,7 @@ pub fn step(time: Res<Time>, mut kiosk: ResMut<Kiosk>, mut sim: ResMut<Sim>, mut
         }
     }
     sim.speed = match k.phase {
-        _ if k.frozen || k.menu => 0.0,
+        _ if k.frozen || k.menu || k.debrief => 0.0,
         // Mario chooses how fast the world moves (0 = still)
         _ if mario.active => mario.simulation_speed,
         Phase::Intro => k.demo_speed,
@@ -582,7 +588,10 @@ pub fn step(time: Res<Time>, mut kiosk: ResMut<Kiosk>, mut sim: ResMut<Sim>, mut
         k.log_seen = sim.log.len();
     }
     match k.phase {
-        Phase::Tutorial if k.expect() == Some(Expect::Over) && (sim.is_over() || sim.game.evacuation_finished()) => k.enter(Phase::Scenario),
+        Phase::Tutorial if !k.debrief && k.expect() == Some(Expect::Over) && (sim.is_over() || sim.game.evacuation_finished()) => {
+            k.clear_selection();
+            k.debrief = true;
+        }
         Phase::Gioco if sim.is_over() => {
             k.enter(Phase::Fine);
         }
