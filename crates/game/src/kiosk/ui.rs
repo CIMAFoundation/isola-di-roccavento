@@ -204,6 +204,11 @@ pub fn draw(
             }
             screens::end(ctx, k, &mut sim, &mut restarted, faces.as_deref());
         }
+        // the tutorial's closing card: the map stays still behind it
+        Phase::Tutorial if k.debrief => {
+            k.side_w = 0.0;
+            screens::tutorial_end(ctx, k, &sim, faces.as_deref());
+        }
         Phase::Tutorial | Phase::Gioco => {
             let r = ctx.viewport_rect();
             k.side_w = if compact(ctx) && r.width() > r.height() && k.phase == Phase::Tutorial { (r.width() * 0.37).clamp(220.0, 316.0) } else { 0.0 };

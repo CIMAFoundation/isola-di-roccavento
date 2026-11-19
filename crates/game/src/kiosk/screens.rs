@@ -683,6 +683,84 @@ fn place_words(place: usize, of: usize) -> String {
     }
 }
 
+/// The tutorial's closing card (user, 2026-11-19: it cut straight to the
+/// choice of the fire): how the evacuation went, in the tutorial's own
+/// numbers, what is different in the game, and «Scegli l'incendio». No stars
+/// and no board: the tutorial is scripted.
+pub fn tutorial_end(ctx: &egui::Context, k: &mut Kiosk, sim: &Sim, faces: Option<&Portraits>) {
+    let o = sim.outcome();
+    let d = sim.evac.runs.first().map(|r| r.district);
+    let place = d.map_or_else(String::new, |d| sim.districts[d].name.clone());
+    let (safe, caught) = d.map_or((0, 0), |d| (o.districts[d].safe, o.districts[d].caught));
+    let who = k.player.trim();
+    // The script itself, played as asked, leaves a family or two to the fire
+    // on some seeds (2 of 105 on seeds 1 and 2): praise first, then the fact,
+    // never a reproach for what the player was told to do.
+    let hello = if who.is_empty() { rocca::tr!("Ben fatto!").to_string() } else { rocca::tr!("Ben fatto, {0}!", who) };
+    let said = if caught == 0 {
+        rocca::tr!("{0} Tutte le persone di __{1}__ sono al sicuro.", hello, place)
+    } else {
+        rocca::tr!("{0} **{1} persone** di __{2}__ sono al sicuro; il fuoco ne ha raggiunte {3} prima che partissero. Nella partita, prima si evacua, meglio è.", hello, safe, place, caught)
+    };
+    let numbers = rocca::tr!("{0} persone al sicuro · {1} case colpite · {2} ettari bruciati", safe, o.homes_hit(), format!("{:.0}", o.hectares));
+    let next = [
+        rocca::tr!("Il tempo non si ferma da solo: premi Pausa, o clicca un borgo o una squadra, per vedere la previsione e dare ordini."),
+        rocca::tr!("Trascina le squadre dove servono ed evacua un borgo alla volta, prima che arrivi il fuoco."),
+        rocca::tr!("Alla fine le stelle di Persone, Case ed Ettari, confrontate con lo stesso incendio senza ordini, e la classifica di oggi."),
+    ];
+    let mut go = false;
+    let title = rocca::tr!("Tutorial completato");
+    if super::ui::compact(ctx) {
+        compact_page_footer(ctx, "fine_tutorial_mobile", |ui| {
+            ui.heading(title);
+            ui.add_space(4.0);
+            // dark text: it needs the light bubble, as on the computer
+            let w = (ui.available_width() - 48.0).max(120.0);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                characters::bubble(ui, Who::Volontaria, |ui| characters::says(ui, Who::Volontaria, &said, w));
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new(&numbers).size(15.0).color(GREY));
+            ui.add_space(8.0);
+            ui.label(RichText::new(rocca::tr!("Nella partita")).size(18.0).strong().color(AMBER));
+            for line in &next {
+                ui.label(RichText::new(format!("• {line}")).size(15.0).color(Color32::WHITE));
+            }
+        }, |ui| {
+            go = action(ui, rocca::tr!("Scegli l'incendio"));
+        });
+    } else {
+        backdrop(ctx, "fine_tutorial_velo", 150);
+        let width = (ctx.viewport_rect().width() - 80.0).min(820.0);
+        egui::Area::new(egui::Id::new("fine_tutorial")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+            big_card().show(ui, |ui| {
+                ui.set_width(width - 72.0);
+                ui.label(RichText::new(title).size(34.0).strong().color(Color32::WHITE));
+                ui.add_space(12.0);
+                volunteer(ui, faces, Mood::Calmo, 110.0, &said, (width - 72.0 - 170.0).max(200.0));
+                ui.add_space(10.0);
+                ui.label(RichText::new(&numbers).size(17.0).color(GREY));
+                ui.add_space(14.0);
+                ui.label(RichText::new(rocca::tr!("Nella partita")).size(22.0).strong().color(AMBER));
+                ui.add_space(2.0);
+                for line in &next {
+                    ui.add(egui::Label::new(RichText::new(format!("•  {line}")).size(17.0).color(Color32::WHITE)).wrap());
+                }
+                ui.add_space(18.0);
+                ui.vertical_centered(|ui| {
+                    let r = ui.add(primary(rocca::tr!("Scegli l'incendio")).min_size(egui::vec2(320.0, 60.0)));
+                    crate::playtest::control("Scegli l'incendio", &r, true);
+                    go = r.clicked();
+                });
+            });
+        });
+    }
+    if go {
+        choose_scenario(k);
+    }
+}
+
 pub fn end(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter<SimRestarted>, faces: Option<&Portraits>) {
     let mine = sim.outcome();
     let base = k.baseline();
