@@ -153,7 +153,8 @@ pub fn title(ctx: &egui::Context, k: &Kiosk, sim: &Sim, logo: Option<&Logo>, alp
     });
     // the title above the middle, the button below it: the fire shows between
     let off = (screen.height() * 0.2).clamp(120.0 * sc, 220.0);
-    egui::Area::new(egui::Id::new("titolo")).anchor(Align2::CENTER_CENTER, [0.0, -off]).order(egui::Order::Foreground).show(ctx, |ui| {
+    // not interactable: a click on it brought it over the settings (a player, 2026-11-19)
+    egui::Area::new(egui::Id::new("titolo")).anchor(Align2::CENTER_CENTER, [0.0, -off]).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
         ui.set_opacity(alpha);
         ui.set_width((screen.width() - 24.0).min(900.0));
         ui.vertical_centered(|ui| {
@@ -360,9 +361,14 @@ pub fn tutorial(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted: &m
                     characters::says(ui, Who::Volontaria, &text, 650.0);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let r = ui.add(secondary(rocca::tr!("Salta il tutorial")));
-                        crate::playtest::control("Salta il tutorial", &r, true);
-                        skip = r.clicked();
+                        // Only where the step waits for «Avanti»: beside a blinking «tocca a
+                        // te» it read as the thing to press (a player, 2026-11-19). The menu
+                        // (Esc) keeps «Salta il tutorial» on every step.
+                        if step.expect == Expect::Next {
+                            let r = ui.add(secondary(rocca::tr!("Salta il tutorial")));
+                            crate::playtest::control("Salta il tutorial", &r, true);
+                            skip = r.clicked();
+                        }
                         ui.label(RichText::new(format!("{}/{total}", k.step + 1)).size(15.0).color(Color32::from_gray(110)));
                         if step.expect == Expect::Next {
                             let label = rocca::tr!("Avanti");
@@ -550,11 +556,20 @@ fn star(ui: &mut egui::Ui, fill: Color32, size: f32) {
         })
         .collect();
     let p = ui.painter();
-    // a star is not convex: the inner pentagon, then a triangle per point
-    p.add(egui::Shape::convex_polygon((0..5).map(|i| pts[2 * i + 1]).collect(), fill, egui::Stroke::NONE));
-    for i in 0..5 {
-        p.add(egui::Shape::convex_polygon(vec![pts[2 * i], pts[(2 * i + 1) % 10], pts[(2 * i + 9) % 10]], fill, egui::Stroke::NONE));
+    // A star is not convex, and six convex polygons each feathered their own
+    // edges: the seams showed as lines inside it (a player, 2026-11-19). One
+    // mesh, a fan from the centre with no feathering, so it has no seams, and
+    // around it a thin closed line, which egui does smooth, for the outer edge.
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(c, fill);
+    for &q in &pts {
+        mesh.colored_vertex(q, fill);
     }
+    for i in 0..10u32 {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % 10);
+    }
+    p.add(egui::Shape::mesh(mesh));
+    p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.0 / ui.ctx().pixels_per_point(), fill)));
 }
 
 /// The three star rows, big: the category, its stars, what it counts.
@@ -955,10 +970,11 @@ fn compact_tutorial(ctx: &egui::Context, k: &mut Kiosk, sim: &mut Sim, restarted
             let buttons = |ui: &mut egui::Ui, skip: &mut bool, k: &mut Kiosk| {
                 ui.horizontal(|ui| {
                     // «Avanti» takes the room left: the easiest thing to hit
-                    let r = ui.add(secondary(rocca::tr!("Salta")).min_size(egui::vec2(60.0, 44.0)));
-                    crate::playtest::control("Salta il tutorial", &r, true);
-                    *skip = r.clicked();
+                    // as on the computer: no «Salta» beside a step that waits for the player
                     if expect == Expect::Next {
+                        let r = ui.add(secondary(rocca::tr!("Salta")).min_size(egui::vec2(60.0, 44.0)));
+                        crate::playtest::control("Salta il tutorial", &r, true);
+                        *skip = r.clicked();
                         let r = ui.add_sized([ui.available_width(), 44.0], primary(rocca::tr!("Avanti")));
                         crate::playtest::control("Avanti", &r, true);
                         if r.clicked() { k.done(Expect::Next); }
