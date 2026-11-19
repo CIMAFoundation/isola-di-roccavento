@@ -19,6 +19,7 @@
 //! | `dist`, `yaw`, `pitch` | the view, metres and degrees                           |
 //! | `menu`   | `1`: the settings menu (F2) open                                      |
 //! | `esc`    | `1`: the game menu (Esc) open, in the tutorial or the game             |
+//! | `scala`  | the interface's size, `0.6`..`1.6` (settings, «Interfaccia»; else 1)   |
 //! | `iso`    | `0`: no isochrones (lines and labels)                                |
 //! | `marks`  | `0`: no team, order, hex, road or flag marks on the map              |
 //! | `ui`     | `0`: no interface at all (panels, labels, buttons)                   |
@@ -88,6 +89,8 @@ struct State {
     hide: SnapHide,
     menu: bool,
     esc: bool,
+    /// `scala=<f>`: the interface's size (`display`), 1 if not given.
+    scala: Option<f32>,
     mario: bool,
     /// `mario=<x>:<y>`: where Mario starts instead of beside the fire.
     mario_at: Option<Vec2>,
@@ -146,6 +149,7 @@ fn parse(spec: &str) -> Vec<State> {
                     "pitch" => st.pitch = v.parse().ok(),
                     "menu" => st.menu = v == "1",
                     "esc" => st.esc = v == "1",
+                    "scala" => st.scala = v.parse().ok(),
                     "iso" => st.hide.iso = v == "0",
                     "marks" => st.hide.marks = v == "0",
                     "ui" => st.hide.ui = v == "0",
@@ -325,6 +329,7 @@ fn apply(st: &State, k: &mut Kiosk, sim: &mut Sim, restarted: &mut MessageWriter
     }
     k.operator = st.menu;
     k.menu = st.esc;
+    super::display::set(st.scala.unwrap_or(1.0).clamp(super::display::STEPS[0], super::display::STEPS[super::display::STEPS.len() - 1]));
     k.frozen = !st.live;
     k.follow = false;
     if let Some(t) = st.team {

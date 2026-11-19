@@ -23,7 +23,7 @@ pub fn zoom() -> f32 {
     f32::from_bits(ZOOM.load(Ordering::Relaxed))
 }
 
-fn set(z: f32) {
+pub(super) fn set(z: f32) {
     ZOOM.store(z.to_bits(), Ordering::Relaxed);
 }
 
